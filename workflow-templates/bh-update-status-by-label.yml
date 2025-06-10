@@ -1,82 +1,108 @@
-# This workflow will run once a day
+name: Update Project Cards
+
+# Trigger the workflow daily at midnight
 on:
   schedule:
-    - cron: '0 0 * * *'  # Runs daily at midnight UTC
-  workflow_dispatch: # Allow manual trigger
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual trigger for testing
 
 jobs:
-  check-and-update-issues:
+  update-cards:
     runs-on: ubuntu-latest
-    
+
     steps:
       # Step 1: Check out the repository
       - name: Checkout repository
         uses: actions/checkout@v3
-      
-      # Step 2: Set up Node.js (for running JavaScript-based scripts)
+
+      # Step 2: Set up Node.js
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '16' # You can use a different version of Node.js if necessary
-      
+          node-version: '16'
+
       # Step 3: Install dependencies
       - name: Install dependencies
         run: |
-          npm install axios
+          npm install axios dotenv
 
-      # Step 4: Run the script to update issue statuses
-      - name: Check issues and update status
+      # Step 4: Run the Node.js script to update project cards
+      - name: Update project cards
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub token for authentication
-          PROJECT_ID: ${{ secrets.BH_SW_BOARD_ID }}      # You should store your project board ID in GitHub Secrets
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # GitHub Personal Access Token stored in secrets
+          PROJECT_ID: ${{ secrets.PROJECT_ID }}      # Project ID stored in secrets
         run: |
           node -e "
-            const axios = require('axios');
-            const token = process.env.GITHUB_TOKEN;
-            const projectId = process.env.BH_SW_BOARD_ID;
+          require('dotenv').config();
+          const axios = require('axios');
 
-            const headers = {
-              'Authorization': \`Bearer \${token}\`,
-              'Accept': 'application/vnd.github.v3+json',
-            };
+          const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+          const PROJECT_ID = process.env.PROJECT_ID;
 
-            // Fetch all issues from the project board
-            async function updateIssueStatus() {
-              try {
-                const { data: issues } = await axios.get(\`https://api.github.com/projects/columns/cards\`, {
-                  params: { project_id: projectId },
-                  headers: headers,
-                });
+          if (!GITHUB_TOKEN || !PROJECT_ID) {
+            console.error('Error: GITHUB_TOKEN and PROJECT_ID must be set as environment variables.');
+            process.exit(1);
+          }
 
-                for (const issue of issues) {
-                  const { labels, id } = issue.content;
+          const headers = {
+            Authorization: \`Bearer \${GITHUB_TOKEN}\`,
+            Accept: 'application/vnd.github.v3+json',
+          };
 
-                  // Check the labels on the issue
-                  let status = '';
-                  if (labels.some(label => label.name === 'P0')) {
-                    status = 'P0';
-                  } else if (labels.some(label => label.name === 'P1')) {
-                    status = 'P1';
-                  } else if (labels.some(label => label.name === 'P2')) {
-                    status = 'P2';
-                  } else if (labels.some(label => label.name === 'P3')) {
-                    status = 'P3';
-                  }
+          async function getProjectColumns(projectId) {
+            const response = await axios.get(\`https://api.github.com/projects/\${projectId}/columns\`, { headers });
+            return response.data;
+          }
 
-                  // If a matching label is found, update the status field
-                  if (status) {
-                    await axios.patch(\`https://api.github.com/projects/columns/cards/\${id}\`, {
-                      note: \`Status: \${status}\`,
-                    }, {
-                      headers: headers,
-                    });
-                    console.log(\`Updated issue \${id} with status: \${status}\`);
+          async function getColumnCards(columnId) {
+            const response = await axios.get(\`https://api.github.com/projects/columns/\${columnId}/cards\`, { headers });
+            return response.data;
+          }
+
+          async function getIssueDetails(issueUrl) {
+            const response = await axios.get(issueUrl, { headers });
+            return response.data;
+          }
+
+          async function moveCard(cardId, newColumnId) {
+            await axios.post(
+              \`https://api.github.com/projects/columns/cards/\${cardId}/moves\`,
+              { position: 'top', column_id: newColumnId },
+              { headers }
+            );
+          }
+
+          async function updateProjectCards(projectId) {
+            const columns = await getProjectColumns(projectId);
+            const columnMap = {};
+            columns.forEach(column => columnMap[column.name] = column.id);
+
+            for (const column of columns) {
+              const cards = await getColumnCards(column.id);
+
+              for (const card of cards) {
+                if (!card.content_url) continue; // Skip note cards
+
+                const issue = await getIssueDetails(card.content_url);
+                let targetColumnId = null;
+
+                for (const label of issue.labels) {
+                  if (columnMap[label.name]) {
+                    targetColumnId = columnMap[label.name];
+                    break;
                   }
                 }
-              } catch (error) {
-                console.error('Error updating issue status:', error);
+
+                if (targetColumnId && targetColumnId !== column.id) {
+                  await moveCard(card.id, targetColumnId);
+                  console.log(\`Moved card \${card.id} (Issue #\${issue.number}) to column \${targetColumnId}.\`);
+                }
               }
             }
+          }
 
-            updateIssueStatus();
+          updateProjectCards(PROJECT_ID)
+            .then(() => console.log('Project cards updated successfully.'))
+            .catch(error => console.error('Error updating project cards:', error.response?.data || error.message));
           "
+
