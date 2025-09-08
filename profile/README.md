@@ -13,9 +13,11 @@ Welcome to the Tenstorrent AI ULC GitHub Page! Tenstorrent builds computers for 
 - [RISCV Arch tests](https://github.com/tenstorrent/riscv_arch_tests)
 - [RISC-V References Model (Instruction Set Simulator) - Whisper](https://github.com/tenstorrent/whisper)
 
-### System IP
+### Toolchain
 - [GCC](https://gcc.gnu.org/git/?p=gcc.git;a=commit;h=4aa01ecc5c1389d1cdf5721b936993ba17b96178)
 - [LLVM](https://github.com/llvm/llvm-project/commit/e934a39e01b9eedd8091cc1505be3a4ad5cad12b)
+
+### Developer Tools
 - [QEMU](https://github.com/qemu/qemu/commit/997570359ecd11347ecadf309b485f7ce7bd018e)
 
 ### Tensix AI IP
