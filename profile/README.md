@@ -18,7 +18,7 @@ Welcome to the Tenstorrent AI ULC GitHub Page! Tenstorrent builds computers for 
 - [LLVM](https://github.com/llvm/llvm-project/commit/e934a39e01b9eedd8091cc1505be3a4ad5cad12b)
 
 ### Developer Tools
-- [QEMU](https://github.com/qemu/qemu/commit/997570359ecd11347ecadf309b485f7ce7bd018e)
+- [QEMU](https://github.com/qemu/qemu) 
 
 ### Tensix AI IP
 - [Open Tenstorrent ISA Spec](https://github.com/tenstorrent/tt-isa-documentation/tree/main)
