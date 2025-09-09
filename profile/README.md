@@ -10,8 +10,10 @@ Welcome to the Tenstorrent AI ULC GitHub Page! Tenstorrent builds computers for 
 
 ### RISC-V
 - [Riescue - Directed Test Framework and Library, RISC-V Compliance Test Generator](https://github.com/tenstorrent/riescue)
-- [RISCV Arch tests](https://github.com/tenstorrent/riscv_arch_tests)
+- [RISC-V Arch tests](https://github.com/tenstorrent/riscv_arch_tests)
 - [RISC-V References Model (Instruction Set Simulator) - Whisper](https://github.com/tenstorrent/whisper)
+- [RISC-V Core DV Kit](https://github.com/tenstorrent/rv-core-dv-kit)
+- [cosim-arch-checker](https://github.com/tenstorrent/cosim-arch-checker)
 
 ### Toolchain
 - [GCC](https://gcc.gnu.org/git/?p=gcc.git;a=commit;h=4aa01ecc5c1389d1cdf5721b936993ba17b96178)
