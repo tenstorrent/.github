@@ -1,0 +1,71 @@
+name: Daily Bug Report Digest
+
+on:
+  workflow_call:
+    secrets:
+      SLACK_WEBHOOK:
+        required: true
+
+jobs:
+  generate-bug-digest:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repositories
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v3
+      with:
+        python-version: '3.9'
+
+    - name: Collect Bug Reports
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        # Script to collect and aggregate open bug reports
+        python <<EOF
+        import os
+        import requests
+        from github import Github
+
+        # Initialize GitHub client
+        g = Github(os.environ['GITHUB_TOKEN'])
+
+        # Get current repository
+        current_repo = os.environ['GITHUB_REPOSITORY']
+
+        # Initialize GitHub client
+        g = Github(os.environ['GITHUB_TOKEN'])
+
+        # Collect bugs for current repository
+        repo = g.get_repo(current_repo)
+        bugs = repo.get_issues(state='open', labels=['bug'])
+
+        # Compile digest
+        digest = {}
+        
+        if bugs.totalCount > 0:
+            digest[repo_name] = [
+                {
+                    'title': issue.title,
+                    'url': issue.html_url,
+                    'created_at': issue.created_at.isoformat()
+                } for issue in bugs
+            ]
+
+        # Send to Slack if there are any bugs
+        if digest:
+            slack_message = "Daily Bug Report Digest:\n\n"
+            for repo, bugs in digest.items():
+                slack_message += f"*{repo}*:\n"
+                for bug in bugs:
+                    slack_message += f"- {bug['title']} (Created: {bug['created_at']})\n   {bug['url']}\n"
+            
+            requests.post(os.environ['SLACK_WEBHOOK'], json={
+                'text': slack_message
+            })
+        EOF
