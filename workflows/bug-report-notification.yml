@@ -1,0 +1,39 @@
+name: Bug Report Notification
+
+on:
+  workflow_call:
+    secrets:
+      SLACK_WEBHOOK:
+        required: true
+
+jobs:
+  generate-bug-digest:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repositories
+      uses: actions/checkout@v3
+    
+   - name: Collect Bug Reports
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      run: |
+        python <<EOF
+        import os
+        import requests
+        from github import Github
+
+        # Get current repository
+        current_repo = os.environ['GITHUB_REPOSITORY']
+
+        # Initialize GitHub client
+        g = Github(os.environ['GITHUB_TOKEN'])
+
+        # Collect bugs for current repository
+        repo = g.get_repo(current_repo)
+        bugs = repo.get_issues(state='open', labels=['bug'])
+
+        # ... rest of the script
+        EOF
+        curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" $SLACK_WEBHOOK
