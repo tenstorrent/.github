@@ -38,9 +38,6 @@ jobs:
         # Get current repository
         current_repo = os.environ['GITHUB_REPOSITORY']
 
-        # Initialize GitHub client
-        g = Github(os.environ['GITHUB_TOKEN'])
-
         # Collect bugs for current repository
         repo = g.get_repo(current_repo)
         bugs = repo.get_issues(state='open', labels=['bug'])
