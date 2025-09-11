@@ -34,6 +34,31 @@ jobs:
         repo = g.get_repo(current_repo)
         bugs = repo.get_issues(state='open', labels=['bug'])
 
-        # ... rest of the script
+        # Create slack payload
+        PAYLOAD=$(cat <<EOF
+        {
+          "text": "New Bug Report in *${GITHUB_REPOSITORY}*",
+          "attachments": [
+            {
+              "color": "#FF0000",
+              "title": "${GITHUB_EVENT_PATH}",
+              "title_link": "${GITHUB_EVENT_PATH}",
+              "fields": [
+                {
+                  "title": "Title",
+                  "value": "${{ github.event.issue.title }}",
+                  "short": false
+                },
+                {
+                  "title": "Reporter",
+                  "value": "${{ github.event.issue.user.login }}",
+                  "short": true
+                }
+              ]
+            }
+          ]
+        }
         EOF
+        )
+        
         curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" $SLACK_WEBHOOK
