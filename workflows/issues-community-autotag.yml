@@ -17,8 +17,10 @@ env:
 jobs:
   community-labeling:
     # Whitelist specific repositories for testing...
-    if: >
-      github.repository == 'tenstorrent/testautolabel' 
+    # ----
+    # Switch to the label method of skipping the workflow once tested in all repos
+    # !contains(github.event.repository.labels.*.name, 'ignore-org-workflow')
+    if: github.repository == 'tenstorrent/testautolabel' 
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -69,7 +71,7 @@ jobs:
       - name: Check organization membership
         id: check_membership
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AUTOLABEL_COMMUNITY_ISSUES }}
           USERNAME: ${{ steps.init.outputs.username }}
           ORG_NAME: ${{ steps.init.outputs.org_name }}
         run: |
@@ -206,7 +208,7 @@ jobs:
       - name: Apply community label
         if: steps.check_membership.outputs.is_member == 'false'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AUTOLABEL_COMMUNITY_ISSUES }}
         run: |
           set -e
           
