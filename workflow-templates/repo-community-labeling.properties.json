@@ -1,0 +1,8 @@
+{
+    "name": "Community Issue Auto-Labeling",
+    "description": "Automatically label issues and PRs from external contributors with 'community' label",
+    "iconName": "workflow",
+    "categories": [
+        "automation"
+    ]
+}

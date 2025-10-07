@@ -1,0 +1,13 @@
+name: "Auto-label Community Issues"
+
+on:
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+jobs:
+  community-labeling:
+    uses: tenstorrent/.github/.github/workflows/issues-community-autotag.yml@main
+    secrets:
+      AUTOLABEL_COMMUNITY_ISSUES: ${{ secrets.AUTOLABEL_COMMUNITY_ISSUES }}

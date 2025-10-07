@@ -1,13 +1,11 @@
 name: "Community Issue Auto-Tagging"
 
 on:
-  #
-  # Automatically run on new issues and PRs to label them as "community" in the entire organization
-  #
-  issues:
-    types: [opened]
-  pull_request:
-    types: [opened]
+  workflow_call:
+    secrets:
+      AUTOLABEL_COMMUNITY_ISSUES:
+        description: 'Token for checking organization membership and managing labels'
+        required: true
 
 env:
   LABEL_NAME: "community"
@@ -16,11 +14,6 @@ env:
 
 jobs:
   community-labeling:
-    # Whitelist specific repositories for testing...
-    # ----
-    # Switch to the label method of skipping the workflow once tested in all repos
-    # !contains(github.event.repository.labels.*.name, 'ignore-org-workflow')
-    if: github.repository == 'tenstorrent/testautolabel' 
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -144,7 +137,7 @@ jobs:
       - name: Ensure community label exists
         if: steps.check_membership.outputs.is_member == 'false'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.AUTOLABEL_COMMUNITY_ISSUES }}
         run: |
           set -e
           
