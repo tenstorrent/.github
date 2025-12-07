@@ -1,5 +1,5 @@
 
-Welcome to the Tenstorrent AI GitHub Page! Tenstorrent builds computers for AI. We bring together experts in the fields of computer architecture, ASIC design, advanced systems, and neural network compilers to build the next generation of computing. Here you will find repositories with in-depth information on TT hardware and software. Find the repository that best suits your needs!
+Welcome to the Tenstorrent AI GitHub Page! Tenstorrent builds computers for AI. We bring together experts in the fields of computer architecture, chip design, advanced systems, software and compilers to build the next generation of computing. Here you will find repositories with in-depth information on TT hardware and software. Find the repository that best suits your needs!
 <div align="left">
 
 # AI SW
