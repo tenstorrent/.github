@@ -1,12 +1,15 @@
-# Tenstorrent: Build, Develop, Scale.
+
 Welcome to the Tenstorrent AI GitHub Page! Tenstorrent builds computers for AI. We bring together experts in the fields of computer architecture, ASIC design, advanced systems, and neural network compilers to build the next generation of computing. Here you will find repositories with in-depth information on TT hardware and software. Find the repository that best suits your needs!
 <div align="left">
+
+# AI SW
 
 ![](https://github.com/bbeggsTT/.github/blob/patch-2/images/GitHub_Landing_SWStack.png)
 
 </div>
 
-## RISC-V and IP
+
+# RISC-V and IP
 
 ### RISC-V
 - [Riescue - Directed Test Framework and Library, RISC-V Compliance Test Generator](https://github.com/tenstorrent/riescue)
