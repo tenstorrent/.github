@@ -4,7 +4,19 @@ Welcome to the Tenstorrent AI GitHub Page! Tenstorrent builds computers for AI. 
 
 # AI SW
 
-![](https://github.com/bbeggsTT/.github/blob/patch-2/images/GitHub_Landing_SWStack.png)
+<img width="1333" height="686" alt="image" src="https://github.com/user-attachments/assets/016fc9a4-3dbc-44dc-868c-a583d7024716" />
+
+
+
+- [TT-Forge](https://github.com/tenstorrent/tt-forge)
+- [TT-NN](https://github.com/tenstorrent/tt-metal/tree/main/ttnn)
+- [TT-Metal](https://github.com/tenstorrent/tt-metal)
+- [TT-LLK](https://github.com/tenstorrent/tt-llk)
+- [TT-Lang](https://github.com/tenstorrent/tt-lang)
+
+
+
+
 
 </div>
 
