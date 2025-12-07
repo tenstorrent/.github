@@ -15,7 +15,7 @@ Welcome to the Tenstorrent AI GitHub Page! Tenstorrent builds computers for AI. 
 - [TT-Lang](https://github.com/tenstorrent/tt-lang)
 
 
-
+Check out our TT-Metal tile-native programming model guide [here](https://github.com/tenstorrent/tt-metal/blob/main/METALIUM_GUIDE.md).
 
 
 </div>
