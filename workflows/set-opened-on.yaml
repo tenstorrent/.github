@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: read
+  repository-projects: write
+  organization-projects: write
 
 jobs:
   set-opened-on:
@@ -39,9 +41,29 @@ jobs:
             }
           }' -F nodeId='${{ github.event.projects_v2_item.content_node_id }}')
 
+          # Validate the GraphQL response
+          if ! echo "$ISSUE_DATA" | jq -e '.data.node' > /dev/null 2>&1; then
+            echo "Error: Failed to fetch issue data from content_node_id" >&2
+            echo "Response: $ISSUE_DATA" >&2
+            exit 1
+          fi
+
           RAW_CREATED=$(echo "$ISSUE_DATA" | jq -r '.data.node.createdAt')
           OPENED_DATE="${RAW_CREATED%%T*}"
           ISSUE_NUMBER=$(echo "$ISSUE_DATA" | jq -r '.data.node.number')
+
+          # Validate extracted values are not null
+          if [ -z "$RAW_CREATED" ] || [ "$RAW_CREATED" = "null" ]; then
+            echo "Error: Failed to extract createdAt from issue data" >&2
+            echo "Issue data: $ISSUE_DATA" >&2
+            exit 1
+          fi
+
+          if [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "null" ]; then
+            echo "Error: Failed to extract issue number from issue data" >&2
+            echo "Issue data: $ISSUE_DATA" >&2
+            exit 1
+          fi
 
           echo "opened_date=$OPENED_DATE" >> "$GITHUB_OUTPUT"
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
