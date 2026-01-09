@@ -1,0 +1,165 @@
+name: Set "Opened On" in Project
+
+on:
+  workflow_dispatch:
+  projects_v2_item:
+    types: [created]
+
+permissions:
+  contents: read
+  repository-projects: write
+  organization-projects: write
+
+jobs:
+  set-opened-on:
+    # Only run for issues (not PRs or other content types)
+    if: github.event.projects_v2_item.content_type == 'Issue'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.DATE_AUTOMATION }}
+      PROJECT_ID: "PVT_kwDOA9MHEM4AgKVv"
+      FIELD_ID: "PVTF_lADOA9MHEM4AgKVvzg4bxWU"
+    steps:
+      - name: Extract Issue Date
+        id: setup
+        run: |
+          set -e
+          
+          if [ -z "$GH_TOKEN" ]; then
+            echo "Error: GH_TOKEN (DATE_AUTOMATION secret) is not set" >&2
+            exit 1
+          fi
+
+          # Fetch issue details from content_node_id
+          ISSUE_DATA=$(gh api graphql -f query='
+          query($nodeId:ID!){
+            node(id:$nodeId){
+              ... on Issue {
+                createdAt
+                number
+              }
+            }
+          }' -F nodeId='${{ github.event.projects_v2_item.content_node_id }}')
+
+          # Check for GraphQL rate limit errors
+          if echo "$ISSUE_DATA" | jq -e '.errors[]? | select((.type == "RATE_LIMITED") or (.message | test("(?i)rate limit"))) ' > /dev/null 2>&1; then
+            echo "Error: GitHub GraphQL API rate limit reached while fetching issue data" >&2
+            echo "Response: $ISSUE_DATA" >&2
+            exit 1
+          fi
+          # Validate the GraphQL response
+          if ! echo "$ISSUE_DATA" | jq -e '.data.node' > /dev/null 2>&1; then
+            echo "Error: Failed to fetch issue data from content_node_id" >&2
+            echo "Response: $ISSUE_DATA" >&2
+            exit 1
+          fi
+
+          RAW_CREATED=$(echo "$ISSUE_DATA" | jq -r '.data.node.createdAt')
+          OPENED_DATE="${RAW_CREATED%%T*}"
+          ISSUE_NUMBER=$(echo "$ISSUE_DATA" | jq -r '.data.node.number')
+
+          # Validate extracted values are not null
+          if [ -z "$RAW_CREATED" ] || [ "$RAW_CREATED" = "null" ]; then
+            echo "Error: Failed to extract createdAt from issue data" >&2
+            echo "Issue data: $ISSUE_DATA" >&2
+            exit 1
+          fi
+
+          if [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "null" ]; then
+            echo "Error: Failed to extract issue number from issue data" >&2
+            echo "Issue data: $ISSUE_DATA" >&2
+            exit 1
+          fi
+
+          echo "opened_date=$OPENED_DATE" >> "$GITHUB_OUTPUT"
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Set Date on Project Item
+        run: |
+          set -e
+
+          # Helper function to check if response contains rate limit error
+          # Returns 0 if rate limit error found, 1 otherwise
+          check_rate_limit_error() {
+            local RESPONSE="$1"
+            local CONTEXT="$2"
+
+            if echo "$RESPONSE" | grep -q "API rate limit"; then
+              echo "Error while $CONTEXT: GitHub API rate limit exceeded for DATE_AUTOMATION token" >&2
+
+              # Extract rate limit details from headers if available (use f2- to handle multiple colons)
+              RESET_TIME=$(echo "$RESPONSE" | grep -i "x-ratelimit-reset:" | head -1 | cut -d: -f2- | tr -d ' \r')
+              REMAINING=$(echo "$RESPONSE" | grep -i "x-ratelimit-remaining:" | head -1 | cut -d: -f2- | tr -d ' \r')
+              RESOURCE=$(echo "$RESPONSE" | grep -i "x-ratelimit-resource:" | head -1 | cut -d: -f2- | tr -d ' \r')
+
+              # Print each available rate limit detail individually
+              if [ -n "$RESOURCE" ]; then
+                echo "Rate limit resource: $RESOURCE" >&2
+              fi
+              if [ -n "$REMAINING" ]; then
+                echo "Remaining: $REMAINING" >&2
+              fi
+              if [ -n "$RESET_TIME" ]; then
+                # GitHub Actions uses Ubuntu runners, so GNU date format is safe
+                RESET_DATE=$(date -u -d "@$RESET_TIME" 2>/dev/null || echo "unknown")
+                echo "Resets at: $RESET_DATE" >&2
+              fi
+
+              echo "" >&2
+              echo "Full response:" >&2
+              echo "$RESPONSE" >&2
+              return 0
+            fi
+            return 1
+          }
+
+          # Item already exists in project - use the node_id from the event
+          ITEM_ID="${{ github.event.projects_v2_item.node_id }}"
+
+          # Set the "Opened On" field value
+          UPDATE_RESP=$(gh api graphql -f query='
+          mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $date:Date!){
+            updateProjectV2ItemFieldValue(input:{
+              projectId:$projectId,
+              itemId:$itemId,
+              fieldId:$fieldId,
+              value:{ date:$date }
+            }){
+              projectV2Item{ id }
+            }
+          }' \
+          -F projectId="$PROJECT_ID" \
+          -F itemId="$ITEM_ID" \
+          -F fieldId="$FIELD_ID" \
+          -F date='${{ steps.setup.outputs.opened_date }}' --include 2>&1) || {
+            if check_rate_limit_error "$UPDATE_RESP" "setting field value"; then
+              exit 1
+            fi
+            echo "Error: Failed to set field value" >&2
+            echo "Full response:" >&2
+            echo "$UPDATE_RESP" >&2
+            exit 1
+          }
+
+          # Separate JSON body from headers for jq parsing
+          # Extract everything after the first line starting with { or [
+          UPDATE_BODY=$(echo "$UPDATE_RESP" | sed -n '/^[{[]/,$p')
+
+          if echo "$UPDATE_BODY" | jq -e '.errors' > /dev/null 2>&1; then
+            echo "Error: Failed to set field value:" >&2
+            echo "$UPDATE_BODY" | jq '.errors' >&2
+
+            # Check for scope/permission issues
+            if echo "$UPDATE_BODY" | jq -e '.errors[] | select(.type == "INSUFFICIENT_SCOPES" or (.message // "" | contains("permission")))' > /dev/null 2>&1; then
+              echo "" >&2
+              echo "Token may lack 'project' or 'write:project' scope" >&2
+            fi
+            exit 1
+          fi
+
+          if ! echo "$UPDATE_BODY" | jq -e '.data.updateProjectV2ItemFieldValue.projectV2Item.id' > /dev/null 2>&1; then
+            echo "Error: Field update returned unexpected response" >&2
+            exit 1
+          fi
+
+          echo "Successfully set 'Opened On' to ${{ steps.setup.outputs.opened_date }} for issue #${{ steps.setup.outputs.issue_number }}"
