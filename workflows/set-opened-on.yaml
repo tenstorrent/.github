@@ -41,6 +41,12 @@ jobs:
             }
           }' -F nodeId='${{ github.event.projects_v2_item.content_node_id }}')
 
+          # Check for GraphQL rate limit errors
+          if echo "$ISSUE_DATA" | jq -e '.errors[]? | select((.type == "RATE_LIMITED") or (.message | test("(?i)rate limit"))) ' > /dev/null 2>&1; then
+            echo "Error: GitHub GraphQL API rate limit reached while fetching issue data" >&2
+            echo "Response: $ISSUE_DATA" >&2
+            exit 1
+          fi
           # Validate the GraphQL response
           if ! echo "$ISSUE_DATA" | jq -e '.data.node' > /dev/null 2>&1; then
             echo "Error: Failed to fetch issue data from content_node_id" >&2
