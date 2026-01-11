@@ -125,18 +125,31 @@ jobs:
             fi
           done
           
-          echo "Fetched $PAGE_NUM page(s) of items"
+          TOTAL_ITEMS=$(echo "$ALL_ITEMS" | wc -l | tr -d ' ')
+          echo "Fetched $PAGE_NUM page(s) containing $TOTAL_ITEMS total item(s)"
 
           # Extract items that need processing (issues without "Opened On" date)
           ITEMS_TO_PROCESS=$(echo "$ALL_ITEMS" | jq -c 'select(.content.id != null and (.fieldValueByName.date == null or .fieldValueByName.date == ""))')
           
           if [ -z "$ITEMS_TO_PROCESS" ]; then
-            echo "No items need processing - all issues have 'Opened On' date set"
+            echo "✓ All issues already have 'Opened On' date set - no updates needed"
             exit 0
           fi
 
           TOTAL_COUNT=$(echo "$ITEMS_TO_PROCESS" | wc -l | tr -d ' ')
-          echo "Found $TOTAL_COUNT item(s) to process"
+          echo ""
+          echo "Found $TOTAL_COUNT issue(s) that need 'Opened On' date populated:"
+          
+          # Log all issues that will be processed
+          echo "$ITEMS_TO_PROCESS" | while IFS= read -r item; do
+            ISSUE_NUM=$(echo "$item" | jq -r '.content.number')
+            CREATED_AT=$(echo "$item" | jq -r '.content.createdAt')
+            CREATED_DATE="${CREATED_AT%%T*}"
+            echo "  - Issue #$ISSUE_NUM (created: $CREATED_DATE)"
+          done
+          
+          echo ""
+          echo "Starting processing..."
           echo ""
 
           SUCCESS_COUNT=0
@@ -152,14 +165,14 @@ jobs:
             if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] || \
                [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "null" ] || \
                [ -z "$ISSUE_CREATED" ] || [ "$ISSUE_CREATED" = "null" ]; then
-              echo "✗ Skipping item due to missing required data (ITEM_ID='$ITEM_ID', ISSUE_NUMBER='$ISSUE_NUMBER', ISSUE_CREATED='$ISSUE_CREATED')" >&2
+              echo "✗ ERROR: Issue #${ISSUE_NUMBER:-unknown} - Missing required data" >&2
+              echo "  ITEM_ID='$ITEM_ID', ISSUE_NUMBER='$ISSUE_NUMBER', ISSUE_CREATED='$ISSUE_CREATED'" >&2
               ERROR_COUNT=$((ERROR_COUNT + 1))
               echo ""
               continue
             fi
 
             OPENED_DATE="${ISSUE_CREATED%%T*}"
-            echo "Processing issue #$ISSUE_NUMBER..."
 
             # Set the "Opened On" field value
             UPDATE_RESP=$(gh api graphql -f query='
@@ -179,25 +192,32 @@ jobs:
             -F date="$OPENED_DATE" 2>&1)
 
             if [ $? -eq 0 ] && echo "$UPDATE_RESP" | jq -e '.data.updateProjectV2ItemFieldValue.projectV2Item.id' > /dev/null 2>&1; then
-              echo "✓ Successfully set 'Opened On' to $OPENED_DATE for issue #$ISSUE_NUMBER"
+              echo "✓ Issue #$ISSUE_NUMBER - Set 'Opened On' to $OPENED_DATE (from createdAt: $ISSUE_CREATED)"
               SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
             else
-              echo "✗ Error setting 'Opened On' for issue #$ISSUE_NUMBER" >&2
+              echo "✗ ERROR: Issue #$ISSUE_NUMBER - Failed to set 'Opened On' date" >&2
+              echo "  Attempted to set: $OPENED_DATE (from createdAt: $ISSUE_CREATED)" >&2
               
               # Try to extract error details
               if echo "$UPDATE_RESP" | jq -e '.errors' > /dev/null 2>&1; then
-                echo "  Error details:" >&2
-                echo "$UPDATE_RESP" | jq -r '.errors[] | "  - \(.message)"' >&2
+                echo "  GraphQL errors:" >&2
+                echo "$UPDATE_RESP" | jq -r '.errors[] | "    - \(.message)"' >&2
               else
                 echo "  Response: $UPDATE_RESP" >&2
               fi
               
               ERROR_COUNT=$((ERROR_COUNT + 1))
             fi
-            echo ""
           done < <(echo "$ITEMS_TO_PROCESS")
 
-          echo "Processing complete: $SUCCESS_COUNT succeeded, $ERROR_COUNT failed"
+          echo ""
+          echo "========================================="
+          echo "Processing complete:"
+          echo "  Total items in project: $TOTAL_ITEMS"
+          echo "  Items needing update: $TOTAL_COUNT"
+          echo "  Successfully updated: $SUCCESS_COUNT"
+          echo "  Failed: $ERROR_COUNT"
+          echo "========================================="
           
           # Exit with error if all items failed
           if [ "$ERROR_COUNT" -gt 0 ] && [ "$SUCCESS_COUNT" -eq 0 ]; then
