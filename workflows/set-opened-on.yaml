@@ -27,46 +27,108 @@ jobs:
             exit 1
           fi
 
-          # Fetch all items from the project
+          # Fetch all items from the project with pagination
           echo "Fetching items from project..."
-          PROJECT_DATA=$(gh api graphql -f query='
-          query($projectId:ID!){
-            node(id:$projectId){
-              ... on ProjectV2 {
-                items(first:100){
-                  nodes{
-                    id
-                    fieldValueByName(name:"Opened On"){
-                      ... on ProjectV2ItemFieldDateValue {
-                        date
-                      }
-                    }
-                    content{
-                      ... on Issue {
+          ALL_ITEMS=""
+          CURSOR=""
+          PAGE_NUM=1
+          
+          while true; do
+            echo "Fetching page $PAGE_NUM..."
+            
+            if [ -z "$CURSOR" ]; then
+              PROJECT_DATA=$(gh api graphql -f query='
+              query($projectId:ID!){
+                node(id:$projectId){
+                  ... on ProjectV2 {
+                    items(first:100){
+                      nodes{
                         id
-                        number
-                        createdAt
+                        fieldValueByName(name:"Opened On"){
+                          ... on ProjectV2ItemFieldDateValue {
+                            date
+                          }
+                        }
+                        content{
+                          ... on Issue {
+                            id
+                            number
+                            createdAt
+                          }
+                        }
+                      }
+                      pageInfo{
+                        hasNextPage
+                        endCursor
                       }
                     }
-                  }
-                  pageInfo{
-                    hasNextPage
-                    endCursor
                   }
                 }
-              }
-            }
-          }' -F projectId="$PROJECT_ID" 2>&1)
+              }' -F projectId="$PROJECT_ID" 2>&1)
+            else
+              PROJECT_DATA=$(gh api graphql -f query='
+              query($projectId:ID!, $cursor:String!){
+                node(id:$projectId){
+                  ... on ProjectV2 {
+                    items(first:100, after:$cursor){
+                      nodes{
+                        id
+                        fieldValueByName(name:"Opened On"){
+                          ... on ProjectV2ItemFieldDateValue {
+                            date
+                          }
+                        }
+                        content{
+                          ... on Issue {
+                            id
+                            number
+                            createdAt
+                          }
+                        }
+                      }
+                      pageInfo{
+                        hasNextPage
+                        endCursor
+                      }
+                    }
+                  }
+                }
+              }' -F projectId="$PROJECT_ID" -F cursor="$CURSOR" 2>&1)
+            fi
 
-          # Check for errors fetching project data
-          if [ $? -ne 0 ] || ! echo "$PROJECT_DATA" | jq -e '.data.node.items' > /dev/null 2>&1; then
-            echo "Error: Failed to fetch project data" >&2
-            echo "Response: $PROJECT_DATA" >&2
-            exit 1
-          fi
+            # Check for errors fetching project data
+            if [ $? -ne 0 ] || ! echo "$PROJECT_DATA" | jq -e '.data.node.items' > /dev/null 2>&1; then
+              echo "Error: Failed to fetch project data on page $PAGE_NUM" >&2
+              echo "Response: $PROJECT_DATA" >&2
+              exit 1
+            fi
+
+            # Extract items from this page
+            PAGE_ITEMS=$(echo "$PROJECT_DATA" | jq -c '.data.node.items.nodes[]')
+            
+            if [ -n "$PAGE_ITEMS" ]; then
+              if [ -z "$ALL_ITEMS" ]; then
+                ALL_ITEMS="$PAGE_ITEMS"
+              else
+                ALL_ITEMS="$ALL_ITEMS"$'\n'"$PAGE_ITEMS"
+              fi
+            fi
+
+            # Check if there are more pages
+            HAS_NEXT_PAGE=$(echo "$PROJECT_DATA" | jq -r '.data.node.items.pageInfo.hasNextPage')
+            
+            if [ "$HAS_NEXT_PAGE" = "true" ]; then
+              CURSOR=$(echo "$PROJECT_DATA" | jq -r '.data.node.items.pageInfo.endCursor')
+              PAGE_NUM=$((PAGE_NUM + 1))
+            else
+              break
+            fi
+          done
+          
+          echo "Fetched $PAGE_NUM page(s) of items"
 
           # Extract items that need processing (issues without "Opened On" date)
-          ITEMS_TO_PROCESS=$(echo "$PROJECT_DATA" | jq -c '.data.node.items.nodes[] | select(.content.id != null and (.fieldValueByName.date == null or .fieldValueByName.date == ""))')
+          ITEMS_TO_PROCESS=$(echo "$ALL_ITEMS" | jq -c 'select(.content.id != null and (.fieldValueByName.date == null or .fieldValueByName.date == ""))')
           
           if [ -z "$ITEMS_TO_PROCESS" ]; then
             echo "No items need processing - all issues have 'Opened On' date set"
@@ -75,12 +137,6 @@ jobs:
 
           TOTAL_COUNT=$(echo "$ITEMS_TO_PROCESS" | wc -l | tr -d ' ')
           echo "Found $TOTAL_COUNT item(s) to process"
-          
-          # Check for pagination warning
-          HAS_NEXT_PAGE=$(echo "$PROJECT_DATA" | jq -r '.data.node.items.pageInfo.hasNextPage')
-          if [ "$HAS_NEXT_PAGE" = "true" ]; then
-            echo "⚠️  Warning: Project has more than 100 items. Only processing first 100." >&2
-          fi
           echo ""
 
           SUCCESS_COUNT=0
