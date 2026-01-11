@@ -73,20 +73,36 @@ jobs:
             exit 0
           fi
 
-          TOTAL_COUNT=$(echo "$ITEMS_TO_PROCESS" | wc -l)
+          TOTAL_COUNT=$(echo "$ITEMS_TO_PROCESS" | wc -l | tr -d ' ')
           echo "Found $TOTAL_COUNT item(s) to process"
+          
+          # Check for pagination warning
+          HAS_NEXT_PAGE=$(echo "$PROJECT_DATA" | jq -r '.data.node.items.pageInfo.hasNextPage')
+          if [ "$HAS_NEXT_PAGE" = "true" ]; then
+            echo "⚠️  Warning: Project has more than 100 items. Only processing first 100." >&2
+          fi
           echo ""
 
           SUCCESS_COUNT=0
           ERROR_COUNT=0
 
-          # Process each item
-          echo "$ITEMS_TO_PROCESS" | while IFS= read -r item; do
+          # Process each item (use process substitution to avoid subshell)
+          while IFS= read -r item; do
             ITEM_ID=$(echo "$item" | jq -r '.id')
             ISSUE_NUMBER=$(echo "$item" | jq -r '.content.number')
             ISSUE_CREATED=$(echo "$item" | jq -r '.content.createdAt')
-            OPENED_DATE="${ISSUE_CREATED%%T*}"
 
+            # Validate extracted values before processing
+            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] || \
+               [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "null" ] || \
+               [ -z "$ISSUE_CREATED" ] || [ "$ISSUE_CREATED" = "null" ]; then
+              echo "✗ Skipping item due to missing required data (ITEM_ID='$ITEM_ID', ISSUE_NUMBER='$ISSUE_NUMBER', ISSUE_CREATED='$ISSUE_CREATED')" >&2
+              ERROR_COUNT=$((ERROR_COUNT + 1))
+              echo ""
+              continue
+            fi
+
+            OPENED_DATE="${ISSUE_CREATED%%T*}"
             echo "Processing issue #$ISSUE_NUMBER..."
 
             # Set the "Opened On" field value
@@ -123,9 +139,14 @@ jobs:
               ERROR_COUNT=$((ERROR_COUNT + 1))
             fi
             echo ""
-          done
+          done < <(echo "$ITEMS_TO_PROCESS")
 
           echo "Processing complete: $SUCCESS_COUNT succeeded, $ERROR_COUNT failed"
           
-          # Exit with success - we don't want to fail the workflow if individual items fail
+          # Exit with error if all items failed
+          if [ "$ERROR_COUNT" -gt 0 ] && [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "Error: All items failed to process" >&2
+            exit 1
+          fi
+          
           exit 0
