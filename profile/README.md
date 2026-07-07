@@ -26,7 +26,7 @@ Check out our TT-Metal tile-native programming model guide [here](https://github
 ### RISC-V
 - [Riescue - Directed Test Framework and Library, RISC-V Compliance Test Generator](https://github.com/tenstorrent/riescue)
 - [RISC-V Arch tests](https://github.com/tenstorrent/riscv_arch_tests)
-- [RISC-V References Model (Instruction Set Simulator) - Whisper](https://github.com/tenstorrent/whisper)
+- [RISC-V Reference Model (Instruction Set Simulator) - Whisper](https://github.com/tenstorrent/whisper)
 - [RISC-V Core DV Kit](https://github.com/tenstorrent/rv-core-dv-kit)
 - [cosim-arch-checker](https://github.com/tenstorrent/cosim-arch-checker)
 
