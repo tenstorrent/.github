@@ -2,8 +2,8 @@ name: Set "Opened On" in Project
 
 on:
   workflow_dispatch:
-  projects_v2_item:
-    types: [created]
+  schedule:
+    - cron: '*/15 * * * *'  # Run every 15 minutes
 
 permissions:
   contents: read
@@ -12,154 +12,217 @@ permissions:
 
 jobs:
   set-opened-on:
-    # Only run for issues (not PRs or other content types)
-    if: github.event.projects_v2_item.content_type == 'Issue'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.DATE_AUTOMATION }}
       PROJECT_ID: "PVT_kwDOA9MHEM4AgKVv"
       FIELD_ID: "PVTF_lADOA9MHEM4AgKVvzg4bxWU"
     steps:
-      - name: Extract Issue Date
-        id: setup
+      - name: Process Project Items
         run: |
-          set -e
+          set +e  # Don't exit on errors, handle them per-item
           
           if [ -z "$GH_TOKEN" ]; then
             echo "Error: GH_TOKEN (DATE_AUTOMATION secret) is not set" >&2
             exit 1
           fi
 
-          # Fetch issue details from content_node_id
-          ISSUE_DATA=$(gh api graphql -f query='
-          query($nodeId:ID!){
-            node(id:$nodeId){
-              ... on Issue {
-                createdAt
-                number
-              }
-            }
-          }' -F nodeId='${{ github.event.projects_v2_item.content_node_id }}')
-
-          # Check for GraphQL rate limit errors
-          if echo "$ISSUE_DATA" | jq -e '.errors[]? | select((.type == "RATE_LIMITED") or (.message | test("(?i)rate limit"))) ' > /dev/null 2>&1; then
-            echo "Error: GitHub GraphQL API rate limit reached while fetching issue data" >&2
-            echo "Response: $ISSUE_DATA" >&2
-            exit 1
-          fi
-          # Validate the GraphQL response
-          if ! echo "$ISSUE_DATA" | jq -e '.data.node' > /dev/null 2>&1; then
-            echo "Error: Failed to fetch issue data from content_node_id" >&2
-            echo "Response: $ISSUE_DATA" >&2
-            exit 1
-          fi
-
-          RAW_CREATED=$(echo "$ISSUE_DATA" | jq -r '.data.node.createdAt')
-          OPENED_DATE="${RAW_CREATED%%T*}"
-          ISSUE_NUMBER=$(echo "$ISSUE_DATA" | jq -r '.data.node.number')
-
-          # Validate extracted values are not null
-          if [ -z "$RAW_CREATED" ] || [ "$RAW_CREATED" = "null" ]; then
-            echo "Error: Failed to extract createdAt from issue data" >&2
-            echo "Issue data: $ISSUE_DATA" >&2
-            exit 1
-          fi
-
-          if [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "null" ]; then
-            echo "Error: Failed to extract issue number from issue data" >&2
-            echo "Issue data: $ISSUE_DATA" >&2
-            exit 1
-          fi
-
-          echo "opened_date=$OPENED_DATE" >> "$GITHUB_OUTPUT"
-          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
-
-      - name: Set Date on Project Item
-        run: |
-          set -e
-
-          # Helper function to check if response contains rate limit error
-          # Returns 0 if rate limit error found, 1 otherwise
-          check_rate_limit_error() {
-            local RESPONSE="$1"
-            local CONTEXT="$2"
-
-            if echo "$RESPONSE" | grep -q "API rate limit"; then
-              echo "Error while $CONTEXT: GitHub API rate limit exceeded for DATE_AUTOMATION token" >&2
-
-              # Extract rate limit details from headers if available (use f2- to handle multiple colons)
-              RESET_TIME=$(echo "$RESPONSE" | grep -i "x-ratelimit-reset:" | head -1 | cut -d: -f2- | tr -d ' \r')
-              REMAINING=$(echo "$RESPONSE" | grep -i "x-ratelimit-remaining:" | head -1 | cut -d: -f2- | tr -d ' \r')
-              RESOURCE=$(echo "$RESPONSE" | grep -i "x-ratelimit-resource:" | head -1 | cut -d: -f2- | tr -d ' \r')
-
-              # Print each available rate limit detail individually
-              if [ -n "$RESOURCE" ]; then
-                echo "Rate limit resource: $RESOURCE" >&2
-              fi
-              if [ -n "$REMAINING" ]; then
-                echo "Remaining: $REMAINING" >&2
-              fi
-              if [ -n "$RESET_TIME" ]; then
-                # GitHub Actions uses Ubuntu runners, so GNU date format is safe
-                RESET_DATE=$(date -u -d "@$RESET_TIME" 2>/dev/null || echo "unknown")
-                echo "Resets at: $RESET_DATE" >&2
-              fi
-
-              echo "" >&2
-              echo "Full response:" >&2
-              echo "$RESPONSE" >&2
-              return 0
+          # Fetch all items from the project with pagination
+          echo "Fetching items from project..."
+          ALL_ITEMS=""
+          CURSOR=""
+          PAGE_NUM=1
+          
+          while true; do
+            echo "Fetching page $PAGE_NUM..."
+            
+            if [ -z "$CURSOR" ]; then
+              PROJECT_DATA=$(gh api graphql -f query='
+              query($projectId:ID!){
+                node(id:$projectId){
+                  ... on ProjectV2 {
+                    items(first:100){
+                      nodes{
+                        id
+                        fieldValueByName(name:"Opened On"){
+                          ... on ProjectV2ItemFieldDateValue {
+                            date
+                          }
+                        }
+                        content{
+                          ... on Issue {
+                            id
+                            number
+                            createdAt
+                          }
+                        }
+                      }
+                      pageInfo{
+                        hasNextPage
+                        endCursor
+                      }
+                    }
+                  }
+                }
+              }' -F projectId="$PROJECT_ID" 2>&1)
+            else
+              PROJECT_DATA=$(gh api graphql -f query='
+              query($projectId:ID!, $cursor:String!){
+                node(id:$projectId){
+                  ... on ProjectV2 {
+                    items(first:100, after:$cursor){
+                      nodes{
+                        id
+                        fieldValueByName(name:"Opened On"){
+                          ... on ProjectV2ItemFieldDateValue {
+                            date
+                          }
+                        }
+                        content{
+                          ... on Issue {
+                            id
+                            number
+                            createdAt
+                          }
+                        }
+                      }
+                      pageInfo{
+                        hasNextPage
+                        endCursor
+                      }
+                    }
+                  }
+                }
+              }' -F projectId="$PROJECT_ID" -F cursor="$CURSOR" 2>&1)
             fi
-            return 1
-          }
 
-          # Item already exists in project - use the node_id from the event
-          ITEM_ID="${{ github.event.projects_v2_item.node_id }}"
-
-          # Set the "Opened On" field value
-          UPDATE_RESP=$(gh api graphql -f query='
-          mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $date:Date!){
-            updateProjectV2ItemFieldValue(input:{
-              projectId:$projectId,
-              itemId:$itemId,
-              fieldId:$fieldId,
-              value:{ date:$date }
-            }){
-              projectV2Item{ id }
-            }
-          }' \
-          -F projectId="$PROJECT_ID" \
-          -F itemId="$ITEM_ID" \
-          -F fieldId="$FIELD_ID" \
-          -F date='${{ steps.setup.outputs.opened_date }}' --include 2>&1) || {
-            if check_rate_limit_error "$UPDATE_RESP" "setting field value"; then
+            # Check for errors fetching project data
+            if [ $? -ne 0 ] || ! echo "$PROJECT_DATA" | jq -e '.data.node.items' > /dev/null 2>&1; then
+              echo "Error: Failed to fetch project data on page $PAGE_NUM" >&2
+              echo "Response: $PROJECT_DATA" >&2
               exit 1
             fi
-            echo "Error: Failed to set field value" >&2
-            echo "Full response:" >&2
-            echo "$UPDATE_RESP" >&2
-            exit 1
-          }
 
-          # Separate JSON body from headers for jq parsing
-          # Extract everything after the first line starting with { or [
-          UPDATE_BODY=$(echo "$UPDATE_RESP" | sed -n '/^[{[]/,$p')
-
-          if echo "$UPDATE_BODY" | jq -e '.errors' > /dev/null 2>&1; then
-            echo "Error: Failed to set field value:" >&2
-            echo "$UPDATE_BODY" | jq '.errors' >&2
-
-            # Check for scope/permission issues
-            if echo "$UPDATE_BODY" | jq -e '.errors[] | select(.type == "INSUFFICIENT_SCOPES" or (.message // "" | contains("permission")))' > /dev/null 2>&1; then
-              echo "" >&2
-              echo "Token may lack 'project' or 'write:project' scope" >&2
+            # Extract items from this page
+            PAGE_ITEMS=$(echo "$PROJECT_DATA" | jq -c '.data.node.items.nodes[]')
+            
+            if [ -n "$PAGE_ITEMS" ]; then
+              if [ -z "$ALL_ITEMS" ]; then
+                ALL_ITEMS="$PAGE_ITEMS"
+              else
+                ALL_ITEMS="$ALL_ITEMS"$'\n'"$PAGE_ITEMS"
+              fi
             fi
-            exit 1
+
+            # Check if there are more pages
+            HAS_NEXT_PAGE=$(echo "$PROJECT_DATA" | jq -r '.data.node.items.pageInfo.hasNextPage')
+            
+            if [ "$HAS_NEXT_PAGE" = "true" ]; then
+              CURSOR=$(echo "$PROJECT_DATA" | jq -r '.data.node.items.pageInfo.endCursor')
+              PAGE_NUM=$((PAGE_NUM + 1))
+            else
+              break
+            fi
+          done
+          
+          TOTAL_ITEMS=$(echo "$ALL_ITEMS" | wc -l | tr -d ' ')
+          echo "Fetched $PAGE_NUM page(s) containing $TOTAL_ITEMS total item(s)"
+
+          # Extract items that need processing (issues without "Opened On" date)
+          ITEMS_TO_PROCESS=$(echo "$ALL_ITEMS" | jq -c 'select(.content.id != null and (.fieldValueByName.date == null or .fieldValueByName.date == ""))')
+          
+          if [ -z "$ITEMS_TO_PROCESS" ]; then
+            echo "✓ All issues already have 'Opened On' date set - no updates needed"
+            exit 0
           fi
 
-          if ! echo "$UPDATE_BODY" | jq -e '.data.updateProjectV2ItemFieldValue.projectV2Item.id' > /dev/null 2>&1; then
-            echo "Error: Field update returned unexpected response" >&2
+          TOTAL_COUNT=$(echo "$ITEMS_TO_PROCESS" | wc -l | tr -d ' ')
+          echo ""
+          echo "Found $TOTAL_COUNT issue(s) that need 'Opened On' date populated:"
+          
+          # Log all issues that will be processed
+          echo "$ITEMS_TO_PROCESS" | while IFS= read -r item; do
+            ISSUE_NUM=$(echo "$item" | jq -r '.content.number')
+            CREATED_AT=$(echo "$item" | jq -r '.content.createdAt')
+            CREATED_DATE="${CREATED_AT%%T*}"
+            echo "  - Issue #$ISSUE_NUM (created: $CREATED_DATE)"
+          done
+          
+          echo ""
+          echo "Starting processing..."
+          echo ""
+
+          SUCCESS_COUNT=0
+          ERROR_COUNT=0
+
+          # Process each item (use process substitution to avoid subshell)
+          while IFS= read -r item; do
+            ITEM_ID=$(echo "$item" | jq -r '.id')
+            ISSUE_NUMBER=$(echo "$item" | jq -r '.content.number')
+            ISSUE_CREATED=$(echo "$item" | jq -r '.content.createdAt')
+
+            # Validate extracted values before processing
+            if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ] || \
+               [ -z "$ISSUE_NUMBER" ] || [ "$ISSUE_NUMBER" = "null" ] || \
+               [ -z "$ISSUE_CREATED" ] || [ "$ISSUE_CREATED" = "null" ]; then
+              echo "✗ ERROR: Issue #${ISSUE_NUMBER:-unknown} - Missing required data" >&2
+              echo "  ITEM_ID='$ITEM_ID', ISSUE_NUMBER='$ISSUE_NUMBER', ISSUE_CREATED='$ISSUE_CREATED'" >&2
+              ERROR_COUNT=$((ERROR_COUNT + 1))
+              echo ""
+              continue
+            fi
+
+            OPENED_DATE="${ISSUE_CREATED%%T*}"
+
+            # Set the "Opened On" field value
+            UPDATE_RESP=$(gh api graphql -f query='
+            mutation($projectId:ID!, $itemId:ID!, $fieldId:ID!, $date:Date!){
+              updateProjectV2ItemFieldValue(input:{
+                projectId:$projectId,
+                itemId:$itemId,
+                fieldId:$fieldId,
+                value:{ date:$date }
+              }){
+                projectV2Item{ id }
+              }
+            }' \
+            -F projectId="$PROJECT_ID" \
+            -F itemId="$ITEM_ID" \
+            -F fieldId="$FIELD_ID" \
+            -F date="$OPENED_DATE" 2>&1)
+
+            if [ $? -eq 0 ] && echo "$UPDATE_RESP" | jq -e '.data.updateProjectV2ItemFieldValue.projectV2Item.id' > /dev/null 2>&1; then
+              echo "✓ Issue #$ISSUE_NUMBER - Set 'Opened On' to $OPENED_DATE (from createdAt: $ISSUE_CREATED)"
+              SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            else
+              echo "✗ ERROR: Issue #$ISSUE_NUMBER - Failed to set 'Opened On' date" >&2
+              echo "  Attempted to set: $OPENED_DATE (from createdAt: $ISSUE_CREATED)" >&2
+              
+              # Try to extract error details
+              if echo "$UPDATE_RESP" | jq -e '.errors' > /dev/null 2>&1; then
+                echo "  GraphQL errors:" >&2
+                echo "$UPDATE_RESP" | jq -r '.errors[] | "    - \(.message)"' >&2
+              else
+                echo "  Response: $UPDATE_RESP" >&2
+              fi
+              
+              ERROR_COUNT=$((ERROR_COUNT + 1))
+            fi
+          done < <(echo "$ITEMS_TO_PROCESS")
+
+          echo ""
+          echo "========================================="
+          echo "Processing complete:"
+          echo "  Total items in project: $TOTAL_ITEMS"
+          echo "  Items needing update: $TOTAL_COUNT"
+          echo "  Successfully updated: $SUCCESS_COUNT"
+          echo "  Failed: $ERROR_COUNT"
+          echo "========================================="
+          
+          # Exit with error if all items failed
+          if [ "$ERROR_COUNT" -gt 0 ] && [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "Error: All items failed to process" >&2
             exit 1
           fi
-
-          echo "Successfully set 'Opened On' to ${{ steps.setup.outputs.opened_date }} for issue #${{ steps.setup.outputs.issue_number }}"
+          
+          exit 0
