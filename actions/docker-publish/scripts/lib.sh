@@ -3,6 +3,9 @@
 
 log() { echo "[docker-publish] $*" >&2; }
 die() { echo "::error::$*" >&2; exit 1; }
+# Registry-supplied values (image labels) may contain newlines; flatten them so a
+# logged value can never start a new line, which the runner would parse as a ::command::.
+oneline() { printf '%s' "$1" | tr '\r\n' '  ' | tr -d '\000-\010\013\014\016-\037'; }
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 

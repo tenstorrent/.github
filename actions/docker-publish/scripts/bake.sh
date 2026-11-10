@@ -54,8 +54,12 @@ if [ -n "${INPUT_SYFT_SCANNER_IMAGE:-}" ]; then
   GENERATOR_PRIMARY="${INPUT_HARBOR_PREFIX:-}${INPUT_SYFT_SCANNER_IMAGE}"
   GENERATOR_FALLBACK="${INPUT_SYFT_SCANNER_IMAGE}"
 else
-  GENERATOR_PRIMARY="mirror.gcr.io/docker/buildkit-syft-scanner:stable-1"
-  GENERATOR_FALLBACK="docker.io/docker/buildkit-syft-scanner:stable-1"
+  # Pinned by digest: the scanner runs inside every build with access to the
+  # image's filesystem. Keep in sync with docker-publish's sbom-generator
+  # default; bump the digest to pick up scanner updates.
+  SYFT_SCANNER_DIGEST="sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
+  GENERATOR_PRIMARY="mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@${SYFT_SCANNER_DIGEST}"
+  GENERATOR_FALLBACK="docker.io/docker/buildkit-syft-scanner:stable-1@${SYFT_SCANNER_DIGEST}"
 fi
 
 set_args() { local s; for s in "$@"; do [ -n "$s" ] && printf -- '--set\0%s\0' "$s"; done; return 0; }
@@ -76,7 +80,7 @@ CLASSIFY_JQ='
   def kv: if type == "string" then (split(",") | map(split("=") | {(.[0]): (.[1:] | join("="))}) | add) else . end;
   .target | to_entries | map(
     (.value.output // [] | map(kv)) as $outs
-    | ($outs | map(select(.type == "registry" or (.type == "image" and (.push // "false") == "true")))) as $push
+    | ($outs | map(select(.type == "registry" or (.type == "image" and ((.push // "false") | tostring) == "true")))) as $push
     | {
         name: .key,
         pushed: ($push | length > 0),
@@ -174,7 +178,7 @@ for t in "${PUSHED[@]}"; do
   parse_ref "$(jq -r --arg t "$t" '.[] | select(.name == $t) | .tags[0]' "$WORKDIR/targets.json")"
   ok="$(printf '%s' "$CHECK" | jq --arg t "$t" --arg repo "$REF_REPO" '
     .target[$t] | (.tags == [$repo])
-      and ([.output[] | if type == "string" then test("push-by-digest=true") else .["push-by-digest"] == "true" end] | all)')"
+      and ([.output[] | if type == "string" then test("push-by-digest=true") else (.["push-by-digest"] | tostring) == "true" end] | all)')"
   [ "$ok" = true ] || die "Could not rewrite target '$t' to push by digest; resolved config: $(printf '%s' "$CHECK" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
 done
 

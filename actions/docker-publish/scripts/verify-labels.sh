@@ -29,7 +29,7 @@ for d in "${IMAGE_DIGESTS[@]}"; do
       echo "::error::Image manifest ${d} is missing required label '${key}'."
       missing=1
     else
-      log "${d}: ${key}=${value}"
+      log "${d}: ${key}=$(oneline "$value")"
     fi
   done
 done

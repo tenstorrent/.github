@@ -1,7 +1,9 @@
 #!/bin/bash
-# Run the compliance gates over every image pushed by digest, then enrich and
-# tag them. All images are checked before ANY is tagged, so a multi-target
-# build publishes all of its images or none of them.
+# Run the compliance gates over every image pushed by digest, then enrich, attest
+# and copy them. Every image is gated, enriched, attested and copied before any
+# tag is applied. The final tag phase is a sequence of registry tag operations
+# that registries cannot make atomic, so a registry failure in that phase can
+# still leave some tags applied.
 #
 # Usage: gate.sh <images.json>
 #   images.json: [{"name": "...", "repo": "...", "digest": "sha256:...", "tags": ["reg/repo:tag", ...]}]
@@ -58,6 +60,17 @@ for ((i = 0; i < COUNT; i++)); do
   echo "::endgroup::"
 done
 
+# Stage every image first (copies with no tags), so a failed copy leaves no tag behind.
+for ((i = 0; i < COUNT; i++)); do
+  name="$(field "$i" name)"
+  repo="$(field "$i" repo)"
+  digest="${DIGESTS[$i]}"
+  echo "::group::[${name}] copy to other repositories"
+  INPUT_TAGS="$(jq -r --argjson i "$i" '.[$i].tags[]' "$IMAGES_JSON")" \
+    PUBLISH_PHASE=stage bash "${SCRIPTS}/publish-tags.sh" "${repo}@${digest}"
+  echo "::endgroup::"
+done
+
 echo "### Published" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 RESULT='[]'
 for ((i = 0; i < COUNT; i++)); do
@@ -66,7 +79,7 @@ for ((i = 0; i < COUNT; i++)); do
   digest="${DIGESTS[$i]}"
   echo "::group::[${name}] publish tags"
   INPUT_TAGS="$(jq -r --argjson i "$i" '.[$i].tags[]' "$IMAGES_JSON")" \
-    bash "${SCRIPTS}/publish-tags.sh" "${repo}@${digest}"
+    PUBLISH_PHASE=tag bash "${SCRIPTS}/publish-tags.sh" "${repo}@${digest}"
   echo "::endgroup::"
   RESULT="$(jq -c --argjson i "$i" --arg d "$digest" --argjson r "$RESULT" \
     '$r + [.[$i] | {name, repo, digest: $d, build_digest: .digest, tags}]' "$IMAGES_JSON")"

@@ -89,9 +89,12 @@ inputs:
     required: false
     default: "oci-mediatypes=true"
   sbom-generator:
-    description: "BuildKit SBOM scanner image used to generate the initial SBOM attestation"
+    description: >-
+      BuildKit SBOM scanner image used to generate the initial SBOM attestation.
+      It runs inside every build with access to the image's filesystem, so the
+      default is pinned by digest; bump the digest to pick up scanner updates.
     required: false
-    default: "mirror.gcr.io/docker/buildkit-syft-scanner:stable-1"
+    default: "mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
   sbom-supplier:
     description: "SPDX supplier recorded on the SBOM's describing package"
     required: false
@@ -117,8 +120,10 @@ inputs:
   attest-sbom:
     description: >-
       Sign each platform's enriched SBOM with actions/attest and push it to the
-      registry as an OCI referrer (found by `trivy --sbom-sources oci` and
-      `gh attestation verify`). Needs `permissions: id-token: write,
+      registry as an OCI referrer of that platform image. `trivy --sbom-sources
+      oci` and `gh attestation verify` find it when given the platform digest
+      (repo@sha256:...); a tag resolves to the index, which carries a referrer
+      only for single-platform images. Needs `permissions: id-token: write,
       attestations: write`; private repositories need GitHub Enterprise Cloud.
     required: false
     default: "true"

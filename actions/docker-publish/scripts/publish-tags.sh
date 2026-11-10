@@ -1,13 +1,22 @@
 #!/bin/bash
 # Point every requested tag at the scanned + enriched index. Runs only after all
-# gates pass. Tags in other repositories/registries get a full copy of the
-# index (images + attestations) via `oras cp`, so the digest is identical
-# everywhere, plus the signed SBOM bundles attached to it.
+# gates pass. Work is split into two phases so that no tag exists until every
+# copy it refers to is in place:
+#   stage: copy the index by digest, with no tag, to every repository other than
+#          the primary via `oras cp` (images + attestations, so the digest is
+#          identical everywhere), then attach the signed SBOM bundles to it.
+#   tag:   apply the requested tags to the index in every repository, then check
+#          that each tag resolves to the index digest.
+# PUBLISH_PHASE selects the phase. `all` (default) runs stage, then tag. A tag-only
+# run needs an earlier stage run for the same digest. The tag phase is one registry
+# call per repository, which registries cannot make atomic, so a failure there can
+# leave some repositories tagged.
 #
 # Usage: publish-tags.sh <primary-repo>@<index-digest>
 # Env:   INPUT_TAGS (newline separated fully-qualified name:tag; validated by
 #        prepare.sh or bake.sh), ATTEST_SBOM (default true: copies to other
-#        repositories must include at least one signed SBOM bundle)
+#        repositories must include at least one signed SBOM bundle),
+#        PUBLISH_PHASE (stage, tag or all; default all)
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -16,6 +25,11 @@ SRC="${1:?Usage: $0 <primary-repo>@<index-digest>}"
 parse_ref "$SRC"
 PRIMARY_REPO="$REF_REPO"
 DIGEST="$REF_DIGEST"
+PUBLISH_PHASE="${PUBLISH_PHASE:-all}"
+case "$PUBLISH_PHASE" in
+  stage | tag | all) ;;
+  *) die "PUBLISH_PHASE must be stage, tag or all; got '${PUBLISH_PHASE}'." ;;
+esac
 
 # Signed SBOM bundles (attest-sbom.sh) are referrers of the index and platform
 # images, so a plain copy of the index leaves them behind. They are copied in
@@ -27,16 +41,19 @@ DIGEST="$REF_DIGEST"
 # substitution in a `for` word list would not trip `set -e`.
 SBOM_BUNDLES=()  # "<subject> <bundle-digest>"
 find_sbom_bundles() {
-  local index subjects subject referrers refs ref
+  local index platforms subjects subject referrers refs ref
   index="$(oras manifest fetch "$SRC")"
-  subjects="$(printf '%s' "$index" | jq -r '.manifests[] | select(.platform.os != "unknown") | .digest')"
-  for subject in "$DIGEST" $subjects; do
+  platforms="$(printf '%s' "$index" | jq -r '.manifests[] | select(.platform.os != "unknown") | .digest')"
+  subjects="${DIGEST}"$'\n'"${platforms}"
+  while IFS= read -r subject; do
+    [ -n "$subject" ] || continue
     referrers="$(oras discover --format json --artifact-type "$SIGSTORE_BUNDLE_TYPE" "${PRIMARY_REPO}@${subject}")"
     refs="$(printf '%s' "$referrers" | jq -r '.referrers[]?.digest')"
-    for ref in $refs; do
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
       SBOM_BUNDLES+=("${subject} ${ref}")
-    done
-  done
+    done <<< "$refs"
+  done <<< "$subjects"
   if [ "${ATTEST_SBOM:-true}" = true ] && [ "${#SBOM_BUNDLES[@]}" -eq 0 ]; then
     die "No signed SBOM bundle found as a referrer of ${SRC} or its platform images; refusing to publish copies without it."
   fi
@@ -61,27 +78,36 @@ while IFS= read -r t; do
   TAGS_BY_REPO[$REF_REPO]="${TAGS_BY_REPO[$REF_REPO]:+${TAGS_BY_REPO[$REF_REPO]},}${REF_TAG}"
 done <<< "${INPUT_TAGS}"
 
-# Look the bundles up before applying any tag, so a missing bundle or a
-# registry error fails without leaving a partial set of tags behind.
-for repo in "${REPOS[@]}"; do
-  if [ "$repo" != "$PRIMARY_REPO" ]; then
-    find_sbom_bundles
-    break
-  fi
-done
-
-for repo in "${REPOS[@]}"; do
-  IFS=',' read -r -a tags <<< "${TAGS_BY_REPO[$repo]}"
-  if [ "$repo" = "$PRIMARY_REPO" ]; then
-    oras tag "${SRC}" "${tags[@]}" >&2
-  else
-    oras cp --to-distribution-spec "$ORAS_REFERRERS_SPEC" "${SRC}" "${repo}:${TAGS_BY_REPO[$repo]}" >&2
-    copy_sbom_bundles "$repo"
-  fi
-  for tag in "${tags[@]}"; do
-    resolved="$(oras resolve "${repo}:${tag}")"
-    [ "$resolved" = "$DIGEST" ] || die "${repo}:${tag} resolved to ${resolved}, expected ${DIGEST}."
-    log "published ${repo}:${tag}@${DIGEST}"
-    echo "- \`${repo}:${tag}@${DIGEST}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+# Stage: look the bundles up before copying anything, so a missing bundle or a
+# registry error fails before any copy is made. Then copy the index and its
+# bundles to each other repository by digest. No tag is created here.
+if [ "$PUBLISH_PHASE" != tag ]; then
+  for repo in "${REPOS[@]}"; do
+    if [ "$repo" != "$PRIMARY_REPO" ]; then
+      find_sbom_bundles
+      break
+    fi
   done
-done
+
+  for repo in "${REPOS[@]}"; do
+    [ "$repo" != "$PRIMARY_REPO" ] || continue
+    # No destination reference: oras copies the graph and creates no tag.
+    oras cp --to-distribution-spec "$ORAS_REFERRERS_SPEC" "${SRC}" "${repo}" >&2
+    copy_sbom_bundles "$repo"
+  done
+fi
+
+# Tag: apply the requested tags in every repository (the primary included), then
+# confirm each tag resolves to the index digest.
+if [ "$PUBLISH_PHASE" != stage ]; then
+  for repo in "${REPOS[@]}"; do
+    IFS=',' read -r -a tags <<< "${TAGS_BY_REPO[$repo]}"
+    oras tag "${repo}@${DIGEST}" "${tags[@]}" >&2
+    for tag in "${tags[@]}"; do
+      resolved="$(oras resolve "${repo}:${tag}")"
+      [ "$resolved" = "$DIGEST" ] || die "${repo}:${tag} resolved to ${resolved}, expected ${DIGEST}."
+      log "published ${repo}:${tag}@${DIGEST}"
+      echo "- \`${repo}:${tag}@${DIGEST}\`" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+    done
+  done
+fi

@@ -86,10 +86,14 @@ inputs:
     required: false
     default: ""
   required-labels:
-    description: "OCI label keys every pushed platform image must carry"
+    description: >-
+      OCI label keys every pushed platform image must carry. source and licenses
+      feed the SBOM's downloadLocation/licenseDeclared; revision ties the image
+      to a commit.
     required: false
     default: >-
       org.opencontainers.image.source
+      org.opencontainers.image.revision
       org.opencontainers.image.licenses
   sbom-supplier:
     description: "SPDX supplier recorded on the SBOM's describing package"
@@ -116,8 +120,10 @@ inputs:
   attest-sbom:
     description: >-
       Sign each platform's enriched SBOM with actions/attest and push it to the
-      registry as an OCI referrer (found by `trivy --sbom-sources oci` and
-      `gh attestation verify`). Needs `permissions: id-token: write,
+      registry as an OCI referrer of that platform image. `trivy --sbom-sources
+      oci` and `gh attestation verify` find it when given the platform digest
+      (repo@sha256:...); a tag resolves to the index, which carries a referrer
+      only for single-platform images. Needs `permissions: id-token: write,
       attestations: write`; private repositories need GitHub Enterprise Cloud.
     required: false
     default: "true"

@@ -100,7 +100,7 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
   LABEL_SOURCE="$(label source)"
   LABEL_LICENSES="$(label licenses)"
   LABEL_VERSION="$(label version)"
-  log "[$PLATFORM] labels: source='${LABEL_SOURCE}' licenses='${LABEL_LICENSES}' version='${LABEL_VERSION}'"
+  log "[$PLATFORM] labels: source='$(oneline "$LABEL_SOURCE")' licenses='$(oneline "$LABEL_LICENSES")' version='$(oneline "$LABEL_VERSION")'"
 
   # --- rescan with syft ---
   # file.metadata.selection defaults to "owned-by-package": syft only computes
