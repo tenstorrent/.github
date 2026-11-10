@@ -35,7 +35,9 @@ def source_package($a):
   elif $a.type == "apk" then
     "\($a.metadata.originPackage // $a.name) \($a.version)"
   elif $a.type == "rpm" and (($a.metadata.sourceRpm // "") != "") then
-    ($a.metadata.sourceRpm | sub("\\.src\\.rpm$"; "") | capture("^(?<n>.+)-(?<v>[^-]+)-(?<r>[^-]+)$")?) as $s
+    # [...] | first: a non-matching sourceRpm (e.g. "(none)") must yield null,
+    # not empty, or the caller's map() drops the whole package.
+    ([$a.metadata.sourceRpm | sub("\\.src\\.rpm$"; "") | capture("^(?<n>.+)-(?<v>[^-]+)-(?<r>[^-]+)$")?] | first) as $s
     | if $s then "\($s.n) \(if $a.metadata.epoch != null then "\($a.metadata.epoch):" else "" end)\($s.v)-\($s.r)" else null end
   else null end;
 

@@ -38,18 +38,33 @@ if [ "${#FAILED[@]}" -gt 0 ]; then
   die "Nothing was tagged. Images exist only as untagged digests."
 fi
 
-echo "### Published" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
-RESULT='[]'
+# Enrich and attest every image before tagging any, so a failure on a later
+# image cannot leave earlier ones tagged.
+sbom_dir=""
+trap 'rm -rf "$sbom_dir"' EXIT
+DIGESTS=()
 for ((i = 0; i < COUNT; i++)); do
   name="$(field "$i" name)"
   repo="$(field "$i" repo)"
-  echo "::group::[${name}] enrich SBOM + publish tags"
+  echo "::group::[${name}] enrich SBOM"
   sbom_dir="$(mktemp -d)"
   digest="$(SBOM_OUT_DIR="$sbom_dir" bash "${SCRIPTS}/enrich-sbom.sh" "${repo}@$(field "$i" digest)")"
   if [ "${ATTEST_SBOM:-true}" = true ]; then
     bash "${SCRIPTS}/attest-sbom.sh" "${repo}@${digest}" "${sbom_dir}/sboms.jsonl"
   fi
   rm -rf "$sbom_dir"
+  sbom_dir=""
+  DIGESTS+=("$digest")
+  echo "::endgroup::"
+done
+
+echo "### Published" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+RESULT='[]'
+for ((i = 0; i < COUNT; i++)); do
+  name="$(field "$i" name)"
+  repo="$(field "$i" repo)"
+  digest="${DIGESTS[$i]}"
+  echo "::group::[${name}] publish tags"
   INPUT_TAGS="$(jq -r --argjson i "$i" '.[$i].tags[]' "$IMAGES_JSON")" \
     bash "${SCRIPTS}/publish-tags.sh" "${repo}@${digest}"
   echo "::endgroup::"

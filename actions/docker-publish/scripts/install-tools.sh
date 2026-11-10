@@ -3,8 +3,12 @@
 # (vulnerability scanning) from pinned, sha256-verified release tarballs.
 #
 # Installs into $RUNNER_TEMP rather than /usr/local/bin: self-hosted runners do
-# not all grant passwordless sudo. The directory is added to $GITHUB_PATH for
-# the action's later steps.
+# not all grant passwordless sudo. The directory is added to $GITHUB_PATH, which
+# puts these binaries on PATH for every later step of the caller's job, not
+# just this action's.
+#
+# Safe to run more than once per job: a tool already in place at its pinned
+# version (or commit, for actions/attest) is not downloaded again.
 #
 # Pinned versions/checksums come from each project's *_checksums.txt release
 # asset. Bump the version and BOTH checksums together; never float to latest.
@@ -37,6 +41,9 @@ NODE_SHA256_AMD64="361718c444e49af2ca5a110c83ba6a8901143f23ab285ebbef0341f391f48
 NODE_SHA256_ARM64="95c264150aceb7f3437a29fd6984924f5f8d1511ea3cbd6c508b83f6c555dae2"
 ATTEST_COMMIT="1e69f48acb82d1966a394da916b4c1698aa569d6"
 
+[ "${RUNNER_OS:-$(uname -s)}" = Linux ] \
+  || die "docker-publish needs a Linux runner; got ${RUNNER_OS:-$(uname -s)}. The pinned syft/oras/trivy/node downloads are Linux builds."
+
 case "${RUNNER_ARCH:-$(uname -m)}" in
   X64 | x86_64) ARCH=amd64 ;;
   ARM64 | aarch64 | arm64) ARCH=arm64 ;;
@@ -46,9 +53,22 @@ esac
 BIN_DIR="${RUNNER_TEMP:-/tmp}/docker-publish-bin"
 mkdir -p "$BIN_DIR"
 
-# Usage: install_pinned_binary <url> <expected_sha256> <binary_name>
+# True when BIN_DIR already holds <name> reporting "Version: <version>".
+# Usage: has_pinned_version <binary_name> <version>
+has_pinned_version() {
+  local bin="${BIN_DIR}/$1" out
+  [ -x "$bin" ] || return 1
+  out="$("$bin" version 2>/dev/null)" || return 1
+  grep -Eq "^Version:[[:space:]]+v?${2//./\\.}([^0-9.]|$)" <<< "$out"
+}
+
+# Usage: install_pinned_binary <url> <expected_sha256> <binary_name> <version>
 install_pinned_binary() {
-  local url="$1" expected="$2" name="$3" tmp actual
+  local url="$1" expected="$2" name="$3" version="$4" tmp actual
+  if has_pinned_version "$name" "$version"; then
+    log "${name} ${version} already installed in ${BIN_DIR}"
+    return
+  fi
   tmp="$(mktemp -d)"
   curl -sSfL --retry 3 "$url" -o "${tmp}/${name}.tar.gz"
   actual="$(sha256_of "${tmp}/${name}.tar.gz")"
@@ -70,7 +90,7 @@ fi
 
 install_pinned_binary \
   "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${ARCH}.tar.gz" \
-  "$syft_sha" syft
+  "$syft_sha" syft "$SYFT_VERSION"
 # `docker create` works for FROM-scratch images with no CMD/ENTRYPOINT: the
 # container is never started, only used as a filesystem to copy from.
 install_from_image() {
@@ -92,12 +112,14 @@ if [ -n "${ORAS_IMAGE:-}" ]; then
 else
   install_pinned_binary \
     "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" \
-    "$oras_sha" oras
+    "$oras_sha" oras "$ORAS_VERSION"
 fi
 install_pinned_binary \
   "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz" \
-  "$trivy_sha" trivy
+  "$trivy_sha" trivy "$TRIVY_VERSION"
 
+# GITHUB_PATH applies to every later step of the caller's job, not only this
+# action's: callers' own steps after this action also see these binaries.
 echo "$BIN_DIR" >> "${GITHUB_PATH:-/dev/null}"
 
 # actions/attest can't be a `uses:` step here: it takes one subject per call and
@@ -108,17 +130,27 @@ if [ "${INSTALL_ATTEST:-false}" = true ]; then
   ATTEST_ROOT="${RUNNER_TEMP:-/tmp}/docker-publish-attest"
   node_arch="$([ "$ARCH" = amd64 ] && echo x64 || echo arm64)"
   node_sha="$([ "$ARCH" = amd64 ] && echo "$NODE_SHA256_AMD64" || echo "$NODE_SHA256_ARM64")"
-  rm -rf "$ATTEST_ROOT" && mkdir -p "$ATTEST_ROOT/node"
-  curl -sSfL --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "$ATTEST_ROOT/node.tar.gz"
-  actual="$(sha256_of "$ATTEST_ROOT/node.tar.gz")"
-  [ "$actual" = "$node_sha" ] || die "sha256 mismatch for node ${NODE_VERSION} (expected ${node_sha}, got ${actual})"
-  tar -xzf "$ATTEST_ROOT/node.tar.gz" -C "$ATTEST_ROOT/node" --strip-components 1
-  rm "$ATTEST_ROOT/node.tar.gz"
-  log "installed node: $("$ATTEST_ROOT/node/bin/node" --version)"
+  if [ "$("$ATTEST_ROOT/node/bin/node" --version 2>/dev/null || true)" = "v${NODE_VERSION}" ]; then
+    log "node v${NODE_VERSION} already installed"
+  else
+    rm -rf "$ATTEST_ROOT/node" && mkdir -p "$ATTEST_ROOT/node"
+    curl -sSfL --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "$ATTEST_ROOT/node.tar.gz"
+    actual="$(sha256_of "$ATTEST_ROOT/node.tar.gz")"
+    [ "$actual" = "$node_sha" ] || die "sha256 mismatch for node ${NODE_VERSION} (expected ${node_sha}, got ${actual})"
+    tar -xzf "$ATTEST_ROOT/node.tar.gz" -C "$ATTEST_ROOT/node" --strip-components 1
+    rm "$ATTEST_ROOT/node.tar.gz"
+    log "installed node: $("$ATTEST_ROOT/node/bin/node" --version)"
+  fi
 
-  git init -q "$ATTEST_ROOT/attest"
-  git -C "$ATTEST_ROOT/attest" fetch -q --depth 1 https://github.com/actions/attest.git "$ATTEST_COMMIT"
-  git -C "$ATTEST_ROOT/attest" -c advice.detachedHead=false checkout -q FETCH_HEAD
-  [ "$(git -C "$ATTEST_ROOT/attest" rev-parse HEAD)" = "$ATTEST_COMMIT" ] || die "actions/attest checkout is not ${ATTEST_COMMIT}"
-  log "installed actions/attest@${ATTEST_COMMIT}"
+  if [ -f "$ATTEST_ROOT/attest/dist/index.js" ] \
+    && [ "$(git -C "$ATTEST_ROOT/attest" rev-parse HEAD 2>/dev/null || true)" = "$ATTEST_COMMIT" ]; then
+    log "actions/attest@${ATTEST_COMMIT} already installed"
+  else
+    rm -rf "$ATTEST_ROOT/attest"
+    git init -q "$ATTEST_ROOT/attest"
+    git -C "$ATTEST_ROOT/attest" fetch -q --depth 1 https://github.com/actions/attest.git "$ATTEST_COMMIT"
+    git -C "$ATTEST_ROOT/attest" -c advice.detachedHead=false checkout -q FETCH_HEAD
+    [ "$(git -C "$ATTEST_ROOT/attest" rev-parse HEAD)" = "$ATTEST_COMMIT" ] || die "actions/attest checkout is not ${ATTEST_COMMIT}"
+    log "installed actions/attest@${ATTEST_COMMIT}"
+  fi
 fi

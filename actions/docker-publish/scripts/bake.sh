@@ -12,6 +12,7 @@
 #   INPUT_PYTHON_VERSION, INPUT_RETRIES, INPUT_RETRY_DELAY_SECONDS,
 #   INPUT_USE_DEFAULT_BUILDER, INPUT_VALIDATE_IMAGES, INPUT_ENABLE_ATTESTATIONS,
 #   INPUT_ENRICH_SBOM, INPUT_HARBOR_PREFIX, INPUT_SYFT_SCANNER_IMAGE
+#   ATTEST_SBOM  (default true) fail early without id-token: write
 #   IMAGES_JSON  path to write [{name, repo, digest, tags}] for gate.sh
 
 set -euo pipefail
@@ -35,11 +36,10 @@ while IFS= read -r f; do
 done < <(printf '%s\n' "${INPUT_BAKE_FILE:-}" | tr ',' '\n')
 
 REQUESTED=()
-IFS=',' read -r -a _targets <<< "${INPUT_TARGETS:-}"
-for t in "${_targets[@]}"; do
+while IFS= read -r t; do
   t="$(trim "$t")"
   [ -n "$t" ] && REQUESTED+=("$t")
-done
+done < <(printf '%s\n' "${INPUT_TARGETS:-}" | tr ',' '\n')
 [ "${#REQUESTED[@]}" -gt 0 ] || die "No bake targets provided."
 
 SET_LINES=()
@@ -104,6 +104,10 @@ log "targets pushed (gated): ${PUSHED[*]:-none}"
 log "targets not pushed (built as-is): ${LOCAL[*]:-none}"
 
 if [ "${#PUSHED[@]}" -gt 0 ]; then
+  # Fail before building, not after the scan; attest-sbom.sh checks this again.
+  if [ "${ATTEST_SBOM:-true}" = true ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+    die "SBOM attestation needs 'permissions: id-token: write' (and attestations: write) on the calling job."
+  fi
   require_attesting_builder ""
   [ "${INPUT_ENABLE_ATTESTATIONS:-true}" = true ] \
     || echo "::warning::enable-attestations=false is ignored for registry-pushed targets (${PUSHED[*]}); provenance and SBOM are mandatory for published images."

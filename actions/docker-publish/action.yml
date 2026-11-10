@@ -153,6 +153,7 @@ runs:
       env:
         INPUT_TAGS: ${{ inputs.tags }}
         INPUT_BUILDER: ${{ inputs.builder }}
+        ATTEST_SBOM: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 
     - name: Install syft, oras and trivy

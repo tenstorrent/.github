@@ -83,6 +83,10 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 COUNT="$(grep -c . "$LIST" || true)"
 [ "$COUNT" -gt 0 ] || die "No SBOMs listed in ${LIST}."
+# Attest the index too only when it holds exactly one real platform image
+# (recorded by enrich-sbom.sh from the index itself, not from the SBOM count).
+INDEX_PLATFORM_COUNT="$(grep -m1 . "$LIST" | jq -r '.index_platforms // empty')"
+[[ "$INDEX_PLATFORM_COUNT" =~ ^[0-9]+$ ]] || die "${LIST} does not record the index's platform count; regenerate it with enrich-sbom.sh."
 n=0
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
@@ -92,7 +96,7 @@ while IFS= read -r entry; do
   sbom="$WORKDIR/$n.spdx.json"
   fit_sbom "$(jq -r .sbom <<< "$entry")" "$sbom"
   attest "$digest" "$sbom" "$platform"
-  if [ "$COUNT" -eq 1 ]; then
+  if [ "$INDEX_PLATFORM_COUNT" -eq 1 ]; then
     attest "$REF_DIGEST" "$sbom" "index"
   fi
 done < "$LIST"

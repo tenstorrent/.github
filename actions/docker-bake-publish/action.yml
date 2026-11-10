@@ -14,7 +14,7 @@ inputs:
     required: false
     default: ""
   targets:
-    description: "Bake targets or groups to build (comma-separated)"
+    description: "Bake targets or groups to build (comma or newline separated)"
     required: true
   set-lines:
     description: >-
@@ -138,7 +138,7 @@ outputs:
       JSON array, one entry per published target:
       {name, repo, digest, build_digest, tags}. digest is the published
       (enriched) index digest, identical for every tag of that target.
-    value: ${{ steps.gate.outputs.images }}
+    value: ${{ steps.gate.outputs.images || '[]' }}
 
 runs:
   using: "composite"
@@ -168,6 +168,7 @@ runs:
         INPUT_ENRICH_SBOM: ${{ inputs.enrich-sbom }}
         INPUT_HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         INPUT_SYFT_SCANNER_IMAGE: ${{ inputs.syft-scanner-image }}
+        ATTEST_SBOM: ${{ inputs.attest-sbom }}
       run: |
         set -euo pipefail
         images="$(mktemp "${RUNNER_TEMP}/docker-bake-publish-images.XXXXXX")"

@@ -53,7 +53,8 @@ require_publishable_tag() {
 require_attesting_builder() {
   local args=() driver
   [ -n "${1:-}" ] && args=(--builder "$1")
-  driver="$(docker buildx inspect "${args[@]}" | awk -F': *' '/^Driver:/ {print $2; exit}')"
+  # awk reads to EOF (no early `exit`) so the writer never gets SIGPIPE under pipefail.
+  driver="$(docker buildx inspect "${args[@]}" | awk -F': *' '/^Driver:/ && !found {print $2; found = 1}')"
   log "buildx driver: ${driver:-unknown}"
   if [ "$driver" = docker ]; then
     die "The active buildx builder uses the 'docker' driver, which cannot produce provenance/SBOM attestations. Run docker/setup-buildx-action before this action."

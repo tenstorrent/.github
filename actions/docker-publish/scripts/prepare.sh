@@ -1,7 +1,8 @@
 #!/bin/bash
 # Validate docker-publish inputs before anything is built or pushed.
 #
-# Env: INPUT_TAGS (newline/comma separated), INPUT_BUILDER (optional)
+# Env: INPUT_TAGS (newline/comma separated), INPUT_BUILDER (optional),
+#      ATTEST_SBOM (default true)
 # Outputs: primary-repo, report-id, tags (normalized, newline separated)
 
 set -euo pipefail
@@ -24,6 +25,11 @@ parse_ref "${TAGS[0]}"
 PRIMARY_REPO="$REF_REPO"
 
 require_attesting_builder "${INPUT_BUILDER:-}"
+
+# Fail before building, not after the scan; attest-sbom.sh checks this again.
+if [ "${ATTEST_SBOM:-true}" = true ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+  die "SBOM attestation needs 'permissions: id-token: write' (and attestations: write) on the calling job."
+fi
 
 log "primary repository: $PRIMARY_REPO"
 {

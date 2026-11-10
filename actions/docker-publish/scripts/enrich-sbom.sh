@@ -26,7 +26,8 @@
 #   Prints the new index digest on stdout; logs go to stderr.
 # Env:   SBOM_SUPPLIER (default "Organization: Tenstorrent")
 #        SBOM_OUT_DIR  if set, each platform's final SBOM is written there and
-#                      listed in sboms.jsonl ({digest, platform, sbom})
+#                      listed in sboms.jsonl ({digest, platform, sbom,
+#                      index_platforms: real platform images in the index})
 # Requires: oras, syft, jq. Registry auth comes from the docker credential store.
 
 set -euo pipefail
@@ -48,10 +49,16 @@ if ! printf '%s' "$INDEX_JSON" | jq -e '.manifests' >/dev/null 2>&1; then
   die "${REF} is not an OCI index; it carries no attestations to enrich."
 fi
 INDEX_MT="$(printf '%s' "$INDEX_JSON" | jq -r '.mediaType // "application/vnd.oci.image.index.v1+json"')"
+INDEX_PLATFORMS="$(printf '%s' "$INDEX_JSON" | index_platforms)"
+INDEX_PLATFORM_COUNT="$(printf '%s' "$INDEX_PLATFORMS" | grep -c . || true)"
 
 mapfile -t ATT_DIGESTS < <(printf '%s' "$INDEX_JSON" | jq -r '
   .manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest") | .digest')
 [ "${#ATT_DIGESTS[@]}" -gt 0 ] || die "No attestation-manifests in ${REF}; was the image built with SBOM attestations enabled?"
+# BuildKit writes one attestation-manifest per platform image; fewer means a
+# platform would be published with no SBOM at all.
+[ "${#ATT_DIGESTS[@]}" -eq "$INDEX_PLATFORM_COUNT" ] \
+  || die "${REF} has ${INDEX_PLATFORM_COUNT} platform image(s) but ${#ATT_DIGESTS[@]} attestation-manifest(s); every published platform image needs an SBOM."
 
 NEW_INDEX="$WORKDIR/index.json"
 printf '%s' "$INDEX_JSON" > "$NEW_INDEX"
@@ -81,8 +88,7 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
   SPDX_IDX="$(printf '%s' "$ATT_MANIFEST" | jq --arg p "$SPDX_PREDICATE" '
     [.layers | to_entries[] | select(.value.annotations["in-toto.io/predicate-type"] == $p) | .key] | .[0] // -1')"
   if [ "$SPDX_IDX" -lt 0 ]; then
-    log "[$PLATFORM] no SPDX layer in attestation-manifest; leaving it unchanged."
-    continue
+    die "[$PLATFORM] attestation-manifest ${ATT_DIGEST} has no SPDX SBOM layer; an SBOM is mandatory for every published platform image."
   fi
   if [ "$(printf '%s' "$ATT_MANIFEST" | jq --arg p "$SPDX_PREDICATE" '[.layers[] | select(.annotations["in-toto.io/predicate-type"] == $p)] | length')" -gt 1 ]; then
     log "[$PLATFORM] multiple SPDX layers found; enriching the first (final-stage) one only."
@@ -146,7 +152,8 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
   if [ -n "${SBOM_OUT_DIR:-}" ]; then
     cp "$PATCHED_SPDX" "${SBOM_OUT_DIR}/${IMG_DIGEST#sha256:}.spdx.json"
     jq -cn --arg digest "$IMG_DIGEST" --arg platform "$PLATFORM" --arg sbom "${SBOM_OUT_DIR}/${IMG_DIGEST#sha256:}.spdx.json" \
-      '{digest: $digest, platform: $platform, sbom: $sbom}' >> "${SBOM_OUT_DIR}/sboms.jsonl"
+      --argjson index_platforms "$INDEX_PLATFORM_COUNT" \
+      '{digest: $digest, platform: $platform, sbom: $sbom, index_platforms: $index_platforms}' >> "${SBOM_OUT_DIR}/sboms.jsonl"
   fi
 
   # --- new in-toto statement: BuildKit's original envelope, new predicate ---
