@@ -1,0 +1,217 @@
+name: "Docker Publish (SBOM + Trivy)"
+description: >-
+  Build and publish a container image with SLSA provenance, an SBOM enriched
+  from the image's OCI labels, and a Trivy vulnerability gate. The image is
+  pushed by digest first; tags are only applied after every gate passes.
+
+inputs:
+  tags:
+    description: >-
+      Fully-qualified tags to publish, newline or comma separated
+      (e.g. docker/metadata-action's `tags` output). The first tag's repository
+      is where the image is built and scanned; other repositories receive an
+      identical copy (same digest).
+    required: true
+  labels:
+    description: >-
+      Newline-separated OCI labels (e.g. docker/metadata-action's `labels`
+      output). Labels set via LABEL in the Dockerfile also count.
+    required: false
+    default: ""
+  required-labels:
+    description: >-
+      OCI label keys every platform image must carry. source and licenses feed
+      the SBOM's downloadLocation/licenseDeclared; revision ties the image to
+      a commit.
+    required: false
+    default: >-
+      org.opencontainers.image.source
+      org.opencontainers.image.revision
+      org.opencontainers.image.licenses
+  context:
+    description: "Build context"
+    required: false
+    default: "."
+  file:
+    description: "Path to the Dockerfile"
+    required: false
+    default: ""
+  target:
+    description: "Dockerfile build stage to target"
+    required: false
+    default: ""
+  platforms:
+    description: "Comma-separated target platforms (e.g. linux/amd64,linux/arm64)"
+    required: false
+    default: ""
+  build-args:
+    description: >-
+      Newline-separated build args. These are recorded in the max-mode
+      provenance attestation, so never pass secrets here; use `secrets`.
+    required: false
+    default: ""
+  build-contexts:
+    description: "Newline-separated additional build contexts (name=path)"
+    required: false
+    default: ""
+  secrets:
+    description: "Newline-separated build secrets (id=value)"
+    required: false
+    default: ""
+  secret-files:
+    description: "Newline-separated build secret files (id=path)"
+    required: false
+    default: ""
+  cache-from:
+    description: "Newline-separated cache import sources"
+    required: false
+    default: ""
+  cache-to:
+    description: "Newline-separated cache export destinations"
+    required: false
+    default: ""
+  builder:
+    description: "buildx builder instance name (defaults to the active builder)"
+    required: false
+    default: ""
+  pull:
+    description: "Always pull newer versions of base images"
+    required: false
+    default: "false"
+  no-cache:
+    description: "Build without cache"
+    required: false
+    default: "false"
+  image-output-options:
+    description: >-
+      Extra comma-separated image exporter options, e.g.
+      `compression=zstd,compression-level=22,force-compression=true,oci-mediatypes=true`.
+    required: false
+    default: "oci-mediatypes=true"
+  sbom-generator:
+    description: "BuildKit SBOM scanner image used to generate the initial SBOM attestation"
+    required: false
+    default: "mirror.gcr.io/docker/buildkit-syft-scanner:stable-1"
+  sbom-supplier:
+    description: "SPDX supplier recorded on the SBOM's describing package"
+    required: false
+    default: "Organization: Tenstorrent"
+  trivy-severity:
+    description: "Comma-separated severities that fail the gate"
+    required: false
+    default: "CRITICAL,HIGH"
+  trivy-scanners:
+    description: "Comma-separated Trivy scanners (vuln, misconfig, secret, license)"
+    required: false
+    default: "vuln,misconfig,secret"
+  trivy-ignore-unfixed:
+    description: "Ignore vulnerabilities that have no fixed version yet"
+    required: false
+    default: "false"
+  trivy-ignorefile:
+    description: >-
+      Path to a .trivyignore (or .trivyignore.yaml) listing reviewed exceptions.
+      Keep it in the calling repository so every exception is code-reviewed.
+    required: false
+    default: ""
+  attest-sbom:
+    description: >-
+      Sign each platform's enriched SBOM with actions/attest and push it to the
+      registry as an OCI referrer (found by `trivy --sbom-sources oci` and
+      `gh attestation verify`). Needs `permissions: id-token: write,
+      attestations: write`; private repositories need GitHub Enterprise Cloud.
+    required: false
+    default: "true"
+  attest-storage-record:
+    description: >-
+      Also create a GitHub artifact storage record for each attested image
+      (needs `permissions: artifact-metadata: write`)
+    required: false
+    default: "true"
+  github-token:
+    description: "Token actions/attest uses to call the GitHub attestations API"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  digest:
+    description: "Digest of the published index (identical for every tag)"
+    value: ${{ steps.gate.outputs.digest }}
+  image:
+    description: "Digest reference of the published image in the primary repository"
+    value: ${{ steps.prepare.outputs.primary-repo }}@${{ steps.gate.outputs.digest }}
+  build-digest:
+    description: "Index digest as pushed by BuildKit, before SBOM enrichment (never tagged)"
+    value: ${{ steps.build.outputs.digest }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Validate inputs
+      id: prepare
+      shell: bash
+      env:
+        INPUT_TAGS: ${{ inputs.tags }}
+        INPUT_BUILDER: ${{ inputs.builder }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
+
+    - name: Install syft, oras and trivy
+      shell: bash
+      env:
+        INSTALL_ATTEST: ${{ inputs.attest-sbom }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/install-tools.sh"
+
+    # Push by digest only: nothing is reachable by tag until the gates below pass.
+    - name: Build and push by digest
+      id: build
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.file }}
+        target: ${{ inputs.target }}
+        platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
+        labels: ${{ inputs.labels }}
+        secrets: ${{ inputs.secrets }}
+        secret-files: ${{ inputs.secret-files }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+        builder: ${{ inputs.builder }}
+        pull: ${{ inputs.pull }}
+        no-cache: ${{ inputs.no-cache }}
+        provenance: mode=max
+        attests: type=sbom,generator=${{ inputs.sbom-generator }}
+        outputs: type=image,name=${{ steps.prepare.outputs.primary-repo }},push-by-digest=true,name-canonical=true,push=true${{ inputs.image-output-options != '' && format(',{0}', inputs.image-output-options) || '' }}
+
+    - name: Gate, enrich SBOM and publish tags
+      id: gate
+      shell: bash
+      env:
+        INPUT_REQUIRED_LABELS: ${{ inputs.required-labels }}
+        INPUT_SEVERITY: ${{ inputs.trivy-severity }}
+        INPUT_SCANNERS: ${{ inputs.trivy-scanners }}
+        INPUT_IGNORE_UNFIXED: ${{ inputs.trivy-ignore-unfixed }}
+        INPUT_IGNOREFILE: ${{ inputs.trivy-ignorefile }}
+        SBOM_SUPPLIER: ${{ inputs.sbom-supplier }}
+        ATTEST_SBOM: ${{ inputs.attest-sbom }}
+        ATTEST_CREATE_STORAGE_RECORD: ${{ inputs.attest-storage-record }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPORT_ROOT: ${{ runner.temp }}/docker-publish-trivy-${{ steps.prepare.outputs.report-id }}
+        PRIMARY_REPO: ${{ steps.prepare.outputs.primary-repo }}
+        BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        TAGS: ${{ steps.prepare.outputs.tags }}
+      run: |
+        set -euo pipefail
+        images="$(mktemp "${RUNNER_TEMP}/docker-publish-images.XXXXXX")"
+        jq -n --arg repo "$PRIMARY_REPO" --arg digest "$BUILD_DIGEST" --arg tags "$TAGS" \
+          '[{name: ($repo | split("/") | last), repo: $repo, digest: $digest, tags: ($tags | split("\n") | map(select(. != "")))}]' > "$images"
+        bash "${GITHUB_ACTION_PATH}/scripts/gate.sh" "$images"
+
+    - name: Upload Trivy reports
+      if: always() && steps.build.outputs.digest != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: trivy-${{ github.job }}-${{ steps.prepare.outputs.report-id }}
+        path: ${{ runner.temp }}/docker-publish-trivy-${{ steps.prepare.outputs.report-id }}
+        if-no-files-found: ignore
