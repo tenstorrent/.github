@@ -113,6 +113,11 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
   # raw binaries COPYed onto `FROM scratch` have no package metadata, so every
   # file is "unowned" and gets a placeholder all-zero SHA1 (anchore/syft#2307,
   # #1226). Force "all" so every file gets a real digest.
+  # license.content=unknown embeds the text of licenses syft could not map to
+  # an SPDX ID, so the LicenseRef-* entries can be reviewed.
+  # golang.main-module-version.from-contents: when a Go binary's main module is
+  # "(devel)" and -ldflags has no version, guess it from semver-like strings in
+  # the binary. The guess takes precedence over the vcs pseudo-version.
   # syft-json carries what SPDX drops (distro, source packages, maintainers,
   # per-file layers, raw manifest/config) and feeds the Trivy-compat patch.
   SYFT_RAW_SPDX="$W/syft.raw.spdx.json"
@@ -120,7 +125,8 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
   SYFT_ARGS=(scan "registry:${REPO}@${IMG_DIGEST}" --source-name "$REPO"
     -o "spdx-json=${SYFT_RAW_SPDX}" -o "syft-json=${SYFT_JSON}")
   [ -n "$LABEL_VERSION" ] && SYFT_ARGS+=(--source-version "$LABEL_VERSION")
-  SYFT_FILE_METADATA_SELECTION=all syft "${SYFT_ARGS[@]}" >&2
+  SYFT_FILE_METADATA_SELECTION=all SYFT_LICENSE_CONTENT=unknown \
+    SYFT_GOLANG_MAIN_MODULE_VERSION_FROM_CONTENTS=true syft "${SYFT_ARGS[@]}" >&2
 
   # --- OS package, source packages, suppliers, layers (see enrich-sbom.jq) ---
   SYFT_SPDX="$W/syft.spdx.json"

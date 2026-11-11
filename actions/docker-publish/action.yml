@@ -125,7 +125,11 @@ inputs:
       registry as an OCI referrer of that platform image. `trivy --sbom-sources
       oci` and `gh attestation verify` find it when given the platform digest
       (repo@sha256:...); a tag resolves to the index, which carries a referrer
-      only for single-platform images. Needs `permissions: id-token: write,
+      only for single-platform images. The predicate type is the unversioned
+      `https://spdx.dev/Document` that Trivy requires, not the
+      `https://spdx.dev/Document/v2.3` actions/attest's sbom-path would set, so
+      verify with `gh attestation verify --predicate-type
+      https://spdx.dev/Document`. Needs `permissions: id-token: write,
       attestations: write`; private repositories need GitHub Enterprise Cloud.
     required: false
     default: "true"

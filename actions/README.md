@@ -18,10 +18,12 @@ by tag until all of it has passed.
 2. **Gate every image.** Each platform image must carry the required OCI
    labels, and a Trivy scan must find nothing at the configured severities.
    Trivy reports are uploaded as a workflow artifact, pass or fail.
-3. **Enrich the SBOM.** Each platform is rescanned with syft. The describing
-   package gets its license, source and supplier from the image's OCI labels,
-   and packages get the OS, source-package, supplier and layer data Trivy
-   needs to scan the SBOM.
+3. **Enrich the SBOM.** Each platform is rescanned with syft into an SPDX 2.3
+   SBOM. The describing package gets its license, source and supplier from
+   the image's OCI labels. Packages get the OS, source-package, supplier and
+   layer data Trivy needs to scan the SBOM, and package checksums from the
+   archive hashes syft reads but does not write for most ecosystems (see
+   [Why not Trivy out of the box](#why-not-trivy-out-of-the-box)).
 4. **Sign the SBOM** of each platform with `actions/attest` and push the
    Sigstore bundle as an OCI referrer of that platform image.
 5. **Copy, then tag.** Every image is copied by digest to any other
@@ -151,7 +153,15 @@ See each `action.yml` for the full list.
 - **Finding the signed SBOM.** `trivy image --sbom-sources oci` and
   `gh attestation verify` find it when given a platform digest
   (`repo@sha256:...`). A tag resolves to the index, which carries a referrer
-  only for single-platform images.
+  only for single-platform images. Verify with
+  `--predicate-type https://spdx.dev/Document`; see
+  [Signing](#signing-actionsattest-not-cosign) for why it is not the
+  `.../v2.3` type.
+- **The full SBOM is also in the registry.** Each platform's
+  attestation-manifest in the published index holds the enriched SBOM as an
+  in-toto layer with predicate type `https://spdx.dev/Document`, the same
+  place BuildKit puts its own. [Cycode](#continuous-monitoring-with-cycode)
+  shows how to read it.
 - **Large SBOMs are signed without file entries.** `actions/attest` accepts at
   most 16 MiB. An SBOM over that is signed without its file-level entries, and
   its `comment` names the registry blob (`repo@sha256:...`) holding the in-toto
@@ -173,6 +183,158 @@ See each `action.yml` for the full list.
   calling job see them too.
 - **Trivy exceptions** belong in a `.trivyignore` in the calling repository,
   passed with `trivy-ignorefile`, so each one is code reviewed.
+
+## Why not Trivy out of the box
+
+Trivy alone could cover most of this: `trivy image` as the gate, `trivy image
+--format spdx-json` for the SBOM, and `cosign attest` to sign it. We use Trivy
+for what it does best, the gate, and generate the SBOM with syft instead,
+because the SBOM is the provenance and traceability record and Trivy's leaves
+out things that record needs. The comparisons below were run with Trivy
+0.76.2 and syft 1.57.1 on `python:3.12-slim` (linux/amd64).
+
+### SBOM generator: syft, not Trivy
+
+| | syft + `enrich-sbom.jq` | `trivy image --format spdx-json` |
+|---|---|---|
+| Software not installed by a package manager | Found by content (the Python interpreter, binaries copied onto `FROM scratch`) | Missing |
+| CPEs, for NVD-based scanners | 95 of 95 packages | None |
+| Files | Every file, with SHA-1, SHA-256 and the package that owns it | One |
+| Image license, source and supplier | From the OCI labels | `NOASSERTION` / `NONE`; labels only as notes |
+| `licenseConcluded` | Left to a reviewer, as SPDX intends | Copied from the declared license |
+| Supplier | Valid SPDX (`Organization: Name (email)`) | `Name <email>`, not valid SPDX |
+| Size | 5.7 MB | 0.2 MB |
+
+Running both and merging was rejected: the two tools name the same package
+differently (`bin/registry` vs `github.com/docker/distribution/cmd/registry`,
+`stdlib@v1.20.8` vs `stdlib@1.20.8`), so the merge would be lossy and
+fragile.
+
+### Making the syft SBOM scan like the image
+
+Trivy's SPDX decoder relies on fields syft does not write. Scanning the raw
+syft SBOM with `trivy sbom` found 6 of the 210 vulnerabilities a direct
+`trivy image` scan finds. [`enrich-sbom.jq`](docker-publish/scripts/enrich-sbom.jq)
+adds them, from data syft already collects:
+
+- an operating-system package that contains every OS package, so Trivy picks
+  the right vulnerability database (6 → 31);
+- `sourceInfo: built package from: <source> <version>`, because distro
+  advisories are keyed by source package (31 → 210, matching the image scan);
+- suppliers from package maintainers, and `LayerDiffID` / `LayerDigest`
+  annotations naming the layer that introduced each package;
+- package checksums (apk, npm/yarn/pnpm/bun/deno, Cargo, Composer, Hex,
+  conda) from the archive hashes syft reads but writes to SPDX only for Java,
+  Go and opam.
+
+syft also runs with every file hashed (`file.metadata.selection: all`, so
+`FROM scratch` images get real digests), with the text of licenses it cannot
+map to an SPDX ID embedded for review, and with Go binaries' `(devel)` main
+module version guessed from the binary's contents. That guess can be wrong,
+and it takes precedence over the commit-based pseudo-version.
+
+Archives nested inside archives (wheels, zips) are not scanned. On the
+tt-metal `ubuntu-24.04-ci-build` image, scanning them added 19 entries but
+only one new package (the `pip` wheel bundled with `ensurepip`). The rest were
+second copies of pip and setuptools, Windows launchers inside their wheels,
+and test fixtures.
+
+### Format: SPDX 2.3
+
+- Trivy reads SPDX 2.1 to 2.3 and CycloneDX, but not SPDX 3.0, and
+  `actions/attest`'s `sbom-path` input rejects SPDX 3.0.
+- SPDX 2.3 is what GitHub's own dependency graph exports.
+- CycloneDX was built and compared side by side, then dropped. Trivy got
+  identical results from it, but nothing we use needs it, GitHub only stores
+  and displays it, and a second, unsigned SBOM next to the signed one leaves
+  auditors asking which one counts. If a consumer needs CycloneDX (for
+  example Dependency-Track, which reads nothing else), it can be generated
+  again for any published image.
+- SPDX 2.3 requires a SHA-1 for every file (§8.4), so files carry SHA-1 and
+  SHA-256. Verify with SHA-256. Symlinks and other non-regular files have no
+  contents to hash; syft gives them an all-zero SHA-1 to satisfy the spec.
+
+### Signing: actions/attest, not cosign
+
+`actions/attest` signs with the workflow's GitHub OIDC identity, so there are
+no keys to manage, and the attestations appear on GitHub and verify with
+`gh attestation verify`. The SBOM is passed as a custom predicate with type
+`https://spdx.dev/Document`, because that exact string is the only SPDX type
+Trivy recognizes when it looks for SBOMs in the registry. Passing it as
+`sbom-path` would make `actions/attest` set `https://spdx.dev/Document/v2.3`,
+which Trivy ignores.
+
+## Continuous monitoring with Cycode
+
+The Trivy gate checks an image once, at publish time. To be alerted about
+vulnerabilities disclosed later, import each published image's SBOM into
+Cycode, which is meant to re-check stored SBOMs (confirm it does; see the last
+point below). The actions do not do this themselves; add a step after the
+publish step:
+
+```yaml
+- id: publish
+  uses: tenstorrent/.github/actions/docker-publish@<ref>
+  with:
+    tags: ${{ steps.meta.outputs.tags }}
+    labels: ${{ steps.meta.outputs.labels }}
+    platforms: linux/amd64,linux/arm64
+
+- name: Import SBOMs into Cycode
+  shell: bash
+  env:
+    IMAGE: ${{ steps.publish.outputs.image }}
+    VERSION: ${{ steps.meta.outputs.version }}
+    CYCODE_CLIENT_ID: ${{ secrets.CYCODE_CLIENT_ID }}
+    CYCODE_CLIENT_SECRET: ${{ secrets.CYCODE_CLIENT_SECRET }}
+  run: |
+    set -euo pipefail
+    pip install --quiet cycode==3.27.1
+    repo="${IMAGE%@*}"
+    index="$(oras manifest fetch "$IMAGE")"
+    jq -c '.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")
+           | {att: .digest, img: .annotations["vnd.docker.reference.digest"]}' <<< "$index" |
+    while read -r m; do
+      att="$(jq -r .att <<< "$m")"; img="$(jq -r .img <<< "$m")"
+      platform="$(jq -r --arg d "$img" '.manifests[] | select(.digest == $d) | .platform
+        | [.os, .architecture, .variant] | map(select(. != null)) | join("/")' <<< "$index")"
+      layer="$(oras manifest fetch "${repo}@${att}" | jq -r '
+        [.layers[] | select(.annotations["in-toto.io/predicate-type"] == "https://spdx.dev/Document")][0].digest')"
+      oras blob fetch --output - "${repo}@${layer}" | jq '.predicate' > sbom.spdx.json
+      cycode import sbom \
+        --name "${repo} ${VERSION} ${platform}" \
+        --vendor Tenstorrent \
+        --label "platform:${platform}" --label "digest:${img}" \
+        sbom.spdx.json
+    done
+```
+
+- **Credentials.** Create a Cycode service account and store its client ID
+  and secret as the `CYCODE_CLIENT_ID` and `CYCODE_CLIENT_SECRET` secrets.
+  For a Cycode tenant outside the US, also set `CYCODE_API_URL` and
+  `CYCODE_APP_URL` (for example `https://api.eu.cycode.com` and
+  `https://app.eu.cycode.com`).
+- **What gets imported.** One SBOM per platform image, the full enriched SPDX
+  from the registry. `oras` and `jq` are already on `PATH` after the action
+  runs, and the registry login is the one the action used. Each run creates
+  new imports, so name them by version, not by branch.
+- **Signed SBOMs instead.** To import only an SBOM whose signature checks
+  out, replace the `oras blob fetch` line with
+  `gh attestation verify "oci://${repo}@${img}" --repo "$GITHUB_REPOSITORY" --predicate-type https://spdx.dev/Document --format json | jq '.[0].verificationResult.statement.predicate' > sbom.spdx.json`
+  (with `GH_TOKEN` set). An SBOM over 16 MiB was signed without its file
+  entries, which Cycode does not need.
+- **docker-bake-publish.** Loop over the `images` output and run the same
+  steps for each entry's `repo` and `digest`.
+- **The image is already published** when this step runs. A failed import
+  fails the job but does not unpublish anything.
+- **Check before relying on it.** Cycode's import documentation is behind
+  its login. The CLI only uploads the file; Cycode does all parsing on its
+  servers. Cimon, Cycode's build agent, uploads SPDX to the same import API
+  ([release notes](https://docs.cimon.build/overview/release-notes)), so SPDX
+  2.3 is expected to work. Confirm in your tenant that Debian and Alpine
+  packages get findings: Trivy finds 210 vulnerabilities in the
+  `python:3.12-slim` SBOM. Also confirm that an import picks up a CVE
+  disclosed after it was imported, without a re-import.
 
 ## Maintaining
 
