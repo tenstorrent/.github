@@ -17,6 +17,8 @@
 #   ORAS_IMAGE      self-hosted image carrying oras at ORAS_IMAGE_PATH, used
 #                   instead of the GitHub release (e.g. tt-metal's tool image)
 #   ORAS_IMAGE_PATH default /install/bin/oras
+#   ORAS_IMAGE_SHA256 expected sha256 of that binary; without it ORAS_IMAGE
+#                   should be pinned by digest (name@sha256:...)
 #   HARBOR_PREFIX   pull-through prefix tried first for ORAS_IMAGE
 
 set -euo pipefail
@@ -93,22 +95,39 @@ install_pinned_binary \
   "$syft_sha" syft "$SYFT_VERSION"
 # `docker create` works for FROM-scratch images with no CMD/ENTRYPOINT: the
 # container is never started, only used as a filesystem to copy from.
+#
+# The binary runs with the job's registry credentials, so it is checked before
+# it is installed or executed: against <expected_sha256> when given, otherwise
+# by requiring a digest-pinned image reference (the pull is then content
+# addressed). A mutable tag with neither is installed with a warning.
+# Usage: install_from_image <image> <path-in-image> <binary_name> [expected_sha256]
 install_from_image() {
-  local image="$1" path="$2" name="$3" pull_ref="${HARBOR_PREFIX:-}$1" cid
+  local image="$1" path="$2" name="$3" expected="${4:-}" pull_ref="${HARBOR_PREFIX:-}$1" cid tmp actual
   if ! docker pull "$pull_ref" >&2; then
     log "pull-through failed for ${pull_ref}, falling back to ${image}"
     pull_ref="$image"
     docker pull "$pull_ref" >&2
   fi
+  tmp="$(mktemp -d)"
   cid="$(docker create "$pull_ref" noop)"
-  docker cp "${cid}:${path}" "${BIN_DIR}/${name}"
+  docker cp "${cid}:${path}" "${tmp}/${name}"
   docker rm "$cid" >/dev/null
-  chmod +x "${BIN_DIR}/${name}"
-  log "installed ${name} from ${pull_ref}: $("${BIN_DIR}/${name}" version 2>/dev/null | head -1 || true)"
+  actual="$(sha256_of "${tmp}/${name}")"
+  if [ -n "$expected" ]; then
+    if [ "$actual" != "$expected" ]; then
+      rm -rf "$tmp"
+      die "sha256 mismatch for ${name} from ${pull_ref} (expected ${expected}, got ${actual})"
+    fi
+  elif [[ "$image" != *@sha256:* ]]; then
+    echo "::warning::${name} from ${pull_ref} is not verified: the image is not pinned by digest and no expected sha256 was given (binary sha256 ${actual})."
+  fi
+  install "${tmp}/${name}" "${BIN_DIR}/${name}"
+  rm -rf "$tmp"
+  log "installed ${name} from ${pull_ref} (sha256 ${actual}): $("${BIN_DIR}/${name}" version 2>/dev/null | head -1 || true)"
 }
 
 if [ -n "${ORAS_IMAGE:-}" ]; then
-  install_from_image "$ORAS_IMAGE" "${ORAS_IMAGE_PATH:-/install/bin/oras}" oras
+  install_from_image "$ORAS_IMAGE" "${ORAS_IMAGE_PATH:-/install/bin/oras}" oras "${ORAS_IMAGE_SHA256:-}"
 else
   install_pinned_binary \
     "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" \

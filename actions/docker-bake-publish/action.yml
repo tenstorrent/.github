@@ -82,14 +82,22 @@ inputs:
   oras-image:
     description: >-
       Self-hosted image carrying the oras binary at /install/bin/oras, used
-      instead of downloading the oras release from GitHub.
+      instead of downloading the oras release from GitHub. Pin it by digest
+      (name@sha256:...) or set oras-sha256; a mutable tag with neither is
+      installed unverified, with a warning.
+    required: false
+    default: ""
+  oras-sha256:
+    description: >-
+      Expected sha256 of the oras binary copied out of oras-image. When set,
+      a mismatch fails the job before the binary is ever run.
     required: false
     default: ""
   required-labels:
     description: >-
-      OCI label keys every pushed platform image must carry. source and licenses
-      feed the SBOM's downloadLocation/licenseDeclared; revision ties the image
-      to a commit.
+      OCI label keys every platform image must carry. source and licenses feed
+      the SBOM's downloadLocation/licenseDeclared; revision ties the image to
+      a commit.
     required: false
     default: >-
       org.opencontainers.image.source
@@ -153,6 +161,7 @@ runs:
       shell: bash
       env:
         ORAS_IMAGE: ${{ inputs.oras-image }}
+        ORAS_IMAGE_SHA256: ${{ inputs.oras-sha256 }}
         HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         INSTALL_ATTEST: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/../docker-publish/scripts/install-tools.sh"
@@ -178,7 +187,7 @@ runs:
       run: |
         set -euo pipefail
         images="$(mktemp "${RUNNER_TEMP}/docker-bake-publish-images.XXXXXX")"
-        IMAGES_JSON="$images" bash "${GITHUB_ACTION_PATH}/../docker-publish/scripts/bake.sh"
+        IMAGES_JSON="$images" bash "${GITHUB_ACTION_PATH}/scripts/bake.sh"
         echo "images-file=${images}" >> "$GITHUB_OUTPUT"
         echo "report-id=$(jq -r '[.[].digest] | join(",")' "$images" | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
         echo "count=$(jq length "$images")" >> "$GITHUB_OUTPUT"

@@ -16,7 +16,8 @@
 #   IMAGES_JSON  path to write [{name, repo, digest, tags}] for gate.sh
 
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# lib.sh and the gate scripts are shared with (and live in) docker-publish.
+source "$(dirname "${BASH_SOURCE[0]}")/../../docker-publish/scripts/lib.sh"
 
 IMAGES_JSON="${IMAGES_JSON:?}"
 WORKDIR="$(mktemp -d)"
