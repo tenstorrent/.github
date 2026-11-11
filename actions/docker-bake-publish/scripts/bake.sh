@@ -3,10 +3,11 @@
 #
 # Bake variables are not inputs: bake reads them from the environment, which the
 # caller sets with `env:` on the step that uses the action. Every target
-# whose resolved output pushes to a registry is rewritten to push BY DIGEST to
-# the repository of its first tag, with provenance + SBOM attestations forced
-# on. Its tags are recorded in images.json and applied only after gate.sh
-# passes. Targets that don't push (type=docker, local exports) build unchanged.
+# whose resolved output pushes to a registry is rewritten to export a local OCI
+# layout instead, with provenance + SBOM attestations forced on; gate.sh pushes
+# it to the repository of its first tag only after it passes. Its tags are
+# recorded in images.json and applied last. Targets that don't push
+# (type=docker, local exports) build unchanged.
 #
 # Env (see action.yml for descriptions):
 #   INPUT_BAKE_FILE, INPUT_TARGETS, INPUT_SET_LINES,
@@ -14,13 +15,15 @@
 #   INPUT_USE_DEFAULT_BUILDER, INPUT_VALIDATE_IMAGES, INPUT_ENABLE_ATTESTATIONS,
 #   INPUT_ENRICH_SBOM, INPUT_HARBOR_PREFIX, INPUT_SYFT_SCANNER_IMAGE
 #   ATTEST_SBOM  (default true) fail early without id-token: write
-#   IMAGES_JSON  path to write [{name, repo, digest, tags}] for gate.sh
+#   IMAGES_JSON  path to write [{name, repo, digest, layout, tags}] for gate.sh
+#   LAYOUT_ROOT  directory for the pushed targets' OCI layouts, one per target
 
 set -euo pipefail
 # lib.sh and the gate scripts are shared with (and live in) docker-publish.
 source "$(dirname "${BASH_SOURCE[0]}")/../../docker-publish/scripts/lib.sh"
 
 IMAGES_JSON="${IMAGES_JSON:?}"
+LAYOUT_ROOT="${LAYOUT_ROOT:?}"
 WORKDIR="$(mktemp -d)"
 trap 'rm -rf "$WORKDIR"' EXIT
 
@@ -111,6 +114,12 @@ if [ "${#PUSHED[@]}" -gt 0 ]; then
     || echo "::warning::enable-attestations=false is ignored for registry-pushed targets (${PUSHED[*]}); provenance and SBOM are mandatory for published images."
   [ "${INPUT_ENRICH_SBOM:-true}" = true ] \
     || echo "::warning::enrich-sbom=false is ignored; SBOM enrichment is mandatory for published images."
+  for t in "${PUSHED[@]}"; do
+    mapfile -t cache_to < <(printf '%s' "$RESOLVED" | jq -r --arg t "$t" '
+      .target[$t]["cache-to"] // [] | .[]
+      | if type == "string" then . else to_entries | map("\(.key)=\(.value)") | join(",") end')
+    warn_ungated_cache "target '$t'" "${cache_to[@]}"
+  done
 fi
 
 is_pushed() { local p; for p in "${PUSHED[@]}"; do [ "$p" = "$1" ] && return 0; done; return 1; }
@@ -134,13 +143,19 @@ for s in "${SET_LINES[@]}"; do
   FILTERED+=("$s")
 done
 
-# --- overrides: push by digest + attestations ---
+# --- overrides: local OCI layout + attestations ---
+# The caller's exporter options (compression, oci-mediatypes, annotations) are
+# kept; the ones that only mean something for a registry push are dropped.
+# shellcheck disable=SC2016
 OUTPUT_JQ='
   .output | to_entries
-  | map(select(.key | IN("type", "name", "push", "push-by-digest", "name-canonical") | not) | "\(.key)=\(.value)")
-  | . + ["push-by-digest=true", "name-canonical=true", "push=true"]
+  | map(select(.key | IN("type", "name", "push", "push-by-digest", "name-canonical",
+                         "registry.insecure", "unpack", "store", "dest", "tar") | not) | "\(.key)=\(.value)")
+  | . + ["dest=\($dest)", "tar=false"]
   | map(if test("[,\"]") then "\"" + gsub("\""; "\"\"") + "\"" else . end)
-  | "type=image," + join(",")'
+  | "type=oci," + join(",")'
+
+layout_of() { printf '%s/%s' "$LAYOUT_ROOT" "$1"; }
 
 overrides() {  # <generator-image>
   local t info
@@ -148,7 +163,7 @@ overrides() {  # <generator-image>
     info="$(jq -c --arg t "$t" '.[] | select(.name == $t)' "$WORKDIR/targets.json")"
     parse_ref "$(jq -r '.tags[0]' <<< "$info")"
     echo "${t}.tags=${REF_REPO}"
-    echo "${t}.output=$(jq -r "$OUTPUT_JQ" <<< "$info")"
+    echo "${t}.output=$(jq -r --arg dest "$(layout_of "$t")" "$OUTPUT_JQ" <<< "$info")"
     echo "${t}.attest=type=provenance,mode=max"
     echo "${t}.attest=type=sbom,generator=$1"
   done
@@ -170,10 +185,12 @@ mapfile -t -O "${#PRIMARY_SETS[@]}" PRIMARY_SETS < <(overrides "$GENERATOR")
 CHECK="$(bake_print "${PRIMARY_SETS[@]}")"
 for t in "${PUSHED[@]}"; do
   parse_ref "$(jq -r --arg t "$t" '.[] | select(.name == $t) | .tags[0]' "$WORKDIR/targets.json")"
-  ok="$(printf '%s' "$CHECK" | jq --arg t "$t" --arg repo "$REF_REPO" '
+  ok="$(printf '%s' "$CHECK" | jq --arg t "$t" --arg repo "$REF_REPO" --arg dest "$(layout_of "$t")" '
+    def kv: if type == "string" then (split(",") | map(split("=") | {(.[0]): (.[1:] | join("="))}) | add) else . end;
     .target[$t] | (.tags == [$repo])
-      and ([.output[] | if type == "string" then test("push-by-digest=true") else (.["push-by-digest"] | tostring) == "true" end] | all)')"
-  [ "$ok" = true ] || die "Could not rewrite target '$t' to push by digest; resolved config: $(printf '%s' "$CHECK" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
+      and (.output | length) == 1
+      and ([.output[] | kv | .type == "oci" and .dest == $dest and (.push // "false" | tostring) != "true"] | all)')"
+  [ "$ok" = true ] || die "Could not rewrite target '$t' to a local OCI layout; resolved config: $(printf '%s' "$CHECK" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
 done
 
 # --- build: retries, then Harbor -> GHCR direct fallback ---
@@ -181,6 +198,8 @@ METADATA="$WORKDIR/metadata.json"
 run_bake() {
   local args=()
   mapfile -d '' -t args < <(set_args "$@")
+  # A failed attempt can leave a partial layout behind.
+  rm -rf "$LAYOUT_ROOT" && mkdir -p "$LAYOUT_ROOT"
   docker buildx bake "${FILE_ARGS[@]}" "${args[@]}" --metadata-file "$METADATA" "${REQUESTED[@]}"
 }
 
@@ -204,19 +223,22 @@ if [ "$ok" != true ] && [ -n "${INPUT_HARBOR_PREFIX:-}" ]; then
 fi
 [ "$ok" = true ] || die "docker buildx bake failed."
 
-# --- record pushed images for the gate ---
+# --- record built images for the gate ---
 PUSHED_JSON="$(printf '%s\n' "${PUSHED[@]}" | jq -R 'select(. != "")' | jq -sc .)"
-jq -c --slurpfile meta "$METADATA" --argjson pushed "$PUSHED_JSON" '
+jq -c --slurpfile meta "$METADATA" --argjson pushed "$PUSHED_JSON" --arg root "$LAYOUT_ROOT" '
   [ .[] | select(.name | IN($pushed[]))
     | . as $t
     | ($meta[0][$t.name]["containerimage.digest"] // "") as $d
-    | {name: $t.name, repo: ($t.tags[0] | sub(":[^:/]+$"; "")), digest: $d, tags: $t.tags} ]
+    | {name: $t.name, repo: ($t.tags[0] | sub(":[^:/]+$"; "")), digest: $d, layout: "\($root)/\($t.name)", tags: $t.tags} ]
 ' "$WORKDIR/targets.json" > "$IMAGES_JSON"
 [ "$(jq length "$IMAGES_JSON")" -eq "${#PUSHED[@]}" ] || die "Could not record every pushed target in ${IMAGES_JSON}."
 if jq -e 'any(.[]; .digest == "")' "$IMAGES_JSON" >/dev/null; then
   die "bake metadata is missing a digest for: $(jq -r '[.[] | select(.digest == "") | .name] | join(", ")' "$IMAGES_JSON")"
 fi
-jq -r '.[] | "[docker-publish] pushed \(.name): \(.repo)@\(.digest) (pending tags: \(.tags | join(", ")))"' "$IMAGES_JSON" >&2
+while IFS= read -r layout; do
+  [ -f "${layout}/index.json" ] || die "bake did not write an OCI layout to ${layout}."
+done < <(jq -r '.[].layout' "$IMAGES_JSON")
+jq -r '.[] | "[docker-publish] built \(.name): \(.digest) in \(.layout) (not pushed yet; pending tags: \(.tags | join(", ")))"' "$IMAGES_JSON" >&2
 
 # --- validate docker-loaded local targets ---
 if [ "${INPUT_VALIDATE_IMAGES:-true}" = true ]; then

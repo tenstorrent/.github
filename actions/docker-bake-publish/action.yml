@@ -2,8 +2,9 @@ name: "Docker Bake Publish (SBOM + Trivy)"
 description: >-
   Run `docker buildx bake` and publish every registry-pushed target with SLSA
   provenance, an SBOM enriched from the image's OCI labels, and a Trivy
-  vulnerability gate. Pushed targets go to the registry by digest first; their
-  tags are applied only after every target passes. Bake variables come from the
+  vulnerability gate. Pushed targets are built into local OCI layouts and
+  gated there; nothing reaches the registry until every target passes, and tags
+  are applied last. Bake variables come from the
   environment: set them with `env:` on the step that uses this action.
 
 inputs:
@@ -20,7 +21,8 @@ inputs:
     description: >-
       Newline-delimited bake --set overrides. For targets that push to a
       registry, `<target>.tags` and `<target>.output` are read to decide what
-      gets published, then replaced by a push-by-digest output.
+      gets published, then replaced by a local OCI layout output that is
+      pushed only after the gate passes.
     required: false
     default: ""
   retries:
@@ -146,7 +148,7 @@ runs:
         INSTALL_ATTEST: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/../docker-publish/scripts/install-tools.sh"
 
-    - name: Run docker buildx bake (push by digest)
+    - name: Run docker buildx bake (local OCI layouts)
       id: bake
       shell: bash
       env:
@@ -165,12 +167,13 @@ runs:
       run: |
         set -euo pipefail
         images="$(mktemp "${RUNNER_TEMP}/docker-bake-publish-images.XXXXXX")"
-        IMAGES_JSON="$images" bash "${GITHUB_ACTION_PATH}/scripts/bake.sh"
+        layouts="$(mktemp -d "${RUNNER_TEMP}/docker-bake-publish-layouts.XXXXXX")"
+        IMAGES_JSON="$images" LAYOUT_ROOT="$layouts" bash "${GITHUB_ACTION_PATH}/scripts/bake.sh"
         echo "images-file=${images}" >> "$GITHUB_OUTPUT"
         echo "report-id=$(jq -r '[.[].digest] | join(",")' "$images" | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
         echo "count=$(jq length "$images")" >> "$GITHUB_OUTPUT"
 
-    - name: Gate, enrich SBOMs and publish tags
+    - name: Gate, push, enrich SBOMs and publish tags
       id: gate
       if: steps.bake.outputs.count != '0'
       shell: bash

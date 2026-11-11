@@ -9,6 +9,18 @@ oneline() { printf '%s' "$1" | tr '\r\n' '  ' | tr -d '\000-\010\013\014\016-\03
 
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
+# Print a blob from a local OCI layout after checking it against its digest.
+# Read blobs directly: oras --oci-layout only knows the media type of manifests
+# listed in index.json, and a platform manifest is listed only in its image index.
+# Usage: layout_blob <layout-dir> <sha256:digest>
+layout_blob() {
+  local path="$1/blobs/sha256/${2#sha256:}"
+  [[ "$2" =~ ^sha256:[0-9a-f]{64}$ ]] || die "Not a sha256 digest: '$2'."
+  [ -f "$path" ] || die "Blob $2 is not in the OCI layout $1."
+  [ "$(sha256_of "$path")" = "${2#sha256:}" ] || die "Blob $2 in $1 does not match its digest."
+  cat "$path"
+}
+
 # BuildKit attestation-manifests carry a `subject`. On registries without the
 # Referrers API (e.g. GHCR), oras would otherwise create a visible
 # `sha256-<digest>` fallback tag for each one; BuildKit itself never does.
@@ -81,6 +93,23 @@ require_attesting_builder() {
   if [ "$driver" = docker ]; then
     die "The active buildx builder uses the 'docker' driver, which cannot produce provenance/SBOM attestations. Run docker/setup-buildx-action before this action."
   fi
+}
+
+# BuildKit exports cache while it builds, before the gate runs, so a cache-to
+# that leaves the runner uploads the layers of an image that may then fail the
+# gate. inline (cache metadata inside the image) and local stay put.
+# Usage: warn_ungated_cache <what> <cache-to entry...>
+warn_ungated_cache() {
+  local what="$1" entry type
+  shift
+  for entry in "$@"; do
+    [ -n "$entry" ] || continue
+    type="$(printf '%s' "$entry" | tr ',' '\n' | sed -n 's/^type=//p' | head -n1)"
+    case "${type:-registry}" in
+      inline | local) ;;
+      *) echo "::warning::${what}: cache-to '$(oneline "$entry")' uploads build cache during the build, before the Trivy and label gates run. The layers of an image that fails the gate still reach that cache. See 'Failure modes and gotchas' in actions/README.md." ;;
+    esac
+  done
 }
 
 # Print "os/arch[/variant]" for every real platform manifest in an OCI index,

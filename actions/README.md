@@ -8,35 +8,101 @@ repository as `tenstorrent/.github/actions/<name>@<ref>`.
 | [`docker-publish`](docker-publish/action.yml) | Building and publishing one image from a Dockerfile |
 | [`docker-bake-publish`](docker-bake-publish/action.yml) | Publishing the targets of a `docker buildx bake` file |
 
-Both put every published image through the same pipeline. Nothing is reachable
-by tag until all of it has passed.
+Both put every published image through the same pipeline. Nothing reaches a
+registry until the gates have passed, and nothing is reachable by tag until all
+of the pipeline has passed.
 
 ## What the pipeline does
 
-1. **Build and push by digest only**, with max-mode SLSA provenance and a
-   BuildKit SBOM attestation.
+1. **Build into a local OCI layout** on the runner, with max-mode SLSA
+   provenance and a BuildKit SBOM attestation. Nothing is pushed.
 2. **Gate every image.** Each platform image must carry the required OCI
    labels, and a Trivy scan must find nothing at the configured severities.
    Trivy reports are uploaded as a workflow artifact, pass or fail.
-3. **Enrich the SBOM.** Each platform is rescanned with syft into an SPDX 2.3
+3. **Push by digest.** Only once every image has passed are the layouts pushed
+   to the repository of each image's first tag, with no tag.
+4. **Enrich the SBOM.** Each platform is rescanned with syft into an SPDX 2.3
    SBOM. The describing package gets its license, source and supplier from
    the image's OCI labels. Packages get the OS, source-package, supplier and
    layer data Trivy needs to scan the SBOM, and package checksums from the
    archive hashes syft reads but does not write for most ecosystems (see
    [Why not Trivy out of the box](#why-not-trivy-out-of-the-box)).
-4. **Sign the SBOM** of each platform with `actions/attest` and push the
+5. **Sign the SBOM** of each platform with `actions/attest` and push the
    Sigstore bundle as an OCI referrer of that platform image.
-5. **Copy, then tag.** Every image is copied by digest to any other
+6. **Copy, then tag.** Every image is copied by digest to any other
    repositories it is tagged in, together with its signed SBOM bundles. Only
    then are the tags applied.
 
-If a gate fails, the images exist only as untagged digests.
+If a label check or Trivy fails, or Trivy itself errors, nothing is pushed:
+the image never leaves the runner. See
+[Failure modes and gotchas](#failure-modes-and-gotchas) for what each failure
+leaves behind, and for the one way image content can still leave the runner
+before the gate: build cache.
+
+## Failure modes and gotchas
+
+### Build cache is uploaded before the gate runs
+
+> [!WARNING]
+> `cache-to` bypasses the gate. BuildKit exports cache **while it builds**,
+> before the label check and Trivy run. If `cache-to` points anywhere other
+> than the runner (`type=registry`, a bare `ghcr.io/...:cache` reference,
+> `type=gha`, `type=s3`, `type=azblob`), the layers of an image that then fails
+> the gate are already in that cache, and nothing removes them.
+
+The cache is not a tagged, runnable image, but it holds the same layer blobs,
+and anyone who can read the cache location can download them. That includes
+whatever Trivy's secret scanner found: a credential baked into a layer reaches
+the cache before Trivy flags it.
+
+Both actions print a `::warning::` for every such `cache-to`, including ones
+set in a bake file. To keep failing images off the registry entirely:
+
+- Use `cache-from` only (reading cache uploads nothing), `type=inline` (cache
+  metadata inside the image, which is pushed only after the gate), or
+  `type=local` on a self-hosted runner.
+- If you need a shared cache, give it its own private repository, never the
+  published one, with read access limited to the build, and expire it.
+
+### What each failure leaves behind
+
+| Fails at | Registry | Tags |
+|---|---|---|
+| Build (including running out of disk for the OCI layout) | Nothing, apart from build cache (above) | None |
+| Label check, Trivy findings, or Trivy erroring (including a failed vulnerability database download) | Nothing, apart from build cache | None |
+| Any image in a bake run fails the gate | Nothing for any target, including ones that passed | None |
+| Push by digest | Possibly some blobs, or whole images that passed the gate | None |
+| SBOM enrichment, signing, copying to other repositories | Images that passed the gate, as untagged digests; signed SBOM bundles if signing ran | None |
+| Applying tags | Everything | Possibly some (see below) |
+
+The runner's OCI layouts are deleted when the gate step ends, pass or fail.
+Trivy reports are uploaded as an artifact either way.
+
+### Other gotchas
+
+- **The tag phase is not atomic.** Gating, pushing, enrichment, signing and
+  copying all finish before the first tag, but tags are separate registry
+  calls. A registry failure during tagging can leave some tags applied.
+- **Signatures cannot be withdrawn.** An SBOM signed with `actions/attest`
+  is recorded in GitHub's attestation store and the public Sigstore
+  transparency log (public repositories) even if a later step fails.
+- **The same image can pass today and fail tomorrow.** Trivy's vulnerability
+  database is not pinned, so a rebuild or re-run can fail on a newly
+  published CVE with no code change.
+- **Non-pushed bake targets are not gated.** `type=docker` and local exports
+  build unchanged; only targets that push to a registry go through the gate.
+- **Disk.** Every image to be pushed sits on the runner as an OCI layout until
+  the gate passes (see [Requirements](#requirements)).
 
 ## Requirements
 
 - A Linux runner (x64 or arm64) with Docker, `jq`, `curl` and `git`.
 - A BuildKit builder. Run `docker/setup-buildx-action` first; the classic
   `docker` driver cannot produce attestations.
+- Free disk on the runner for the built images: each is exported to
+  `$RUNNER_TEMP` as an OCI layout (compressed layers, all platforms) and kept
+  until it is pushed. With bake, every pushed target in the run is on disk at
+  once. A remote or Kubernetes builder streams the whole image to the runner.
 - A registry login (`docker/login-action`) for every registry being pushed to.
 - Job permissions:
 
@@ -78,7 +144,7 @@ repository is where the image is built and scanned; tags in other repositories
 receive an identical copy with the same digest.
 
 Outputs: `digest` (the published index), `image` (`<primary-repo>@<digest>`)
-and `build-digest` (the index BuildKit pushed before enrichment, never tagged).
+and `build-digest` (the index BuildKit built, before enrichment, never tagged).
 
 ## docker-bake-publish
 
@@ -94,8 +160,9 @@ and `build-digest` (the index BuildKit pushed before enrichment, never tagged).
       *.platform=linux/amd64
 ```
 
-Targets whose output pushes to a registry are rewritten to push by digest and
-go through the pipeline; their `tags` are applied at the end. Targets that do
+Targets whose output pushes to a registry are rewritten to export a local OCI
+layout (keeping exporter options such as compression) and go through the
+pipeline; their `tags` are applied at the end. Targets that do
 not push (`type=docker`, local exports) are built unchanged and are not gated.
 
 ### Bake variables
@@ -147,9 +214,6 @@ See each `action.yml` for the full list.
 
 ## Things to know
 
-- **The tag phase is not atomic.** Gating, enrichment, signing and copying all
-  finish before the first tag, but tags are separate registry calls. A registry
-  failure during tagging can leave some tags applied.
 - **Finding the signed SBOM.** `trivy image --sbom-sources oci` and
   `gh attestation verify` find it when given a platform digest
   (`repo@sha256:...`). A tag resolves to the index, which carries a referrer

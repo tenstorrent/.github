@@ -2,7 +2,8 @@ name: "Docker Publish (SBOM + Trivy)"
 description: >-
   Build and publish a container image with SLSA provenance, an SBOM enriched
   from the image's OCI labels, and a Trivy vulnerability gate. The image is
-  pushed by digest first; tags are only applied after every gate passes.
+  built into a local OCI layout and gated there; only an image that passes is
+  pushed (by digest), and tags are applied last.
 
 inputs:
   tags:
@@ -67,7 +68,12 @@ inputs:
     required: false
     default: ""
   cache-to:
-    description: "Newline-separated cache export destinations"
+    description: >-
+      Newline-separated cache export destinations. BuildKit exports cache during
+      the build, before the gates run, so any destination other than `inline`
+      or `local` (registry, gha, s3, azblob) receives the layers of an image
+      that later fails Trivy. Point it at a private cache repository, never the
+      published one. See "Failure modes and gotchas" in actions/README.md.
     required: false
     default: ""
   builder:
@@ -152,7 +158,7 @@ outputs:
     description: "Digest reference of the published image in the primary repository"
     value: ${{ steps.prepare.outputs.primary-repo }}@${{ steps.gate.outputs.digest }}
   build-digest:
-    description: "Index digest as pushed by BuildKit, before SBOM enrichment (never tagged)"
+    description: "Index digest as built by BuildKit, before SBOM enrichment (never tagged)"
     value: ${{ steps.build.outputs.digest }}
 
 runs:
@@ -165,6 +171,7 @@ runs:
         INPUT_TAGS: ${{ inputs.tags }}
         INPUT_BUILDER: ${{ inputs.builder }}
         INPUT_SBOM_GENERATOR: ${{ inputs.sbom-generator }}
+        INPUT_CACHE_TO: ${{ inputs.cache-to }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 
@@ -174,8 +181,8 @@ runs:
         INSTALL_ATTEST: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/install-tools.sh"
 
-    # Push by digest only: nothing is reachable by tag until the gates below pass.
-    - name: Build and push by digest
+    # Export to a local OCI layout: nothing reaches a registry until the gates below pass.
+    - name: Build into a local OCI layout
       id: build
       uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
       with:
@@ -195,9 +202,9 @@ runs:
         no-cache: ${{ inputs.no-cache }}
         provenance: mode=max
         attests: type=sbom,generator=${{ steps.prepare.outputs.sbom-generator }}
-        outputs: type=image,name=${{ steps.prepare.outputs.primary-repo }},push-by-digest=true,name-canonical=true,push=true${{ inputs.image-output-options != '' && format(',{0}', inputs.image-output-options) || '' }}
+        outputs: type=oci,dest=${{ runner.temp }}/docker-publish-layout-${{ steps.prepare.outputs.report-id }},tar=false${{ inputs.image-output-options != '' && format(',{0}', inputs.image-output-options) || '' }}
 
-    - name: Gate, enrich SBOM and publish tags
+    - name: Gate, push, enrich SBOM and publish tags
       id: gate
       shell: bash
       env:
@@ -213,12 +220,13 @@ runs:
         REPORT_ROOT: ${{ runner.temp }}/docker-publish-trivy-${{ steps.prepare.outputs.report-id }}
         PRIMARY_REPO: ${{ steps.prepare.outputs.primary-repo }}
         BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+        LAYOUT: ${{ runner.temp }}/docker-publish-layout-${{ steps.prepare.outputs.report-id }}
         TAGS: ${{ steps.prepare.outputs.tags }}
       run: |
         set -euo pipefail
         images="$(mktemp "${RUNNER_TEMP}/docker-publish-images.XXXXXX")"
-        jq -n --arg repo "$PRIMARY_REPO" --arg digest "$BUILD_DIGEST" --arg tags "$TAGS" \
-          '[{name: ($repo | split("/") | last), repo: $repo, digest: $digest, tags: ($tags | split("\n") | map(select(. != "")))}]' > "$images"
+        jq -n --arg repo "$PRIMARY_REPO" --arg digest "$BUILD_DIGEST" --arg layout "$LAYOUT" --arg tags "$TAGS" \
+          '[{name: ($repo | split("/") | last), repo: $repo, digest: $digest, layout: $layout, tags: ($tags | split("\n") | map(select(. != "")))}]' > "$images"
         bash "${GITHUB_ACTION_PATH}/scripts/gate.sh" "$images"
 
     - name: Upload Trivy reports

@@ -4,7 +4,7 @@
 # Env: INPUT_TAGS (newline/comma separated), INPUT_BUILDER (optional),
 #      INPUT_SBOM_GENERATOR (optional; must be pinned by digest. Empty uses
 #      the org mirror pinned in actions/tool-images.json),
-#      ATTEST_SBOM (default true)
+#      ATTEST_SBOM (default true), INPUT_CACHE_TO (warned about if it leaves the runner)
 # Outputs: primary-repo, report-id, sbom-generator, tags (normalized, newline separated)
 
 set -euo pipefail
@@ -27,6 +27,9 @@ parse_ref "${TAGS[0]}"
 PRIMARY_REPO="$REF_REPO"
 
 require_attesting_builder "${INPUT_BUILDER:-}"
+
+mapfile -t CACHE_TO < <(printf '%s\n' "${INPUT_CACHE_TO:-}")
+warn_ungated_cache "docker-publish" "${CACHE_TO[@]}"
 
 # The SBOM scanner runs inside the build with access to the image's filesystem.
 SBOM_GENERATOR="${INPUT_SBOM_GENERATOR:-}"
