@@ -1,15 +1,16 @@
 #!/bin/bash
 # `docker buildx bake` front end for the docker-bake-publish action.
 #
-# Accepts the same inputs as tt-metal's manual-docker-bake action. Every target
+# Bake variables are not inputs: bake reads them from the environment, which the
+# caller sets with `env:` on the step that uses the action. Every target
 # whose resolved output pushes to a registry is rewritten to push BY DIGEST to
 # the repository of its first tag, with provenance + SBOM attestations forced
 # on. Its tags are recorded in images.json and applied only after gate.sh
 # passes. Targets that don't push (type=docker, local exports) build unchanged.
 #
 # Env (see action.yml for descriptions):
-#   INPUT_BAKE_FILE, INPUT_TARGETS, INPUT_SET_LINES, INPUT_UBUNTU_VERSION,
-#   INPUT_PYTHON_VERSION, INPUT_RETRIES, INPUT_RETRY_DELAY_SECONDS,
+#   INPUT_BAKE_FILE, INPUT_TARGETS, INPUT_SET_LINES,
+#   INPUT_RETRIES, INPUT_RETRY_DELAY_SECONDS,
 #   INPUT_USE_DEFAULT_BUILDER, INPUT_VALIDATE_IMAGES, INPUT_ENABLE_ATTESTATIONS,
 #   INPUT_ENRICH_SBOM, INPUT_HARBOR_PREFIX, INPUT_SYFT_SCANNER_IMAGE
 #   ATTEST_SBOM  (default true) fail early without id-token: write
@@ -27,8 +28,6 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 
 # --- inputs ---
 [ "${INPUT_USE_DEFAULT_BUILDER:-false}" = true ] && { docker buildx use default || true; }
-[ -n "${INPUT_UBUNTU_VERSION:-}" ] && export UBUNTU_VERSION="$INPUT_UBUNTU_VERSION"
-[ -n "${INPUT_PYTHON_VERSION:-}" ] && export PYTHON_VERSION="$INPUT_PYTHON_VERSION"
 
 FILE_ARGS=()
 while IFS= read -r f; do

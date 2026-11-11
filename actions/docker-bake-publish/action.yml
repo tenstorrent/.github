@@ -3,8 +3,8 @@ description: >-
   Run `docker buildx bake` and publish every registry-pushed target with SLSA
   provenance, an SBOM enriched from the image's OCI labels, and a Trivy
   vulnerability gate. Pushed targets go to the registry by digest first; their
-  tags are applied only after every target passes. Input-compatible with
-  tt-metal's manual-docker-bake action.
+  tags are applied only after every target passes. Bake variables come from the
+  environment: set them with `env:` on the step that uses this action.
 
 inputs:
   bake-file:
@@ -21,14 +21,6 @@ inputs:
       Newline-delimited bake --set overrides. For targets that push to a
       registry, `<target>.tags` and `<target>.output` are read to decide what
       gets published, then replaced by a push-by-digest output.
-    required: false
-    default: ""
-  ubuntu-version:
-    description: "Optional UBUNTU_VERSION env for bake variables"
-    required: false
-    default: ""
-  python-version:
-    description: "Optional PYTHON_VERSION env for bake variables"
     required: false
     default: ""
   retries:
@@ -173,8 +165,6 @@ runs:
         INPUT_BAKE_FILE: ${{ inputs.bake-file }}
         INPUT_TARGETS: ${{ inputs.targets }}
         INPUT_SET_LINES: ${{ inputs.set-lines }}
-        INPUT_UBUNTU_VERSION: ${{ inputs.ubuntu-version }}
-        INPUT_PYTHON_VERSION: ${{ inputs.python-version }}
         INPUT_RETRIES: ${{ inputs.retries }}
         INPUT_RETRY_DELAY_SECONDS: ${{ inputs.retry-delay-seconds }}
         INPUT_USE_DEFAULT_BUILDER: ${{ inputs.use-default-builder }}

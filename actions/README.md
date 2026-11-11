@@ -82,6 +82,9 @@ and `build-digest` (the index BuildKit pushed before enrichment, never tagged).
 
 ```yaml
 - uses: tenstorrent/.github/actions/docker-bake-publish@<ref>
+  env:
+    UBUNTU_VERSION: "22.04"
+    PYTHON_VERSION: "3.10"
   with:
     bake-file: docker-bake.hcl
     targets: release
@@ -89,10 +92,32 @@ and `build-digest` (the index BuildKit pushed before enrichment, never tagged).
       *.platform=linux/amd64
 ```
 
-Accepts the inputs of tt-metal's `manual-docker-bake`. Targets whose output
-pushes to a registry are rewritten to push by digest and go through the
-pipeline; their `tags` are applied at the end. Targets that do not push
-(`type=docker`, local exports) are built unchanged and are not gated.
+Targets whose output pushes to a registry are rewritten to push by digest and
+go through the pipeline; their `tags` are applied at the end. Targets that do
+not push (`type=docker`, local exports) are built unchanged and are not gated.
+
+### Bake variables
+
+The action has no inputs for bake variables. Bake reads a `variable` block's
+value from the environment variable of the same name, and `env:` on the step
+that uses the action reaches bake, so any variable your bake file declares can
+be set as in the example above. Job-level and workflow-level `env:` work too.
+
+```hcl
+variable "UBUNTU_VERSION" { default = "22.04" }
+```
+
+To change a single target's attribute rather than a variable, use `set-lines`
+(for example `app.args.FLAVOR=debug`). `tags` and `output` of pushed targets
+are the exception: the action reads them to decide what to publish and then
+replaces them, so set those per target, not with a wildcard.
+
+### Migrating from tt-metal's `manual-docker-bake`
+
+The other inputs keep their names. `ubuntu-version` and `python-version` are
+gone: move them to `env:` as `UBUNTU_VERSION` and `PYTHON_VERSION`. A caller
+that still passes them gets an "unexpected input" warning and the variable is
+left at its bake-file default.
 
 Output: `images`, a JSON array with one `{name, repo, digest, build_digest,
 tags}` entry per published target (`[]` when no target pushes).
