@@ -28,12 +28,12 @@ jobs:
       - name: Shell syntax
         run: |
           set -euo pipefail
-          while IFS= read -r f; do bash -n "$f"; done < <(git ls-files 'actions/**/*.sh')
+          while IFS= read -r f; do bash -n "$f"; done < <(git ls-files 'actions/*.sh')
 
       - name: shellcheck
         run: |
           set -euo pipefail
-          mapfile -t files < <(git ls-files 'actions/**/*.sh')
+          mapfile -t files < <(git ls-files 'actions/*.sh')
           shellcheck -x -P SCRIPTDIR "${files[@]}"
 
       - name: Shared inputs, gate env and pins agree

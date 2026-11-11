@@ -60,6 +60,15 @@ require_digest_pinned() {
     || die "$2 must be pinned by digest (name@sha256:...), got '$1'. Tags are mutable and are not accepted."
 }
 
+# Images the actions run are pinned in actions/tool-images.json and mirrored to
+# the org registry by mirror-tool-images.sh. Print one as <mirror>@<digest>.
+# Usage: pinned_tool_image <name>
+TOOL_IMAGES_JSON="$(dirname "${BASH_SOURCE[0]}")/../../tool-images.json"
+pinned_tool_image() {
+  jq -er --arg n "$1" '.[$n] | "\(.mirror)@\(.digest)"' "$TOOL_IMAGES_JSON" \
+    || die "No pinned image '$1' in ${TOOL_IMAGES_JSON}."
+}
+
 # Attestations need a BuildKit driver (docker-container, kubernetes, remote).
 # The classic docker driver either errors or silently drops them.
 # Usage: require_attesting_builder [builder-name]

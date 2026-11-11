@@ -93,8 +93,10 @@ inputs:
       BuildKit SBOM scanner image used to generate the initial SBOM attestation.
       It runs inside every build with access to the image's filesystem, so it
       must be pinned by digest (name@sha256:...); anything else is rejected.
+      Empty uses the org mirror of docker/buildkit-syft-scanner pinned in
+      actions/tool-images.json.
     required: false
-    default: "mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
+    default: ""
   sbom-supplier:
     description: "SPDX supplier recorded on the SBOM's describing package"
     required: false
@@ -188,7 +190,7 @@ runs:
         pull: ${{ inputs.pull }}
         no-cache: ${{ inputs.no-cache }}
         provenance: mode=max
-        attests: type=sbom,generator=${{ inputs.sbom-generator }}
+        attests: type=sbom,generator=${{ steps.prepare.outputs.sbom-generator }}
         outputs: type=image,name=${{ steps.prepare.outputs.primary-repo }},push-by-digest=true,name-canonical=true,push=true${{ inputs.image-output-options != '' && format(',{0}', inputs.image-output-options) || '' }}
 
     - name: Gate, enrich SBOM and publish tags

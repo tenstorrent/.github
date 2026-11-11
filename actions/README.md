@@ -119,7 +119,7 @@ replaces them, so set those per target, not with a wildcard.
 - `oras-image` is gone: oras always comes from the pinned release tarball.
 - `syft-scanner-image` must be pinned by digest (`name@sha256:...`) and is
   used exactly as given, without `harbor-prefix`. Leave it empty to use the
-  pinned default.
+  org mirror (see [Tool images](#tool-images)).
 
 A caller that still passes a removed input gets an "unexpected input" warning
 and the input has no effect.
@@ -163,8 +163,9 @@ See each `action.yml` for the full list.
 - **Tools are pinned, with no fallback.** syft, oras and trivy each come from
   one release tarball whose sha256 is pinned in `install-tools.sh` and checked
   before it is unpacked. There is no alternative source and no reuse of a
-  binary already on the runner. The BuildKit SBOM scanner image must be pinned
-  by digest; a tag is rejected. Trivy's vulnerability database is the one
+  binary already on the runner. The BuildKit SBOM scanner image is pulled by
+  digest from the org mirror (see [Tool images](#tool-images)); a scanner
+  given as a tag is rejected. Trivy's vulnerability database is the one
   thing that is not pinned: it has to be current to be useful, and Trivy
   fetches it at scan time.
 - **Tools on `PATH`.** The actions install syft, oras and trivy into
@@ -185,7 +186,45 @@ See each `action.yml` for the full list.
 - Tool versions and checksums are pinned in
   [`install-tools.sh`](docker-publish/scripts/install-tools.sh). Bump a version
   together with both of its checksums.
-- The BuildKit SBOM scanner image is pinned by digest in two places:
-  the `sbom-generator` default in `docker-publish/action.yml` and
-  `SYFT_SCANNER_DIGEST` in `bake.sh`. Bump both; the consistency check
-  compares them.
+- Image digests live only in [`tool-images.json`](tool-images.json); the
+  consistency check fails if a script or `action.yml` hardcodes one.
+
+## Tool images
+
+The BuildKit SBOM scanner runs inside every build, so the org uses one copy of
+it that this repository manages. [`tool-images.json`](tool-images.json) pins
+the upstream image by digest and names its mirror:
+
+| Image | Upstream | Mirror |
+|---|---|---|
+| `buildkit-syft-scanner` | `docker.io/docker/buildkit-syft-scanner` | `ghcr.io/tenstorrent/buildkit-syft-scanner` |
+
+Both actions default to `<mirror>@<digest>` from that file.
+[`mirror-tool-images.sh`](mirror-tool-images.sh) copies the pinned digest from
+upstream to the mirror, and the
+[`Mirror tool images`](../.github/workflows/mirror-tool-images.yml) workflow
+runs it when the pin file changes. A registry-to-registry copy keeps the
+digest, so the mirror is byte-identical to upstream and anyone can check it
+against Docker's published image. Upstream is contacted when the pin changes,
+not on every build.
+
+To move the org to a new scanner version:
+
+1. Look up the new digest of the upstream tag, for example with
+   `docker buildx imagetools inspect docker/buildkit-syft-scanner:stable-1`.
+2. Change `digest` in `tool-images.json` in a pull request. The mirror workflow
+   runs on the pull request and copies the new digest before anything asks
+   for it.
+3. Merge. Callers get the new scanner when they move to the new commit of
+   this repository.
+
+Things to know:
+
+- The mirror package must be public, because every repository's builds pull
+  it. A new package starts private; set its visibility once in the package
+  settings. The workflow fails until it is publicly pullable.
+- Each mirrored digest also gets a `<tag>-<digest prefix>` tag. Nothing pulls
+  by it; it keeps registry cleanup from deleting a digest that is in use.
+- To pull the scanner through a cache such as Harbor, pass the same digest
+  through it with `syft-scanner-image` or `sbom-generator`. The actions do not
+  add a prefix themselves.

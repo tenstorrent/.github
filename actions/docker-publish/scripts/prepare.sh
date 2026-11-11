@@ -2,9 +2,10 @@
 # Validate docker-publish inputs before anything is built or pushed.
 #
 # Env: INPUT_TAGS (newline/comma separated), INPUT_BUILDER (optional),
-#      INPUT_SBOM_GENERATOR (must be pinned by digest),
+#      INPUT_SBOM_GENERATOR (optional; must be pinned by digest. Empty uses
+#      the org mirror pinned in actions/tool-images.json),
 #      ATTEST_SBOM (default true)
-# Outputs: primary-repo, report-id, tags (normalized, newline separated)
+# Outputs: primary-repo, report-id, sbom-generator, tags (normalized, newline separated)
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -28,7 +29,9 @@ PRIMARY_REPO="$REF_REPO"
 require_attesting_builder "${INPUT_BUILDER:-}"
 
 # The SBOM scanner runs inside the build with access to the image's filesystem.
-require_digest_pinned "${INPUT_SBOM_GENERATOR:?}" "sbom-generator"
+SBOM_GENERATOR="${INPUT_SBOM_GENERATOR:-}"
+[ -n "$SBOM_GENERATOR" ] || SBOM_GENERATOR="$(pinned_tool_image buildkit-syft-scanner)"
+require_digest_pinned "$SBOM_GENERATOR" "sbom-generator"
 
 # Fail before building, not after the scan; attest-sbom.sh checks this again.
 if [ "${ATTEST_SBOM:-true}" = true ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
@@ -38,6 +41,7 @@ fi
 log "primary repository: $PRIMARY_REPO"
 {
   echo "primary-repo=$PRIMARY_REPO"
+  echo "sbom-generator=$SBOM_GENERATOR"
   echo "report-id=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
   echo "tags<<__TAGS__"
   printf '%s\n' "${TAGS[@]}"

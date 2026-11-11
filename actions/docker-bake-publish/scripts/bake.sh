@@ -50,11 +50,10 @@ done <<< "${INPUT_SET_LINES:-}"
 
 # BuildKit's SBOM scanner runs inside every build with access to the image's
 # filesystem. One digest-pinned image, used for every attempt: no alternative
-# registry and no fallback. Keep the default in sync with docker-publish's
-# sbom-generator default; bump the digest to pick up scanner updates.
-SYFT_SCANNER_DIGEST="sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
+# registry and no fallback. The default is the org mirror pinned in
+# actions/tool-images.json.
 GENERATOR="${INPUT_SYFT_SCANNER_IMAGE:-}"
-[ -n "$GENERATOR" ] || GENERATOR="mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@${SYFT_SCANNER_DIGEST}"
+[ -n "$GENERATOR" ] || GENERATOR="$(pinned_tool_image buildkit-syft-scanner)"
 require_digest_pinned "$GENERATOR" "syft-scanner-image"
 
 set_args() { local s; for s in "$@"; do [ -n "$s" ] && printf -- '--set\0%s\0' "$s"; done; return 0; }

@@ -8,16 +8,19 @@
 # Checked:
 #   - an input declared by both actions has the same description and default
 #   - the env both `gate` steps pass to gate.sh agrees on every shared key
-#   - bake.sh pins the same SBOM scanner digest as docker-publish's
-#     sbom-generator default
+#   - tool-images.json is well formed and is the only place an image digest
+#     appears: both scanner inputs default to empty and no script or
+#     action.yml hardcodes one
 #   - every `uses:` is pinned to a full commit sha
 
+require 'json'
 require 'yaml'
 
 ROOT = __dir__
 PUBLISH = File.join(ROOT, 'docker-publish', 'action.yml')
 BAKE = File.join(ROOT, 'docker-bake-publish', 'action.yml')
-BAKE_SH = File.join(ROOT, 'docker-bake-publish', 'scripts', 'bake.sh')
+PINS = File.join(ROOT, 'tool-images.json')
+MIRROR_PREFIX = 'ghcr.io/tenstorrent/'
 
 # Differ on purpose: each step reads its report id from its own earlier step.
 GATE_ENV_PER_ACTION = %w[REPORT_ROOT].freeze
@@ -54,15 +57,30 @@ end
   errors << "gate env '#{key}' is passed by docker-bake-publish only"
 end
 
-generator = publish['inputs']['sbom-generator']['default'].to_s
-action_digest = generator[/@(sha256:[0-9a-f]{64})\z/, 1]
-script_digest = File.read(BAKE_SH)[/^\s*SYFT_SCANNER_DIGEST="(sha256:[0-9a-f]{64})"/, 1]
-if action_digest.nil?
-  errors << "docker-publish sbom-generator default is not pinned by digest: #{generator}"
-elsif script_digest.nil?
-  errors << 'bake.sh does not set SYFT_SCANNER_DIGEST to a sha256 digest'
-elsif action_digest != script_digest
-  errors << "SBOM scanner digest differs: action.yml #{action_digest}, bake.sh #{script_digest}"
+# tool-images.json is the only place a tool image digest may live.
+pins = JSON.parse(File.read(PINS))
+errors << "#{File.basename(PINS)} lists no images" if pins.empty?
+pins.each do |name, pin|
+  %w[source tag digest mirror].each do |key|
+    errors << "tool-images.json '#{name}': missing #{key}" if pin[key].to_s.empty?
+  end
+  unless pin['digest'].to_s.match?(/\Asha256:[0-9a-f]{64}\z/)
+    errors << "tool-images.json '#{name}': digest is not a sha256 digest: #{pin['digest'].inspect}"
+  end
+  unless pin['mirror'].to_s.start_with?(MIRROR_PREFIX)
+    errors << "tool-images.json '#{name}': mirror must be under #{MIRROR_PREFIX}, got #{pin['mirror'].inspect}"
+  end
+end
+errors << "tool-images.json has no 'buildkit-syft-scanner', which both actions default to" unless pins.key?('buildkit-syft-scanner')
+
+{ 'sbom-generator' => publish, 'syft-scanner-image' => bake }.each do |input, action|
+  default = action['inputs'][input]['default'].to_s
+  errors << "input '#{input}' must default to empty (the pin file supplies it), got #{default.inspect}" unless default.empty?
+end
+(Dir[File.join(ROOT, '**', '*.{sh,yml}')] - [File.join(ROOT, 'docker-publish', 'scripts', 'install-tools.sh')]).each do |file|
+  next unless File.read(file).match?(/@sha256:[0-9a-f]{64}/)
+
+  errors << "#{file.delete_prefix("#{ROOT}/")}: hardcodes an image digest; pin images in tool-images.json"
 end
 
 { PUBLISH => publish, BAKE => bake }.each do |path, action|
@@ -76,7 +94,7 @@ end
 end
 
 if errors.empty?
-  puts "ok: #{shared.size} shared inputs, gate env, scanner digest and action pins are consistent"
+  puts "ok: #{shared.size} shared inputs, gate env, tool image pins and action pins are consistent"
 else
   warn errors.map { |e| "- #{e}" }.join("\n")
   exit 1
