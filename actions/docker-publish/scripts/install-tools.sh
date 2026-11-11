@@ -7,19 +7,13 @@
 # puts these binaries on PATH for every later step of the caller's job, not
 # just this action's.
 #
-# Safe to run more than once per job: a tool already in place at its pinned
-# version (or commit, for actions/attest) is not downloaded again.
+# Every tool comes from exactly one place, a release tarball whose sha256 is
+# pinned below, and is checked before it is unpacked. There is no alternative
+# source, no fallback, and no reuse of a binary already on the runner: each
+# run installs from the verified tarball again.
 #
 # Pinned versions/checksums come from each project's *_checksums.txt release
 # asset. Bump the version and BOTH checksums together; never float to latest.
-#
-# Env (optional):
-#   ORAS_IMAGE      self-hosted image carrying oras at ORAS_IMAGE_PATH, used
-#                   instead of the GitHub release (e.g. tt-metal's tool image)
-#   ORAS_IMAGE_PATH default /install/bin/oras
-#   ORAS_IMAGE_SHA256 expected sha256 of that binary; without it ORAS_IMAGE
-#                   should be pinned by digest (name@sha256:...)
-#   HARBOR_PREFIX   pull-through prefix tried first for ORAS_IMAGE
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -55,22 +49,9 @@ esac
 BIN_DIR="${RUNNER_TEMP:-/tmp}/docker-publish-bin"
 mkdir -p "$BIN_DIR"
 
-# True when BIN_DIR already holds <name> reporting "Version: <version>".
-# Usage: has_pinned_version <binary_name> <version>
-has_pinned_version() {
-  local bin="${BIN_DIR}/$1" out
-  [ -x "$bin" ] || return 1
-  out="$("$bin" version 2>/dev/null)" || return 1
-  grep -Eq "^Version:[[:space:]]+v?${2//./\\.}([^0-9.]|$)" <<< "$out"
-}
-
-# Usage: install_pinned_binary <url> <expected_sha256> <binary_name> <version>
+# Usage: install_pinned_binary <url> <expected_sha256> <binary_name>
 install_pinned_binary() {
-  local url="$1" expected="$2" name="$3" version="$4" tmp actual
-  if has_pinned_version "$name" "$version"; then
-    log "${name} ${version} already installed in ${BIN_DIR}"
-    return
-  fi
+  local url="$1" expected="$2" name="$3" tmp actual
   tmp="$(mktemp -d)"
   curl -sSfL --retry 3 "$url" -o "${tmp}/${name}.tar.gz"
   actual="$(sha256_of "${tmp}/${name}.tar.gz")"
@@ -92,50 +73,13 @@ fi
 
 install_pinned_binary \
   "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${ARCH}.tar.gz" \
-  "$syft_sha" syft "$SYFT_VERSION"
-# `docker create` works for FROM-scratch images with no CMD/ENTRYPOINT: the
-# container is never started, only used as a filesystem to copy from.
-#
-# The binary runs with the job's registry credentials, so it is checked before
-# it is installed or executed: against <expected_sha256> when given, otherwise
-# by requiring a digest-pinned image reference (the pull is then content
-# addressed). A mutable tag with neither is installed with a warning.
-# Usage: install_from_image <image> <path-in-image> <binary_name> [expected_sha256]
-install_from_image() {
-  local image="$1" path="$2" name="$3" expected="${4:-}" pull_ref="${HARBOR_PREFIX:-}$1" cid tmp actual
-  if ! docker pull "$pull_ref" >&2; then
-    log "pull-through failed for ${pull_ref}, falling back to ${image}"
-    pull_ref="$image"
-    docker pull "$pull_ref" >&2
-  fi
-  tmp="$(mktemp -d)"
-  cid="$(docker create "$pull_ref" noop)"
-  docker cp "${cid}:${path}" "${tmp}/${name}"
-  docker rm "$cid" >/dev/null
-  actual="$(sha256_of "${tmp}/${name}")"
-  if [ -n "$expected" ]; then
-    if [ "$actual" != "$expected" ]; then
-      rm -rf "$tmp"
-      die "sha256 mismatch for ${name} from ${pull_ref} (expected ${expected}, got ${actual})"
-    fi
-  elif [[ "$image" != *@sha256:* ]]; then
-    echo "::warning::${name} from ${pull_ref} is not verified: the image is not pinned by digest and no expected sha256 was given (binary sha256 ${actual})."
-  fi
-  install "${tmp}/${name}" "${BIN_DIR}/${name}"
-  rm -rf "$tmp"
-  log "installed ${name} from ${pull_ref} (sha256 ${actual}): $("${BIN_DIR}/${name}" version 2>/dev/null | head -1 || true)"
-}
-
-if [ -n "${ORAS_IMAGE:-}" ]; then
-  install_from_image "$ORAS_IMAGE" "${ORAS_IMAGE_PATH:-/install/bin/oras}" oras "${ORAS_IMAGE_SHA256:-}"
-else
-  install_pinned_binary \
-    "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" \
-    "$oras_sha" oras "$ORAS_VERSION"
-fi
+  "$syft_sha" syft
+install_pinned_binary \
+  "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" \
+  "$oras_sha" oras
 install_pinned_binary \
   "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-${trivy_arch}.tar.gz" \
-  "$trivy_sha" trivy "$TRIVY_VERSION"
+  "$trivy_sha" trivy
 
 # GITHUB_PATH applies to every later step of the caller's job, not only this
 # action's: callers' own steps after this action also see these binaries.
@@ -149,27 +93,17 @@ if [ "${INSTALL_ATTEST:-false}" = true ]; then
   ATTEST_ROOT="${RUNNER_TEMP:-/tmp}/docker-publish-attest"
   node_arch="$([ "$ARCH" = amd64 ] && echo x64 || echo arm64)"
   node_sha="$([ "$ARCH" = amd64 ] && echo "$NODE_SHA256_AMD64" || echo "$NODE_SHA256_ARM64")"
-  if [ "$("$ATTEST_ROOT/node/bin/node" --version 2>/dev/null || true)" = "v${NODE_VERSION}" ]; then
-    log "node v${NODE_VERSION} already installed"
-  else
-    rm -rf "$ATTEST_ROOT/node" && mkdir -p "$ATTEST_ROOT/node"
-    curl -sSfL --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "$ATTEST_ROOT/node.tar.gz"
-    actual="$(sha256_of "$ATTEST_ROOT/node.tar.gz")"
-    [ "$actual" = "$node_sha" ] || die "sha256 mismatch for node ${NODE_VERSION} (expected ${node_sha}, got ${actual})"
-    tar -xzf "$ATTEST_ROOT/node.tar.gz" -C "$ATTEST_ROOT/node" --strip-components 1
-    rm "$ATTEST_ROOT/node.tar.gz"
-    log "installed node: $("$ATTEST_ROOT/node/bin/node" --version)"
-  fi
+  rm -rf "$ATTEST_ROOT" && mkdir -p "$ATTEST_ROOT/node"
+  curl -sSfL --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "$ATTEST_ROOT/node.tar.gz"
+  actual="$(sha256_of "$ATTEST_ROOT/node.tar.gz")"
+  [ "$actual" = "$node_sha" ] || die "sha256 mismatch for node ${NODE_VERSION} (expected ${node_sha}, got ${actual})"
+  tar -xzf "$ATTEST_ROOT/node.tar.gz" -C "$ATTEST_ROOT/node" --strip-components 1
+  rm "$ATTEST_ROOT/node.tar.gz"
+  log "installed node: $("$ATTEST_ROOT/node/bin/node" --version)"
 
-  if [ -f "$ATTEST_ROOT/attest/dist/index.js" ] \
-    && [ "$(git -C "$ATTEST_ROOT/attest" rev-parse HEAD 2>/dev/null || true)" = "$ATTEST_COMMIT" ]; then
-    log "actions/attest@${ATTEST_COMMIT} already installed"
-  else
-    rm -rf "$ATTEST_ROOT/attest"
-    git init -q "$ATTEST_ROOT/attest"
-    git -C "$ATTEST_ROOT/attest" fetch -q --depth 1 https://github.com/actions/attest.git "$ATTEST_COMMIT"
-    git -C "$ATTEST_ROOT/attest" -c advice.detachedHead=false checkout -q FETCH_HEAD
-    [ "$(git -C "$ATTEST_ROOT/attest" rev-parse HEAD)" = "$ATTEST_COMMIT" ] || die "actions/attest checkout is not ${ATTEST_COMMIT}"
-    log "installed actions/attest@${ATTEST_COMMIT}"
-  fi
+  git init -q "$ATTEST_ROOT/attest"
+  git -C "$ATTEST_ROOT/attest" fetch -q --depth 1 https://github.com/actions/attest.git "$ATTEST_COMMIT"
+  git -C "$ATTEST_ROOT/attest" -c advice.detachedHead=false checkout -q FETCH_HEAD
+  [ "$(git -C "$ATTEST_ROOT/attest" rev-parse HEAD)" = "$ATTEST_COMMIT" ] || die "actions/attest checkout is not ${ATTEST_COMMIT}"
+  log "installed actions/attest@${ATTEST_COMMIT}"
 fi

@@ -48,19 +48,14 @@ while IFS= read -r s; do
   [ -n "$s" ] && SET_LINES+=("$s")
 done <<< "${INPUT_SET_LINES:-}"
 
-# BuildKit's SBOM scanner: self-hosted copy via Harbor with a direct fallback,
-# else an anonymous mirror.gcr.io pull with a docker.io fallback.
-if [ -n "${INPUT_SYFT_SCANNER_IMAGE:-}" ]; then
-  GENERATOR_PRIMARY="${INPUT_HARBOR_PREFIX:-}${INPUT_SYFT_SCANNER_IMAGE}"
-  GENERATOR_FALLBACK="${INPUT_SYFT_SCANNER_IMAGE}"
-else
-  # Pinned by digest: the scanner runs inside every build with access to the
-  # image's filesystem. Keep in sync with docker-publish's sbom-generator
-  # default; bump the digest to pick up scanner updates.
-  SYFT_SCANNER_DIGEST="sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
-  GENERATOR_PRIMARY="mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@${SYFT_SCANNER_DIGEST}"
-  GENERATOR_FALLBACK="docker.io/docker/buildkit-syft-scanner:stable-1@${SYFT_SCANNER_DIGEST}"
-fi
+# BuildKit's SBOM scanner runs inside every build with access to the image's
+# filesystem. One digest-pinned image, used for every attempt: no alternative
+# registry and no fallback. Keep the default in sync with docker-publish's
+# sbom-generator default; bump the digest to pick up scanner updates.
+SYFT_SCANNER_DIGEST="sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
+GENERATOR="${INPUT_SYFT_SCANNER_IMAGE:-}"
+[ -n "$GENERATOR" ] || GENERATOR="mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@${SYFT_SCANNER_DIGEST}"
+require_digest_pinned "$GENERATOR" "syft-scanner-image"
 
 set_args() { local s; for s in "$@"; do [ -n "$s" ] && printf -- '--set\0%s\0' "$s"; done; return 0; }
 bake_print() {  # <set lines...> -> resolved JSON on stdout
@@ -170,7 +165,7 @@ overrides() {  # <generator-image>
 }
 
 PRIMARY_SETS=("${FILTERED[@]}")
-mapfile -t -O "${#PRIMARY_SETS[@]}" PRIMARY_SETS < <(overrides "$GENERATOR_PRIMARY")
+mapfile -t -O "${#PRIMARY_SETS[@]}" PRIMARY_SETS < <(overrides "$GENERATOR")
 
 # Guard against anything (bake file, globs, groups) re-introducing tags.
 CHECK="$(bake_print "${PRIMARY_SETS[@]}")"
@@ -205,7 +200,7 @@ if [ "$ok" != true ] && [ -n "${INPUT_HARBOR_PREFIX:-}" ]; then
   for s in "${FILTERED[@]}"; do
     FALLBACK_SETS+=("${s//"docker-image://${INPUT_HARBOR_PREFIX}"/"docker-image://"}")
   done
-  mapfile -t -O "${#FALLBACK_SETS[@]}" FALLBACK_SETS < <(overrides "$GENERATOR_FALLBACK")
+  mapfile -t -O "${#FALLBACK_SETS[@]}" FALLBACK_SETS < <(overrides "$GENERATOR")
   run_bake "${FALLBACK_SETS[@]}" && ok=true
 fi
 [ "$ok" = true ] || die "docker buildx bake failed."

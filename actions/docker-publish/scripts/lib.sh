@@ -53,6 +53,13 @@ require_publishable_tag() {
   is_fully_qualified "$REF_REPO" || die "Tag '$1' is not fully qualified with a registry host (e.g. ghcr.io/...)."
 }
 
+# Fail unless an image reference is pinned by digest (name[:tag]@sha256:<64 hex>).
+# Usage: require_digest_pinned <ref> <what-it-is>
+require_digest_pinned() {
+  [[ "$1" =~ @sha256:[0-9a-f]{64}$ ]] \
+    || die "$2 must be pinned by digest (name@sha256:...), got '$1'. Tags are mutable and are not accepted."
+}
+
 # Attestations need a BuildKit driver (docker-container, kubernetes, remote).
 # The classic docker driver either errors or silently drops them.
 # Usage: require_attesting_builder [builder-name]

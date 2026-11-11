@@ -2,6 +2,7 @@
 # Validate docker-publish inputs before anything is built or pushed.
 #
 # Env: INPUT_TAGS (newline/comma separated), INPUT_BUILDER (optional),
+#      INPUT_SBOM_GENERATOR (must be pinned by digest),
 #      ATTEST_SBOM (default true)
 # Outputs: primary-repo, report-id, tags (normalized, newline separated)
 
@@ -25,6 +26,9 @@ parse_ref "${TAGS[0]}"
 PRIMARY_REPO="$REF_REPO"
 
 require_attesting_builder "${INPUT_BUILDER:-}"
+
+# The SBOM scanner runs inside the build with access to the image's filesystem.
+require_digest_pinned "${INPUT_SBOM_GENERATOR:?}" "sbom-generator"
 
 # Fail before building, not after the scan; attest-sbom.sh checks this again.
 if [ "${ATTEST_SBOM:-true}" = true ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then

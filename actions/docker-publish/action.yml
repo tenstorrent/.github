@@ -91,8 +91,8 @@ inputs:
   sbom-generator:
     description: >-
       BuildKit SBOM scanner image used to generate the initial SBOM attestation.
-      It runs inside every build with access to the image's filesystem, so the
-      default is pinned by digest; bump the digest to pick up scanner updates.
+      It runs inside every build with access to the image's filesystem, so it
+      must be pinned by digest (name@sha256:...); anything else is rejected.
     required: false
     default: "mirror.gcr.io/docker/buildkit-syft-scanner:stable-1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315"
   sbom-supplier:
@@ -158,6 +158,7 @@ runs:
       env:
         INPUT_TAGS: ${{ inputs.tags }}
         INPUT_BUILDER: ${{ inputs.builder }}
+        INPUT_SBOM_GENERATOR: ${{ inputs.sbom-generator }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 

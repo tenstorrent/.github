@@ -114,10 +114,15 @@ replaces them, so set those per target, not with a wildcard.
 
 ### Migrating from tt-metal's `manual-docker-bake`
 
-The other inputs keep their names. `ubuntu-version` and `python-version` are
-gone: move them to `env:` as `UBUNTU_VERSION` and `PYTHON_VERSION`. A caller
-that still passes them gets an "unexpected input" warning and the variable is
-left at its bake-file default.
+- `ubuntu-version` and `python-version` are gone: move them to `env:` as
+  `UBUNTU_VERSION` and `PYTHON_VERSION`.
+- `oras-image` is gone: oras always comes from the pinned release tarball.
+- `syft-scanner-image` must be pinned by digest (`name@sha256:...`) and is
+  used exactly as given, without `harbor-prefix`. Leave it empty to use the
+  pinned default.
+
+A caller that still passes a removed input gets an "unexpected input" warning
+and the input has no effect.
 
 Output: `images`, a JSON array with one `{name, repo, digest, build_digest,
 tags}` entry per published target (`[]` when no target pushes).
@@ -155,6 +160,13 @@ See each `action.yml` for the full list.
   large the job fails before anything is signed or tagged.
 - **Build args are public.** They are recorded in the provenance attestation.
   Pass secrets with `secrets` or `secret-files`.
+- **Tools are pinned, with no fallback.** syft, oras and trivy each come from
+  one release tarball whose sha256 is pinned in `install-tools.sh` and checked
+  before it is unpacked. There is no alternative source and no reuse of a
+  binary already on the runner. The BuildKit SBOM scanner image must be pinned
+  by digest; a tag is rejected. Trivy's vulnerability database is the one
+  thing that is not pinned: it has to be current to be useful, and Trivy
+  fetches it at scan time.
 - **Tools on `PATH`.** The actions install syft, oras and trivy into
   `$RUNNER_TEMP` and add that directory to `GITHUB_PATH`, so later steps of the
   calling job see them too.

@@ -62,27 +62,14 @@ inputs:
       Harbor pull-through cache prefix (e.g. 'harbor.example.com/'). If non-empty
       and every bake attempt fails, one more attempt is made with the prefix
       stripped from all docker-image:// context URIs (GHCR direct fallback).
-      Also used for syft-scanner-image and oras-image pulls.
     required: false
     default: ""
   syft-scanner-image:
     description: >-
-      Self-hosted copy of docker/buildkit-syft-scanner used as BuildKit's SBOM
-      generator. Empty uses mirror.gcr.io with a docker.io fallback.
-    required: false
-    default: ""
-  oras-image:
-    description: >-
-      Self-hosted image carrying the oras binary at /install/bin/oras, used
-      instead of downloading the oras release from GitHub. Pin it by digest
-      (name@sha256:...) or set oras-sha256; a mutable tag with neither is
-      installed unverified, with a warning.
-    required: false
-    default: ""
-  oras-sha256:
-    description: >-
-      Expected sha256 of the oras binary copied out of oras-image. When set,
-      a mismatch fails the job before the binary is ever run.
+      BuildKit SBOM scanner image, used exactly as given. It runs inside every
+      build with access to the image's filesystem, so it must be pinned by
+      digest (name@sha256:...); anything else is rejected. Empty uses the
+      pinned docker/buildkit-syft-scanner on mirror.gcr.io.
     required: false
     default: ""
   required-labels:
@@ -152,9 +139,6 @@ runs:
     - name: Install syft, oras and trivy
       shell: bash
       env:
-        ORAS_IMAGE: ${{ inputs.oras-image }}
-        ORAS_IMAGE_SHA256: ${{ inputs.oras-sha256 }}
-        HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         INSTALL_ATTEST: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/../docker-publish/scripts/install-tools.sh"
 
