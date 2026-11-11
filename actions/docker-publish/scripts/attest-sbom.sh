@@ -38,27 +38,6 @@ ATTEST_JS="$ATTEST_ROOT/attest/dist/index.js"
 [ -x "$NODE" ] && [ -f "$ATTEST_JS" ] || die "actions/attest is not installed; run install-tools.sh with INSTALL_ATTEST=true."
 [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || die "SBOM attestation needs 'permissions: id-token: write' (and attestations: write) on the calling job."
 
-# actions/attest rejects SBOMs over 16 MiB. File-level entries are what grow
-# with image size; Trivy only uses packages, relationships and annotations.
-MAX_SBOM_BYTES=$((16 * 1024 * 1024))
-fit_sbom() {  # <in> <out>
-  if [ "$(wc -c < "$1" | tr -d ' ')" -le "$MAX_SBOM_BYTES" ]; then
-    cp "$1" "$2"
-    return
-  fi
-  jq -c '
-    ([.files[]?.SPDXID] | map({key: ., value: true}) | from_entries) as $f
-    | del(.files)
-    | .packages |= map(del(.hasFiles))
-    | .relationships |= map(select(($f[.spdxElementId] or $f[.relatedSpdxElement]) | not))
-    | .comment = ((.comment // "" | if . == "" then "" else . + " " end)
-        + "File-level entries omitted to fit the 16 MiB attestation limit; the image'"'"'s BuildKit SBOM attestation has them.")
-  ' "$1" > "$2"
-  [ "$(wc -c < "$2" | tr -d ' ')" -le "$MAX_SBOM_BYTES" ] \
-    || die "SBOM for ${REPO} is over 16 MiB even without file entries; it cannot be attested."
-  log "SBOM over 16 MiB; attesting it without file-level entries."
-}
-
 attest() {  # <subject-digest> <sbom> <label>
   local out
   out="$(mktemp)"
@@ -78,23 +57,27 @@ attest() {  # <subject-digest> <sbom> <label>
   rm -f "$out"
 }
 
-WORKDIR="$(mktemp -d)"
-trap 'rm -rf "$WORKDIR"' EXIT
-
 COUNT="$(grep -c . "$LIST" || true)"
 [ "$COUNT" -gt 0 ] || die "No SBOMs listed in ${LIST}."
 # Attest the index too only when it holds exactly one real platform image
 # (recorded by enrich-sbom.sh from the index itself, not from the SBOM count).
 INDEX_PLATFORM_COUNT="$(grep -m1 . "$LIST" | jq -r '.index_platforms // empty')"
 [[ "$INDEX_PLATFORM_COUNT" =~ ^[0-9]+$ ]] || die "${LIST} does not record the index's platform count; regenerate it with enrich-sbom.sh."
-n=0
+# enrich-sbom.sh already fitted every SBOM to the limit. Check them all before
+# signing any: a signature, once made, cannot be withdrawn.
 while IFS= read -r entry; do
   [ -n "$entry" ] || continue
-  n=$((n + 1))
+  sbom="$(jq -r .sbom <<< "$entry")"
+  [ -f "$sbom" ] || die "SBOM ${sbom} listed in ${LIST} does not exist."
+  [ "$(wc -c < "$sbom" | tr -d ' ')" -le "$ATTEST_MAX_SBOM_BYTES" ] \
+    || die "SBOM ${sbom} is over ${ATTEST_MAX_SBOM_BYTES} bytes; regenerate it with enrich-sbom.sh, which fits it to the attestation limit."
+done < "$LIST"
+
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
   digest="$(jq -r .digest <<< "$entry")"
   platform="$(jq -r .platform <<< "$entry")"
-  sbom="$WORKDIR/$n.spdx.json"
-  fit_sbom "$(jq -r .sbom <<< "$entry")" "$sbom"
+  sbom="$(jq -r .sbom <<< "$entry")"
   attest "$digest" "$sbom" "$platform"
   if [ "$INDEX_PLATFORM_COUNT" -eq 1 ]; then
     attest "$REF_DIGEST" "$sbom" "index"

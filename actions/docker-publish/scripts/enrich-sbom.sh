@@ -25,9 +25,14 @@
 # Usage: enrich-sbom.sh <repo>@<index-digest>
 #   Prints the new index digest on stdout; logs go to stderr.
 # Env:   SBOM_SUPPLIER (default "Organization: Tenstorrent")
-#        SBOM_OUT_DIR  if set, each platform's final SBOM is written there and
-#                      listed in sboms.jsonl ({digest, platform, sbom,
-#                      index_platforms: real platform images in the index})
+#        SBOM_OUT_DIR  set it when the SBOMs will be signed (attest-sbom.sh).
+#                      Each platform's SBOM is written there in a form
+#                      actions/attest accepts (at most 16 MiB): the full SBOM,
+#                      or one without file-level entries whose comment names
+#                      the registry blob holding the full one. Fails if even
+#                      that is too large. Listed in sboms.jsonl ({digest,
+#                      platform, sbom, index_platforms: real platform images
+#                      in the index, full_sbom_statement, file_entries})
 # Requires: oras, syft, jq. Registry auth comes from the docker credential store.
 
 set -euo pipefail
@@ -149,13 +154,6 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
     ' "$SYFT_SPDX" > "$PATCHED_SPDX"
   fi
 
-  if [ -n "${SBOM_OUT_DIR:-}" ]; then
-    cp "$PATCHED_SPDX" "${SBOM_OUT_DIR}/${IMG_DIGEST#sha256:}.spdx.json"
-    jq -cn --arg digest "$IMG_DIGEST" --arg platform "$PLATFORM" --arg sbom "${SBOM_OUT_DIR}/${IMG_DIGEST#sha256:}.spdx.json" \
-      --argjson index_platforms "$INDEX_PLATFORM_COUNT" \
-      '{digest: $digest, platform: $platform, sbom: $sbom, index_platforms: $index_platforms}' >> "${SBOM_OUT_DIR}/sboms.jsonl"
-  fi
-
   # --- new in-toto statement: BuildKit's original envelope, new predicate ---
   OLD_STATEMENT="$W/spdx.orig.intoto.json"
   oras blob fetch "${REPO}@${OLD_SPDX_DIGEST}" --output "$OLD_STATEMENT"
@@ -163,6 +161,40 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
   jq -c --slurpfile spdx "$PATCHED_SPDX" '.predicate = $spdx[0]' "$OLD_STATEMENT" > "$SPDX_LAYER"
   NEW_SPDX_DIGEST="$(push_blob "$SPDX_LAYER" application/vnd.in-toto+json)"
   NEW_SPDX_SIZE="$(wc -c < "$SPDX_LAYER" | tr -d ' ')"
+
+  # --- SBOM to sign: the full one if actions/attest accepts it, else without
+  # file-level entries and bound to the full one by the digest of the statement
+  # blob just pushed. Checked here, before this platform's attestation-manifest
+  # and the index are pushed and before anything is signed. ---
+  if [ -n "${SBOM_OUT_DIR:-}" ]; then
+    SIGNABLE="${SBOM_OUT_DIR}/${IMG_DIGEST#sha256:}.spdx.json"
+    # Compact JSON: indentation would count against the limit.
+    jq -c . "$PATCHED_SPDX" > "$SIGNABLE"
+    FULL_BYTES="$(wc -c < "$SIGNABLE" | tr -d ' ')"
+    FILE_ENTRIES=true
+    if [ "$FULL_BYTES" -gt "$ATTEST_MAX_SBOM_BYTES" ]; then
+      FILE_ENTRIES=false
+      # File entries are what grow with image size; Trivy only uses packages,
+      # relationships and annotations.
+      jq -c --arg full "${REPO}@${NEW_SPDX_DIGEST}" '
+        ([.files[]?.SPDXID] | map({key: ., value: true}) | from_entries) as $f
+        | del(.files)
+        | .packages |= map(del(.hasFiles))
+        | .relationships |= map(select(($f[.spdxElementId] or $f[.relatedSpdxElement]) | not))
+        | .comment = ((.comment // "" | if . == "" then "" else . + " " end)
+            + "File-level entries omitted to fit the 16 MiB attestation limit. The complete SBOM is the predicate of the in-toto statement stored as blob \($full).")
+      ' "$PATCHED_SPDX" > "$SIGNABLE"
+      SIGNABLE_BYTES="$(wc -c < "$SIGNABLE" | tr -d ' ')"
+      [ "$SIGNABLE_BYTES" -le "$ATTEST_MAX_SBOM_BYTES" ] \
+        || die "[$PLATFORM] SBOM is ${FULL_BYTES} bytes, and still ${SIGNABLE_BYTES} bytes without file-level entries; actions/attest accepts at most ${ATTEST_MAX_SBOM_BYTES}. This image has not been signed or tagged."
+      log "[$PLATFORM] SBOM is ${FULL_BYTES} bytes (limit ${ATTEST_MAX_SBOM_BYTES}); signing it without file-level entries (${SIGNABLE_BYTES} bytes), bound to the full SBOM in ${NEW_SPDX_DIGEST}."
+    fi
+    jq -cn --arg digest "$IMG_DIGEST" --arg platform "$PLATFORM" --arg sbom "$SIGNABLE" \
+      --argjson index_platforms "$INDEX_PLATFORM_COUNT" \
+      --arg full_sbom_statement "$NEW_SPDX_DIGEST" --argjson file_entries "$FILE_ENTRIES" \
+      '{digest: $digest, platform: $platform, sbom: $sbom, index_platforms: $index_platforms,
+        full_sbom_statement: $full_sbom_statement, file_entries: $file_entries}' >> "${SBOM_OUT_DIR}/sboms.jsonl"
+  fi
 
   # --- config blob: reused as-is unless it lists diff_ids (current BuildKit
   # writes "{}"; older attestation configs carried rootfs.diff_ids) ---

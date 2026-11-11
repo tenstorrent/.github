@@ -122,6 +122,12 @@ See each `action.yml` for the full list.
   `gh attestation verify` find it when given a platform digest
   (`repo@sha256:...`). A tag resolves to the index, which carries a referrer
   only for single-platform images.
+- **Large SBOMs are signed without file entries.** `actions/attest` accepts at
+  most 16 MiB. An SBOM over that is signed without its file-level entries, and
+  its `comment` names the registry blob (`repo@sha256:...`) holding the in-toto
+  statement whose predicate is the complete SBOM. Packages, relationships and
+  annotations, which are what Trivy reads, are kept. If the SBOM is still too
+  large the job fails before anything is signed or tagged.
 - **Build args are public.** They are recorded in the provenance attestation.
   Pass secrets with `secrets` or `secret-files`.
 - **Tools on `PATH`.** The actions install syft, oras and trivy into

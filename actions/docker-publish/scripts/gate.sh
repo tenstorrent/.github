@@ -42,23 +42,35 @@ fi
 
 # Enrich and attest every image before tagging any, so a failure on a later
 # image cannot leave earlier ones tagged.
-sbom_dir=""
-trap 'rm -rf "$sbom_dir"' EXIT
+#
+# Every image is enriched before any is signed: enrich-sbom.sh fails if an SBOM
+# cannot be fitted to the attestation size limit, and a signature, once made,
+# cannot be withdrawn.
+SBOM_ROOT="$(mktemp -d)"
+trap 'rm -rf "$SBOM_ROOT"' EXIT
 DIGESTS=()
 for ((i = 0; i < COUNT; i++)); do
   name="$(field "$i" name)"
   repo="$(field "$i" repo)"
   echo "::group::[${name}] enrich SBOM"
-  sbom_dir="$(mktemp -d)"
-  digest="$(SBOM_OUT_DIR="$sbom_dir" bash "${SCRIPTS}/enrich-sbom.sh" "${repo}@$(field "$i" digest)")"
   if [ "${ATTEST_SBOM:-true}" = true ]; then
-    bash "${SCRIPTS}/attest-sbom.sh" "${repo}@${digest}" "${sbom_dir}/sboms.jsonl"
+    mkdir "${SBOM_ROOT}/${i}"
+    digest="$(SBOM_OUT_DIR="${SBOM_ROOT}/${i}" bash "${SCRIPTS}/enrich-sbom.sh" "${repo}@$(field "$i" digest)")"
+  else
+    digest="$(SBOM_OUT_DIR="" bash "${SCRIPTS}/enrich-sbom.sh" "${repo}@$(field "$i" digest)")"
   fi
-  rm -rf "$sbom_dir"
-  sbom_dir=""
   DIGESTS+=("$digest")
   echo "::endgroup::"
 done
+
+if [ "${ATTEST_SBOM:-true}" = true ]; then
+  for ((i = 0; i < COUNT; i++)); do
+    name="$(field "$i" name)"
+    echo "::group::[${name}] sign SBOM"
+    bash "${SCRIPTS}/attest-sbom.sh" "$(field "$i" repo)@${DIGESTS[$i]}" "${SBOM_ROOT}/${i}/sboms.jsonl"
+    echo "::endgroup::"
+  done
+fi
 
 # Stage every image first (copies with no tags), so a failed copy leaves no tag behind.
 for ((i = 0; i < COUNT; i++)); do

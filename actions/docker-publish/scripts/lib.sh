@@ -14,6 +14,9 @@ sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 # `sha256-<digest>` fallback tag for each one; BuildKit itself never does.
 ORAS_REFERRERS_SPEC="v1.1-referrers-api"
 
+# actions/attest rejects predicates over 16 MiB (MAX_PREDICATE_SIZE_BYTES).
+ATTEST_MAX_SBOM_BYTES=$((16 * 1024 * 1024))
+
 SIGSTORE_BUNDLE_TYPE="application/vnd.dev.sigstore.bundle.v0.3+json"
 
 # Split an image reference into REF_REPO / REF_TAG / REF_DIGEST.
