@@ -4,11 +4,18 @@
 # the severity threshold fail the gate. Vulnerabilities at the threshold are
 # reported (log, step summary, warning annotation, JSON report) and fail the
 # gate only when INPUT_FAIL_ON_VULNS is true. A Trivy error always fails.
+# The crypto scanner, when in INPUT_SCANNERS, runs as a separate scan that
+# writes a CycloneDX CBOM next to the JSON reports: Trivy accepts it only with
+# --format cyclonedx, and its findings are an inventory with no severity. Any
+# private key in it fails the gate, whatever the severity threshold, unless
+# INPUT_ALLOWED_PRIVATE_KEYS allows it; .trivyignore does not apply to crypto
+# findings. Keys below 112 bits of classical security only get a warning.
 # See https://trivy.dev/docs/latest/guide/
 #
 # Usage: trivy-scan.sh <oci-layout-dir>@<index-digest>
 # Env:   INPUT_SEVERITY, INPUT_SCANNERS, INPUT_IGNORE_UNFIXED, INPUT_IGNOREFILE,
 #        INPUT_FAIL_ON_VULNS (default false),
+#        INPUT_ALLOWED_PRIVATE_KEYS (reviewed private keys; see key_allowed),
 #        INPUT_HARBOR_PREFIX (pull-through prefix for Trivy's databases, e.g.
 #        'harbor.example.com/'; empty pulls them from upstream),
 #        REPORT_DIR, IMAGE_LABEL (heading for the step summary; default the digest)
@@ -24,16 +31,18 @@ VIEWS="$(mktemp -d)"
 trap 'rm -rf "$VIEWS"' EXIT
 
 SEVERITY="${INPUT_SEVERITY:-CRITICAL,HIGH}"
-SCANNERS="${INPUT_SCANNERS:-vuln,misconfig,secret}"
+SCANNERS="${INPUT_SCANNERS:-vuln,misconfig,secret,crypto}"
 FAIL_ON_VULNS="${INPUT_FAIL_ON_VULNS:-false}"
 HARBOR="${INPUT_HARBOR_PREFIX:-}"
 scanner_on() { [[ ",${SCANNERS}," == *",$1,"* ]]; }
+# Everything but crypto goes into the gating JSON scan.
+GATE_SCANNERS="$(printf '%s' "$SCANNERS" | tr ',' '\n' | { grep -vx 'crypto' || true; } | paste -sd, -)"
 
 # No --exit-code: Trivy then exits non-zero only on an error, and which findings
 # fail the gate is decided from the JSON report below.
 TRIVY_ARGS=(
   --severity "$SEVERITY"
-  --scanners "$SCANNERS"
+  --scanners "$GATE_SCANNERS"
   --format json
 )
 
@@ -97,13 +106,70 @@ for ((p = 0; p < ${#PLATFORMS[@]}; p++)); do
     '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [$d]}' > "${view}/index.json"
 done
 
+# Private keys the caller has reviewed and accepts (INPUT_ALLOWED_PRIVATE_KEYS):
+# one entry per line, blank lines and #-comments ignored. An entry is either a
+# key's CBOM fingerprint, written sha256:<hex>, which allows that key at any
+# path, or a glob matched against the file's path in the image (no leading
+# slash; * also matches /).
+ALLOWED_KEYS=()
+while IFS= read -r entry; do
+  entry="${entry%%#*}"
+  entry="$(printf '%s' "$entry" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  [ -n "$entry" ] && ALLOWED_KEYS+=("$entry")
+done <<< "${INPUT_ALLOWED_PRIVATE_KEYS:-}"
+
+key_allowed() {  # <fingerprint> <path>
+  local entry
+  for entry in "${ALLOWED_KEYS[@]}"; do
+    [ "$entry" = "sha256:$1" ] && return 0
+    # shellcheck disable=SC2053 # the entry is a glob on purpose
+    [[ "$entry" != sha256:* && "$2" == $entry ]] && return 0
+  done
+  return 1
+}
+
+# Writes the platform's CBOM, gates on private keys and sets CRYPTO_SUMMARY
+# (the step summary cell) and CRYPTO_BLOCKING (private keys not allowed).
+crypto_inventory() {  # <view-dir> <platform>
+  local cbom="${REPORT_DIR}/cbom-${2//\//-}.cdx.json" certs weak fp path name keys=0 allowed=0
+  CRYPTO_BLOCKING=0
+  trivy image --scanners crypto --format cyclonedx --output "$cbom" --input "$1" >&2 \
+    || die "Trivy's crypto scan errored on ${2}; the private key check cannot run. See log above."
+  certs="$(jq '[.components[]? | select(.cryptoProperties.assetType? == "certificate")] | length' "$cbom")"
+  # One component per distinct key; each file holding it is an occurrence.
+  while IFS=$'\t' read -r fp path name; do
+    [ -n "$path" ] || continue
+    keys=$((keys + 1))
+    if key_allowed "$fp" "$path"; then
+      allowed=$((allowed + 1))
+      log "${2}: allowed private key /${path} (${name}, sha256:${fp})"
+    else
+      CRYPTO_BLOCKING=$((CRYPTO_BLOCKING + 1))
+      echo "::error title=Private key in image::${2}: /${path} is a private key (${name}, sha256:${fp}). Remove it from the image, or if it is a reviewed fixture add its path or sha256:${fp} to trivy-allowed-private-keys." >&2
+    fi
+  done < <(jq -r '.components[]? | select(.cryptoProperties.relatedCryptoMaterialProperties.type? == "private-key")
+    | .name as $n | (.cryptoProperties.relatedCryptoMaterialProperties.fingerprint.content // "unknown") as $fp
+    | .evidence.occurrences[]? | [$fp, .location, $n] | @tsv' "$cbom")
+  # Weak: a key algorithm under 112 bits of classical security (NIST SP 800-57's
+  # floor, e.g. RSA below 2048). Signature algorithms carry no level. Not gating.
+  weak="$(jq -r '[.components[]? | select(.type == "cryptographic-asset"
+                    and .cryptoProperties.assetType == "algorithm"
+                    and (.cryptoProperties.algorithmProperties.classicalSecurityLevel // 1000) < 112)
+                  | .name] | unique | join(", ")' "$cbom")"
+  [ -n "$weak" ] && echo "::warning title=Weak keys in image::${2}: key algorithms below 112-bit security: ${weak}; see $(basename "$cbom") in the uploaded Trivy report." >&2
+  CRYPTO_SUMMARY="${certs} certificates, ${keys} private keys"
+  [ "$allowed" -gt 0 ] && CRYPTO_SUMMARY+=" (${allowed} allowed)"
+  [ -n "$weak" ] && CRYPTO_SUMMARY+=", weak: ${weak}"
+  return 0
+}
+
 {
   echo "### Trivy scan: \`${IMAGE_LABEL:-${REF##*@}}\`"
   echo
   echo "Threshold: \`${SEVERITY}\`, scanners: \`${SCANNERS}\`, vulnerabilities fail the gate: \`${FAIL_ON_VULNS}\`"
   echo
-  echo "| Platform | Result | Secrets, misconfigurations, licenses | Vulnerabilities |"
-  echo "|---|---|---|---|"
+  echo "| Platform | Result | Secrets, misconfigurations, licenses | Vulnerabilities | Crypto inventory |"
+  echo "|---|---|---|---|---|"
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 failed=0
@@ -111,16 +177,26 @@ for ((p = 0; p < ${#PLATFORMS[@]}; p++)); do
   platform="${PLATFORMS[$p]}"
   report="${REPORT_DIR}/trivy-${platform//\//-}.json"
   log "scanning ${platform} ($(jq -r .digest <<< "${DESCRIPTORS[$p]}"))"
-  status=0
-  trivy image "${TRIVY_ARGS[@]}" --output "$report" --input "${VIEWS}/${p}" || status=$?
-  [ "$status" -eq 0 ] || die "Trivy errored scanning ${platform} (exit ${status}); see log above."
-  trivy convert --format table "$report"
+  vulns=0
+  others=0
+  if [ -n "$GATE_SCANNERS" ]; then
+    status=0
+    trivy image "${TRIVY_ARGS[@]}" --output "$report" --input "${VIEWS}/${p}" || status=$?
+    [ "$status" -eq 0 ] || die "Trivy errored scanning ${platform} (exit ${status}); see log above."
+    trivy convert --format table "$report"
 
-  vulns="$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' "$report")"
-  # Misconfigurations lists only failures unless --include-non-failures is set;
-  # the Status filter keeps that true if it ever is.
-  others="$(jq '[.Results[]? | (.Secrets // []), [.Misconfigurations[]? | select(.Status == "FAIL")], (.Licenses // []) | length] | add // 0' "$report")"
-  blocking="$others"
+    vulns="$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' "$report")"
+    # Misconfigurations lists only failures unless --include-non-failures is set;
+    # the Status filter keeps that true if it ever is.
+    others="$(jq '[.Results[]? | (.Secrets // []), [.Misconfigurations[]? | select(.Status == "FAIL")], (.Licenses // []) | length] | add // 0' "$report")"
+  fi
+  crypto="off"
+  CRYPTO_BLOCKING=0
+  if scanner_on crypto; then
+    crypto_inventory "${VIEWS}/${p}" "$platform"
+    crypto="$CRYPTO_SUMMARY"
+  fi
+  blocking=$((others + CRYPTO_BLOCKING))
   [ "$FAIL_ON_VULNS" = true ] && blocking=$((blocking + vulns))
   if [ "$blocking" -gt 0 ]; then
     result="**FAIL**"
@@ -131,12 +207,12 @@ for ((p = 0; p < ${#PLATFORMS[@]}; p++)); do
   if [ "$vulns" -gt 0 ] && [ "$FAIL_ON_VULNS" != true ]; then
     echo "::warning title=Trivy vulnerabilities (not gating)::${platform}: ${vulns} ${SEVERITY} vulnerabilities; see the scan log or the uploaded Trivy report."
   fi
-  echo "| \`${platform}\` | ${result} | ${others} | ${vulns} |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+  echo "| \`${platform}\` | ${result} | ${others} | ${vulns} | ${crypto} |" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 done
 
 if [ "$failed" -ne 0 ]; then
   what="secret, misconfiguration or license"
   [ "$FAIL_ON_VULNS" = true ] && what="secret, misconfiguration, license or vulnerability"
-  die "Trivy found ${SEVERITY} ${what} findings. The image has NOT been pushed to any registry. Fix the findings or add a reviewed exception to the trivy-ignorefile."
+  die "Trivy found ${SEVERITY} ${what} findings or a private key. The image has NOT been pushed to any registry. Fix the findings, or add a reviewed exception to the trivy-ignorefile (private keys: trivy-allowed-private-keys)."
 fi
 log "Trivy scan passed for all platforms."

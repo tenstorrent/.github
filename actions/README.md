@@ -19,9 +19,12 @@ of the pipeline has passed.
 2. **Gate every image.** Each platform image is checked for the expected OCI
    labels (a missing one is a warning, not a failure), and Trivy must find
    no secret, misconfiguration or license issue at the configured
-   severities. Vulnerabilities at those severities are
-   reported but do not fail the gate unless `trivy-fail-on-vulnerabilities` is
-   `"true"`. Trivy reports are uploaded as a workflow artifact, pass or fail.
+   severities. Vulnerabilities at those severities are reported but do not
+   fail the gate unless `trivy-fail-on-vulnerabilities` is `"true"`. A
+   separate crypto scan inventories certificates and keys into a CBOM and
+   fails the gate on any private key not explicitly allowed (see
+   [Crypto inventory and private keys](#crypto-inventory-and-private-keys)).
+   Trivy reports are uploaded as a workflow artifact, pass or fail.
 3. **Push by digest.** Only once every image has passed are the layouts pushed
    to the repository of each image's first tag, with no tag.
 4. **Enrich the SBOM.** Each platform is rescanned with syft into an SPDX 2.3
@@ -213,7 +216,8 @@ tags}` entry per published target (`[]` when no target pushes).
 | `trivy-severity` | `CRITICAL,HIGH` | Severities Trivy reports; findings at them fail the gate (vulnerabilities only with the next input) |
 | `trivy-fail-on-vulnerabilities` | `false` | Let vulnerabilities fail the gate; otherwise they are only reported |
 | `harbor-prefix` | none | Harbor pull-through prefix for Trivy's databases (see [Trivy databases and caching](#trivy-databases-and-caching)) |
-| `trivy-scanners` | `vuln,misconfig,secret` | Trivy scanners to run |
+| `trivy-scanners` | `vuln,misconfig,secret,crypto` | Trivy scanners to run |
+| `trivy-allowed-private-keys` | none | Reviewed private keys the gate accepts, by path glob or `sha256:` fingerprint |
 | `trivy-ignore-unfixed` | `false` | Ignore vulnerabilities with no fixed version |
 | `trivy-ignorefile` | none | Path to a `.trivyignore` of reviewed exceptions |
 | `sbom-supplier` | `Organization: Tenstorrent` | SPDX supplier of the describing package |
@@ -258,7 +262,83 @@ See each `action.yml` for the full list.
   `$RUNNER_TEMP` and add that directory to `GITHUB_PATH`, so later steps of the
   calling job see them too.
 - **Trivy exceptions** belong in a `.trivyignore` in the calling repository,
-  passed with `trivy-ignorefile`, so each one is code reviewed.
+  passed with `trivy-ignorefile`, so each one is code reviewed. Use one for
+  a false positive or an accepted risk. Trivy's
+  [`.trivyignore`](https://trivy.dev/docs/latest/configuration/filtering/#trivyignore)
+  format lists one finding ID per line (a CVE, a misconfiguration ID such as
+  `AVD-DS-0002`, or a secret rule ID such as `aws-access-key-id`), with an
+  optional `exp:YYYY-MM-DD` expiry so the exception is reviewed again. The
+  [`.trivyignore.yaml`](https://trivy.dev/docs/latest/configuration/filtering/#trivyignoreyaml)
+  format (experimental) also limits an exception to file paths or package
+  URLs and records a `statement` explaining it. The finding ID is in the scan
+  log and in the uploaded report. `.trivyignore` does not apply to the
+  crypto scanner; private keys it finds are allowed with
+  `trivy-allowed-private-keys` instead (see
+  [Crypto inventory and private keys](#crypto-inventory-and-private-keys)).
+
+## Crypto inventory and private keys
+
+When `trivy-scanners` includes `crypto` (the default), each platform image
+gets a second Trivy scan with
+[`--scanners crypto`](https://trivy.dev/docs/latest/guide/scanner/crypto/).
+It lists the certificates, private keys and public keys in the image (files
+named `*.pem`, `*.der`, `*.crt`, `*.cer`, `*.key`) with their algorithms and
+security levels, as a CycloneDX CBOM.
+
+- The CBOM is `cbom-<platform>.cdx.json` in the uploaded Trivy report
+  artifact. The step summary shows the number of certificates and private
+  keys per platform.
+- **Every private key fails the gate**, whatever `trivy-severity` is, unless
+  `trivy-allowed-private-keys` allows it. The error names the file and the
+  key's fingerprint. A failed crypto scan also fails the gate, since the
+  check could not run. Trivy marks the scanner experimental.
+- Key algorithms below 112 bits of classical security (NIST's floor, e.g.
+  RSA below 2048) get a warning.
+- It runs separately because Trivy only accepts `--scanners crypto` with
+  `--format cyclonedx`, not with the JSON report the gate reads.
+- Expect the base image's CA bundle in it: plain Alpine lists about 150 CA
+  certificates. Certificates and public keys never fail the gate.
+- Leave `crypto` out of `trivy-scanners` to skip it, which also turns off
+  the private key check below.
+
+### Allowing a private key
+
+Some packages ship private keys as test fixtures. After reviewing one, list
+it in `trivy-allowed-private-keys`, one entry per line:
+
+```yaml
+trivy-allowed-private-keys: |
+  # tornado's test suite key, reviewed 2026-11-12
+  usr/lib/python3*/site-packages/tornado/test/test.key
+  # one exact key, wherever it is copied
+  sha256:875698095ff4af948036be76a064adf369185f0cabd7bd6d9dec54a14db61b7c
+```
+
+- A path entry is a glob matched against the file's path in the image, with
+  no leading slash. `*` also matches `/`.
+- A `sha256:` entry is the key's fingerprint from the error message or the
+  CBOM. It allows that key at every path, and no other key.
+
+### How this overlaps with the secret scanner
+
+The secret scanner's `private-key` rule (severity HIGH) also finds private
+keys, so most keys are reported twice. Each scanner also finds keys the
+other misses. Measured with Trivy 0.76.2:
+
+| Key | Secret scanner | Crypto scanner |
+|---|---|---|
+| PEM key (PKCS#8, PKCS#1, EC, encrypted) in a `.pem` or `.key` file | Yes | Yes |
+| Binary DER key (`.der`) | No | Yes |
+| PEM key in a file without a key extension | Yes | No |
+| OpenSSH private key | Yes | No |
+| Key under `tests/`, `usr/share/doc/`, `node_modules/` or `vendor/` | No (skipped by its built-in allow rules) | Yes |
+
+The secret scanner gates only at the configured severities, so with
+`trivy-severity: CRITICAL` the keys only it finds pass. Exceptions differ
+too: a secret scanner finding is ignored with the `private-key` rule ID in
+`.trivyignore` (which ignores every such finding unless `.trivyignore.yaml`
+limits it to paths), a crypto scanner finding with
+`trivy-allowed-private-keys`. A key both find needs both.
 
 ## Trivy databases and caching
 

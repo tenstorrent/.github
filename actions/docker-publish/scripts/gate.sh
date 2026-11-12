@@ -11,7 +11,8 @@
 #                  "layout": "/path/to/oci-layout", "tags": ["reg/repo:tag", ...]}]
 #   The layouts are deleted when gate.sh exits, pass or fail.
 # Env:   INPUT_REQUIRED_LABELS, INPUT_SEVERITY, INPUT_SCANNERS, INPUT_IGNORE_UNFIXED,
-#        INPUT_IGNOREFILE, INPUT_FAIL_ON_VULNS, INPUT_HARBOR_PREFIX, SBOM_SUPPLIER, REPORT_ROOT,
+#        INPUT_IGNOREFILE, INPUT_FAIL_ON_VULNS, INPUT_ALLOWED_PRIVATE_KEYS,
+#        INPUT_HARBOR_PREFIX, SBOM_SUPPLIER, REPORT_ROOT,
 #        ATTEST_SBOM (default true), GITHUB_TOKEN, ATTEST_CREATE_STORAGE_RECORD
 # Outputs: images (JSON, digests after enrichment), digest (first image)
 

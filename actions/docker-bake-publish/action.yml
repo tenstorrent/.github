@@ -98,9 +98,13 @@ inputs:
     required: false
     default: "CRITICAL,HIGH"
   trivy-scanners:
-    description: "Comma-separated Trivy scanners (vuln, misconfig, secret, license)"
+    description: >-
+      Comma-separated Trivy scanners (vuln, misconfig, secret, license, crypto).
+      crypto runs as a separate scan that writes a CycloneDX CBOM to the
+      uploaded report; a private key in it fails the gate unless
+      trivy-allowed-private-keys allows it, and weak keys get a warning.
     required: false
-    default: "vuln,misconfig,secret"
+    default: "vuln,misconfig,secret,crypto"
   trivy-ignore-unfixed:
     description: "Ignore vulnerabilities that have no fixed version yet"
     required: false
@@ -109,6 +113,17 @@ inputs:
     description: >-
       Path to a .trivyignore (or .trivyignore.yaml) listing reviewed exceptions.
       Keep it in the calling repository so every exception is code-reviewed.
+    required: false
+    default: ""
+  trivy-allowed-private-keys:
+    description: >-
+      Private keys the gate accepts, one per line (# comments allowed). An
+      entry is a key fingerprint from the crypto CBOM, sha256:<hex>, which
+      allows that key at any path, or a glob matched against the file's path
+      in the image without a leading slash (* also matches /), e.g.
+      usr/lib/python3*/site-packages/*/tests/*. Any other private key the
+      crypto scanner finds fails the gate. Keep the list in the calling
+      workflow so every exception is reviewed.
     required: false
     default: ""
   trivy-fail-on-vulnerabilities:
@@ -197,6 +212,7 @@ runs:
         INPUT_IGNORE_UNFIXED: ${{ inputs.trivy-ignore-unfixed }}
         INPUT_IGNOREFILE: ${{ inputs.trivy-ignorefile }}
         INPUT_FAIL_ON_VULNS: ${{ inputs.trivy-fail-on-vulnerabilities }}
+        INPUT_ALLOWED_PRIVATE_KEYS: ${{ inputs.trivy-allowed-private-keys }}
         INPUT_HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         SBOM_SUPPLIER: ${{ inputs.sbom-supplier }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
