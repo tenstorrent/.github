@@ -38,17 +38,25 @@ TRIVY_ARGS=(
 )
 
 # --- databases: through the Harbor pull-through cache when given ---
+# Harbor answers only on-prem runners, and the prefix comes from a health check
+# that may have run on another runner, so it is dropped unless Harbor responds
+# here. Any HTTP status (an anonymous /v2/ gets 401) counts as reachable.
+if [ -n "$HARBOR" ] && ! curl -s --max-time 10 -o /dev/null "https://${HARBOR%%/*}/v2/"; then
+  echo "::warning::Harbor ('${HARBOR}') is not reachable from this runner; Trivy downloads its databases from upstream."
+  HARBOR=""
+fi
 # Trivy tries --db-repository entries in order but moves to the next only on a
-# 429 or 5xx; an unreachable Harbor is fatal (checked against 0.76.2). So the
-# vulnerability DB is downloaded here first, from Harbor and then from Trivy's
-# default upstream repositories, and the scan reuses it with --skip-db-update.
-# --download-db-only is a no-op while the cached DB is still current.
-# The Java DB and checks bundle are fetched lazily during the scan; they are
-# pointed at Harbor only once the DB download proved it is reachable. The Java
-# DB list keeps Trivy's defaults behind Harbor; a failed checks bundle pull
-# falls back to the checks embedded in the trivy binary.
+# 429 or 5xx; an unreachable repository is fatal (checked against 0.76.2). So
+# the vulnerability DB is downloaded here first, from Harbor and then from
+# Trivy's default upstream repositories, and the scan reuses it with
+# --skip-db-update. --download-db-only is a no-op while the cached DB is still
+# current. The Java DB and checks bundle are fetched lazily during the scan;
+# they are pointed at Harbor only once the DB download proved it serves them.
+# The Java DB list keeps Trivy's defaults behind Harbor; a failed checks bundle
+# pull falls back to the checks embedded in the trivy binary.
 if scanner_on vuln; then
-  if [ -n "$HARBOR" ] && trivy image --download-db-only --no-progress        --db-repository "${HARBOR}ghcr.io/aquasecurity/trivy-db:2"; then
+  if [ -n "$HARBOR" ] && trivy image --download-db-only --no-progress \
+       --db-repository "${HARBOR}ghcr.io/aquasecurity/trivy-db:2"; then
     TRIVY_ARGS+=(
       --java-db-repository "${HARBOR}ghcr.io/aquasecurity/trivy-java-db:1"
       --java-db-repository mirror.gcr.io/aquasec/trivy-java-db:1

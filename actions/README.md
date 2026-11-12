@@ -270,6 +270,12 @@ OCI artifacts Trivy downloads into its cache directory on the runner
 `harbor.ci.tenstorrent.net/`) to pull them through the Harbor pull-through
 cache instead:
 
+- Harbor is reachable only from the on-prem runners, not from GitHub-hosted
+  ones (`ubuntu-latest`, `ubuntu-slim`). A prefix from a health check that
+  ran on another runner can therefore be unusable, so the action first
+  requests `https://<harbor-host>/v2/` (10 second limit). If Harbor does not
+  answer, the prefix is ignored with a warning and everything comes from
+  upstream.
 - The vulnerability DB is downloaded once before the scans, from
   `<prefix>ghcr.io/aquasecurity/trivy-db:2`. If that fails, it is downloaded
   from upstream with a warning. Trivy itself moves to its next repository only

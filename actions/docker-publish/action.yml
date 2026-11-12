@@ -136,9 +136,10 @@ inputs:
   harbor-prefix:
     description: >-
       Harbor pull-through cache prefix (e.g. 'harbor.example.com/'), prepended
-      to ghcr.io references. If non-empty, Trivy pulls its vulnerability DB,
-      Java DB and checks bundle through it, falling back to upstream when
-      Harbor is unreachable. docker-bake-publish also retries a bake that fails
+      to ghcr.io references. Harbor answers only on-prem runners. If non-empty
+      and Harbor responds from this runner, Trivy pulls its vulnerability DB,
+      Java DB and checks bundle through it; otherwise from upstream, with a
+      warning. docker-bake-publish also retries a bake that fails
       every attempt once more with the prefix stripped from all docker-image://
       context URIs (GHCR direct fallback).
     required: false

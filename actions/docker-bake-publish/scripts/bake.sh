@@ -195,12 +195,19 @@ done
 
 # --- build: retries, then Harbor -> GHCR direct fallback ---
 METADATA="$WORKDIR/metadata.json"
+# Bake refuses to export to a path outside its working directory unless the
+# path is granted ("additional privileges requested"). Grant exactly the layout
+# root. Older buildx has neither the check nor the flag.
+ALLOW_ARGS=()
+if docker buildx bake --help 2>/dev/null | grep -q -- '--allow'; then
+  ALLOW_ARGS=(--allow "fs.write=${LAYOUT_ROOT}")
+fi
 run_bake() {
   local args=()
   mapfile -d '' -t args < <(set_args "$@")
   # A failed attempt can leave a partial layout behind.
   rm -rf "$LAYOUT_ROOT" && mkdir -p "$LAYOUT_ROOT"
-  docker buildx bake "${FILE_ARGS[@]}" "${args[@]}" --metadata-file "$METADATA" "${REQUESTED[@]}"
+  docker buildx bake "${ALLOW_ARGS[@]}" "${FILE_ARGS[@]}" "${args[@]}" --metadata-file "$METADATA" "${REQUESTED[@]}"
 }
 
 retries="${INPUT_RETRIES:-1}"
