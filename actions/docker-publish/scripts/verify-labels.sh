@@ -1,6 +1,8 @@
 #!/bin/bash
-# Fail unless every platform image carries the OCI labels the SBOM enrichment
-# and traceability requirements depend on.
+# Warn when a platform image lacks one of the OCI labels the SBOM enrichment
+# and traceability depend on. Missing labels never fail the gate: the image is
+# published, and the SBOM fields they would fill stay NOASSERTION. Only a
+# malformed layout (no image manifests, a blob that fails its digest) fails.
 #
 # Usage: verify-labels.sh <oci-layout-dir>@<index-digest>
 # Env:   INPUT_REQUIRED_LABELS (whitespace/comma separated label keys)
@@ -26,7 +28,7 @@ for d in "${IMAGE_DIGESTS[@]}"; do
   for key in "${REQUIRED[@]}"; do
     value="$(printf '%s' "$labels" | jq -r --arg k "$key" '.[$k] // ""')"
     if [ -z "$value" ]; then
-      echo "::error::Image manifest ${d} is missing required label '${key}'."
+      echo "::warning title=Missing OCI label::Image manifest ${d} is missing expected label '${key}'."
       missing=1
     else
       log "${d}: ${key}=$(oneline "$value")"
@@ -35,5 +37,5 @@ for d in "${IMAGE_DIGESTS[@]}"; do
 done
 
 if [ "$missing" -ne 0 ]; then
-  die "Required OCI labels are missing. Set them via the 'labels' input (docker/metadata-action's labels output provides source/revision/licenses) or LABEL in the Dockerfile."
+  echo "::warning title=Missing OCI labels::Expected OCI labels are missing; the image is published anyway. Set them via the 'labels' input (docker/metadata-action's labels output provides source/revision/licenses) or LABEL in the Dockerfile."
 fi

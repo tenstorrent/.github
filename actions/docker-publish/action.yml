@@ -21,9 +21,10 @@ inputs:
     default: ""
   required-labels:
     description: >-
-      OCI label keys every platform image must carry. source and licenses feed
-      the SBOM's downloadLocation/licenseDeclared; revision ties the image to
-      a commit.
+      OCI label keys every platform image is expected to carry. A missing one
+      is a warning, not a gate failure. source and licenses feed the SBOM's
+      downloadLocation/licenseDeclared (NOASSERTION without them); revision
+      ties the image to a commit.
     required: false
     default: >-
       org.opencontainers.image.source

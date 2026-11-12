@@ -16,9 +16,10 @@ of the pipeline has passed.
 
 1. **Build into a local OCI layout** on the runner, with max-mode SLSA
    provenance and a BuildKit SBOM attestation. Nothing is pushed.
-2. **Gate every image.** Each platform image must carry the required OCI
-   labels, and Trivy must find no secret, misconfiguration or license issue at
-   the configured severities. Vulnerabilities at those severities are
+2. **Gate every image.** Each platform image is checked for the expected OCI
+   labels (a missing one is a warning, not a failure), and Trivy must find
+   no secret, misconfiguration or license issue at the configured
+   severities. Vulnerabilities at those severities are
    reported but do not fail the gate unless `trivy-fail-on-vulnerabilities` is
    `"true"`. Trivy reports are uploaded as a workflow artifact, pass or fail.
 3. **Push by digest.** Only once every image has passed are the layouts pushed
@@ -38,7 +39,7 @@ of the pipeline has passed.
    repositories it is tagged in, together with its signed SBOM bundles. Only
    then are the tags applied.
 
-If a label check or Trivy fails, or Trivy itself errors, nothing is pushed:
+If Trivy fails or errors, nothing is pushed:
 the image never leaves the runner. See
 [Failure modes and gotchas](#failure-modes-and-gotchas) for what each failure
 leaves behind, and for the one way image content can still leave the runner
@@ -74,7 +75,7 @@ set in a bake file. To keep failing images off the registry entirely:
 | Fails at | Registry | Tags |
 |---|---|---|
 | Build (including running out of disk for the OCI layout) | Nothing, apart from build cache (above) | None |
-| Label check, gating Trivy findings, or Trivy erroring (including a vulnerability database download that fails from Harbor and upstream) | Nothing, apart from build cache | None |
+| Gating Trivy findings, or Trivy erroring (including a vulnerability database download that fails from Harbor and upstream) | Nothing, apart from build cache | None |
 | Any image in a bake run fails the gate | Nothing for any target, including ones that passed | None |
 | Push by digest | Possibly some blobs, or whole images that passed the gate | None |
 | SBOM enrichment, signing, copying to other repositories | Images that passed the gate, as untagged digests; signed SBOM bundles if signing ran | None |
@@ -208,7 +209,7 @@ tags}` entry per published target (`[]` when no target pushes).
 
 | Input | Default | Meaning |
 |---|---|---|
-| `required-labels` | `org.opencontainers.image.source`, `.revision`, `.licenses` | Label keys every platform image must carry |
+| `required-labels` | `org.opencontainers.image.source`, `.revision`, `.licenses` | Label keys every platform image should carry; a missing one is a warning |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities Trivy reports; findings at them fail the gate (vulnerabilities only with the next input) |
 | `trivy-fail-on-vulnerabilities` | `false` | Let vulnerabilities fail the gate; otherwise they are only reported |
 | `harbor-prefix` | none | Harbor pull-through prefix for Trivy's databases (see [Trivy databases and caching](#trivy-databases-and-caching)) |
