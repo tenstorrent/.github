@@ -61,9 +61,12 @@ inputs:
     default: "true"
   harbor-prefix:
     description: >-
-      Harbor pull-through cache prefix (e.g. 'harbor.example.com/'). If non-empty
-      and every bake attempt fails, one more attempt is made with the prefix
-      stripped from all docker-image:// context URIs (GHCR direct fallback).
+      Harbor pull-through cache prefix (e.g. 'harbor.example.com/'), prepended
+      to ghcr.io references. If non-empty, Trivy pulls its vulnerability DB,
+      Java DB and checks bundle through it, falling back to upstream when
+      Harbor is unreachable. docker-bake-publish also retries a bake that fails
+      every attempt once more with the prefix stripped from all docker-image://
+      context URIs (GHCR direct fallback).
     required: false
     default: ""
   syft-scanner-image:
@@ -89,7 +92,7 @@ inputs:
     required: false
     default: "Organization: Tenstorrent"
   trivy-severity:
-    description: "Comma-separated severities that fail the gate"
+    description: "Comma-separated severities Trivy reports; findings at them fail the gate (vulnerabilities only with trivy-fail-on-vulnerabilities)"
     required: false
     default: "CRITICAL,HIGH"
   trivy-scanners:
@@ -106,6 +109,14 @@ inputs:
       Keep it in the calling repository so every exception is code-reviewed.
     required: false
     default: ""
+  trivy-fail-on-vulnerabilities:
+    description: >-
+      Fail the gate on vulnerabilities at trivy-severity. When "false",
+      vulnerabilities are still scanned and reported (log, step summary, a
+      warning annotation and the uploaded report) but do not block the
+      publish. Secret, misconfiguration and license findings always fail it.
+    required: false
+    default: "false"
   attest-sbom:
     description: >-
       Sign each platform's enriched SBOM with actions/attest and push it to the
@@ -183,6 +194,8 @@ runs:
         INPUT_SCANNERS: ${{ inputs.trivy-scanners }}
         INPUT_IGNORE_UNFIXED: ${{ inputs.trivy-ignore-unfixed }}
         INPUT_IGNOREFILE: ${{ inputs.trivy-ignorefile }}
+        INPUT_FAIL_ON_VULNS: ${{ inputs.trivy-fail-on-vulnerabilities }}
+        INPUT_HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         SBOM_SUPPLIER: ${{ inputs.sbom-supplier }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
         ATTEST_CREATE_STORAGE_RECORD: ${{ inputs.attest-storage-record }}

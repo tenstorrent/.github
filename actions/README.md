@@ -17,8 +17,10 @@ of the pipeline has passed.
 1. **Build into a local OCI layout** on the runner, with max-mode SLSA
    provenance and a BuildKit SBOM attestation. Nothing is pushed.
 2. **Gate every image.** Each platform image must carry the required OCI
-   labels, and a Trivy scan must find nothing at the configured severities.
-   Trivy reports are uploaded as a workflow artifact, pass or fail.
+   labels, and Trivy must find no secret, misconfiguration or license issue at
+   the configured severities. Vulnerabilities at those severities are
+   reported but do not fail the gate unless `trivy-fail-on-vulnerabilities` is
+   `"true"`. Trivy reports are uploaded as a workflow artifact, pass or fail.
 3. **Push by digest.** Only once every image has passed are the layouts pushed
    to the repository of each image's first tag, with no tag.
 4. **Enrich the SBOM.** Each platform is rescanned with syft into an SPDX 2.3
@@ -72,7 +74,7 @@ set in a bake file. To keep failing images off the registry entirely:
 | Fails at | Registry | Tags |
 |---|---|---|
 | Build (including running out of disk for the OCI layout) | Nothing, apart from build cache (above) | None |
-| Label check, Trivy findings, or Trivy erroring (including a failed vulnerability database download) | Nothing, apart from build cache | None |
+| Label check, gating Trivy findings, or Trivy erroring (including a vulnerability database download that fails from Harbor and upstream) | Nothing, apart from build cache | None |
 | Any image in a bake run fails the gate | Nothing for any target, including ones that passed | None |
 | Push by digest | Possibly some blobs, or whole images that passed the gate | None |
 | SBOM enrichment, signing, copying to other repositories | Images that passed the gate, as untagged digests; signed SBOM bundles if signing ran | None |
@@ -89,9 +91,12 @@ Trivy reports are uploaded as an artifact either way.
 - **Signatures cannot be withdrawn.** An SBOM signed with `actions/attest`
   is recorded in GitHub's attestation store and the public Sigstore
   transparency log (public repositories) even if a later step fails.
-- **The same image can pass today and fail tomorrow.** Trivy's vulnerability
-  database is not pinned, so a rebuild or re-run can fail on a newly
-  published CVE with no code change.
+- **Vulnerabilities do not block by default.** They are listed in the scan
+  log, the step summary, a warning annotation per platform and the uploaded
+  report, and the image is published anyway. With
+  `trivy-fail-on-vulnerabilities: "true"` the same image can pass today and
+  fail tomorrow: Trivy's vulnerability database is not pinned, so a rebuild or
+  re-run can fail on a newly published CVE with no code change.
 - **Non-pushed bake targets are not gated.** `type=docker` and local exports
   build unchanged; only targets that push to a registry go through the gate.
 - **Disk.** Every image to be pushed sits on the runner as an OCI layout until
@@ -204,7 +209,9 @@ tags}` entry per published target (`[]` when no target pushes).
 | Input | Default | Meaning |
 |---|---|---|
 | `required-labels` | `org.opencontainers.image.source`, `.revision`, `.licenses` | Label keys every platform image must carry |
-| `trivy-severity` | `CRITICAL,HIGH` | Severities that fail the gate |
+| `trivy-severity` | `CRITICAL,HIGH` | Severities Trivy reports; findings at them fail the gate (vulnerabilities only with the next input) |
+| `trivy-fail-on-vulnerabilities` | `false` | Let vulnerabilities fail the gate; otherwise they are only reported |
+| `harbor-prefix` | none | Harbor pull-through prefix for Trivy's databases (see [Trivy databases and caching](#trivy-databases-and-caching)) |
 | `trivy-scanners` | `vuln,misconfig,secret` | Trivy scanners to run |
 | `trivy-ignore-unfixed` | `false` | Ignore vulnerabilities with no fixed version |
 | `trivy-ignorefile` | none | Path to a `.trivyignore` of reviewed exceptions |
@@ -244,12 +251,62 @@ See each `action.yml` for the full list.
   digest from the org mirror (see [Tool images](#tool-images)); a scanner
   given as a tag is rejected. Trivy's vulnerability database is the one
   thing that is not pinned: it has to be current to be useful, and Trivy
-  fetches it at scan time.
+  fetches it at scan time (see
+  [Trivy databases and caching](#trivy-databases-and-caching)).
 - **Tools on `PATH`.** The actions install syft, oras and trivy into
   `$RUNNER_TEMP` and add that directory to `GITHUB_PATH`, so later steps of the
   calling job see them too.
 - **Trivy exceptions** belong in a `.trivyignore` in the calling repository,
   passed with `trivy-ignorefile`, so each one is code reviewed.
+
+## Trivy databases and caching
+
+Trivy keeps two kinds of cached data, and they are cached in different places.
+
+**Databases** (vulnerability DB, Java DB, misconfiguration checks bundle) are
+OCI artifacts Trivy downloads into its cache directory on the runner
+(`~/.cache/trivy` by default). By default they come from `mirror.gcr.io` and
+`ghcr.io`. Set `harbor-prefix` (tt-metal's `check-harbor` output, e.g.
+`harbor.ci.tenstorrent.net/`) to pull them through the Harbor pull-through
+cache instead:
+
+- The vulnerability DB is downloaded once before the scans, from
+  `<prefix>ghcr.io/aquasecurity/trivy-db:2`. If that fails, it is downloaded
+  from upstream with a warning. Trivy itself moves to its next repository only
+  on a 429 or 5xx, not when a host is unreachable, so the action does this
+  fallback.
+- Once Harbor has served the DB, the Java DB comes from
+  `<prefix>ghcr.io/aquasecurity/trivy-java-db:1` (then Trivy's defaults) and
+  the checks bundle from `<prefix>ghcr.io/aquasecurity/trivy-checks:2`. If the
+  checks bundle cannot be pulled, Trivy uses the checks built into the binary.
+- With an empty `harbor-prefix`, everything comes from upstream as before.
+
+**The scan cache** holds per-layer analysis results (package lists and so
+on), so an unchanged layer is not analysed again. It is a local BoltDB file by
+default. Trivy can keep it in Redis instead, which shares it between runners.
+Redis holds only the scan cache, never the databases above. The action does
+not configure this. Trivy reads a `TRIVY_*` environment variable for every
+flag, and `env:` on the step that uses the action reaches Trivy, so a caller
+can opt in:
+
+```yaml
+- uses: tenstorrent/.github/actions/docker-bake-publish@<ref>
+  env:
+    TRIVY_CACHE_BACKEND: redis://${{ vars.TRIVY_REDIS_USER }}:${{ secrets.TRIVY_REDIS_PASSWORD }}@${{ vars.TRIVY_REDIS_HOST }}:${{ vars.TRIVY_REDIS_PORT }}
+    TRIVY_CACHE_TTL: 168h
+```
+
+- The URL is parsed by go-redis, so `redis://user:password@host:port/db` and
+  `rediss://` (TLS) work. For client certificates use `TRIVY_REDIS_TLS`,
+  `TRIVY_REDIS_CA`, `TRIVY_REDIS_CERT` and `TRIVY_REDIS_KEY`.
+- Trivy writes to the cache during every scan, so the user needs write
+  access. The read-only ccache user does not fit, and ccache's
+  `|read-only=true` suffix is not part of a Redis URL.
+- Without `TRIVY_CACHE_TTL`, entries never expire.
+- Trivy marks the scan cache backend as experimental.
+
+See Trivy's [cache](https://trivy.dev/docs/latest/guide/configuration/cache/)
+and [database](https://trivy.dev/docs/latest/guide/configuration/db/) docs.
 
 ## Why not Trivy out of the box
 
