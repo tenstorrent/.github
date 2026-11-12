@@ -57,10 +57,19 @@ for ((i = 0; i < COUNT; i++)); do
   digest="$(field "$i" digest)"
   layout="$(field "$i" layout)"
   echo "::group::[${name}] push by digest"
-  # No destination tag: oras copies the graph and creates no tag.
-  oras cp --from-oci-layout --to-distribution-spec "$ORAS_REFERRERS_SPEC" "${layout}@${digest}" "$repo" >&2
-  pushed="$(oras manifest fetch --descriptor "${repo}@${digest}" | jq -r .digest)"
-  [ "$pushed" = "$digest" ] || die "${repo}@${digest} is not in the registry after the push."
+  # No destination tag: oras copies the graph and creates no tag. GHCR can
+  # answer "not found" for a manifest it has just accepted (the index was in
+  # the registry moments after oras reported it missing), so the copy and the
+  # check are retried. A retry re-sends only what the registry lacks.
+  pushed=""
+  for attempt in 1 2 3 4; do
+    if oras cp --from-oci-layout --to-distribution-spec "$ORAS_REFERRERS_SPEC" "${layout}@${digest}" "$repo" >&2; then
+      pushed="$(oras manifest fetch --descriptor "${repo}@${digest}" | jq -r .digest)" || pushed=""
+      [ "$pushed" = "$digest" ] && break
+    fi
+    [ "$attempt" -lt 4 ] && { log "push of ${repo}@${digest} not confirmed (attempt ${attempt}/4); retrying in $((attempt * 10))s"; sleep $((attempt * 10)); }
+  done
+  [ "$pushed" = "$digest" ] || die "${repo}@${digest} is not in the registry after 4 push attempts."
   log "pushed ${repo}@${digest}"
   rm -rf "$layout"
   echo "::endgroup::"
