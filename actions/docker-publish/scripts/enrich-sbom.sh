@@ -19,6 +19,12 @@
 # Every platform in the index is processed. Non-SBOM attestation layers (SLSA
 # provenance etc.) and the in-toto subject are carried over byte-for-byte.
 #
+# The org.opencontainers.image.* labels that every platform image shares are
+# also copied onto the index as annotations. A tag resolves to the index, and
+# GitHub's package page reads only the index's annotations, never the platform
+# configs, so without them description, source and license show as blank.
+# Annotations already on the index win.
+#
 # The enriched index is pushed BY DIGEST only; tagging is left to the caller so
 # nothing becomes pullable by tag until all gates have passed.
 #
@@ -102,6 +108,7 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
 
   # --- labels from the platform image config ---
   LABELS_JSON="$(oras manifest fetch-config "${REPO}@${IMG_DIGEST}" | jq -c '.config.Labels // {}')"
+  printf '%s\n' "$LABELS_JSON" >> "$WORKDIR/labels.jsonl"
   LABEL_SOURCE="$(label source)"
   LABEL_LICENSES="$(label licenses)"
   LABEL_VERSION="$(label version)"
@@ -233,6 +240,11 @@ for ATT_DIGEST in "${ATT_DIGESTS[@]}"; do
     .manifests |= map(if .digest == $old then .digest = $new | .size = $size else . end)
   ' "$NEW_INDEX" > "$NEW_INDEX.tmp" && mv "$NEW_INDEX.tmp" "$NEW_INDEX"
 done
+
+# --- index annotations: the OCI labels every platform agrees on (see header) ---
+jq -c --slurpfile labels "$WORKDIR/labels.jsonl" -f "$(dirname "${BASH_SOURCE[0]}")/index-annotations.jq" \
+  "$NEW_INDEX" > "$NEW_INDEX.tmp" && mv "$NEW_INDEX.tmp" "$NEW_INDEX"
+log "index annotations: $(jq -c '.annotations // {} | keys' "$NEW_INDEX")"
 
 NEW_INDEX_DIGEST="sha256:$(sha256_of "$NEW_INDEX")"
 oras manifest push --distribution-spec "$ORAS_REFERRERS_SPEC" \

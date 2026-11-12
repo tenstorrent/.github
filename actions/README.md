@@ -26,7 +26,10 @@ of the pipeline has passed.
    the image's OCI labels. Packages get the OS, source-package, supplier and
    layer data Trivy needs to scan the SBOM, and package checksums from the
    archive hashes syft reads but does not write for most ecosystems (see
-   [Why not Trivy out of the box](#why-not-trivy-out-of-the-box)).
+   [Why not Trivy out of the box](#why-not-trivy-out-of-the-box)). The
+   `org.opencontainers.image.*` labels that all platforms share are copied
+   onto the index as annotations, since GitHub's package page reads the
+   description, source and license only from there.
 5. **Sign the SBOM** of each platform with `actions/attest` and push the
    Sigstore bundle as an OCI referrer of that platform image.
 6. **Copy, then tag.** Every image is copied by digest to any other
