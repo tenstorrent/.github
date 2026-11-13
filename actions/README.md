@@ -193,6 +193,21 @@ To change a single target's attribute rather than a variable, use `set-lines`
 are the exception: the action reads them to decide what to publish and then
 replaces them, so set those per target, not with a wildcard.
 
+### Labels
+
+docker-bake-publish has no `labels` input, and bake does not add
+`org.opencontainers.image.revision` on its own. Set it on every target with
+`set-lines`, or the label check warns for each image and nothing in the image
+ties it to a commit. tt-metal builds the set lines in a shell step:
+
+```bash
+# docker-bake-publish requires a revision label on every published image.
+SET+="*.labels.org.opencontainers.image.revision=$(git rev-parse HEAD)"$'\n'
+```
+
+`source` and `licenses` can come from `LABEL` in the Dockerfile or from more
+`*.labels.*` set lines in the same way.
+
 ### Migrating from tt-metal's `manual-docker-bake`
 
 - `ubuntu-version` and `python-version` are gone: move them to `env:` as
@@ -339,6 +354,45 @@ too: a secret scanner finding is ignored with the `private-key` rule ID in
 `.trivyignore` (which ignores every such finding unless `.trivyignore.yaml`
 limits it to paths), a crypto scanner finding with
 `trivy-allowed-private-keys`. A key both find needs both.
+
+### SSH host keys
+
+Installing `openssh-server` generates the host keys
+(`/etc/ssh/ssh_host_*_key`) at build time. They are OpenSSH private keys, so
+the secret scanner fails the gate on them, and every container from the image
+would share them. Do not allow them. Delete them in the same `RUN` that
+installs the package, so no layer keeps them:
+
+```dockerfile
+# Host keys are generated at container start, not baked into the image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_*
+```
+
+Then generate them when the container starts, before sshd runs. With an
+entrypoint script (tt-metal's `dockerfile/entrypoint.sh`):
+
+```bash
+ssh-keygen -A          # creates any missing host keys; a no-op when they exist
+service ssh start
+```
+
+`ssh-keygen -A` needs root. If something other than the entrypoint starts
+sshd (for example a Kubernetes `command`, which replaces `ENTRYPOINT`), wrap
+sshd itself so the keys are created on every start, as tt-metal's
+`dockerfile/exabox_tools/Dockerfile` does:
+
+```dockerfile
+RUN dpkg-divert --local --rename --add /usr/sbin/sshd \
+    && printf '%s\n' \
+        '#!/bin/sh' \
+        '[ "$(id -u)" != 0 ] || ssh-keygen -A >&2' \
+        'exec /usr/sbin/sshd.distrib "$@"' \
+        > /usr/sbin/sshd \
+    && chmod 755 /usr/sbin/sshd
+```
 
 ## Trivy databases and caching
 
