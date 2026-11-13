@@ -177,6 +177,9 @@ layout (keeping exporter options such as compression) and go through the
 pipeline; their `tags` are applied at the end. Targets that do
 not push (`type=docker`, local exports) are built unchanged and are not gated.
 
+Output: `images`, a JSON array with one `{name, repo, digest, build_digest,
+tags}` entry per published target (`[]` when no target pushes).
+
 ### Bake variables
 
 The action has no inputs for bake variables. Bake reads a `variable` block's
@@ -207,21 +210,6 @@ SET+="*.labels.org.opencontainers.image.revision=$(git rev-parse HEAD)"$'\n'
 
 `source` and `licenses` can come from `LABEL` in the Dockerfile or from more
 `*.labels.*` set lines in the same way.
-
-### Migrating from tt-metal's `manual-docker-bake`
-
-- `ubuntu-version` and `python-version` are gone: move them to `env:` as
-  `UBUNTU_VERSION` and `PYTHON_VERSION`.
-- `oras-image` is gone: oras always comes from the pinned release tarball.
-- `syft-scanner-image` must be pinned by digest (`name@sha256:...`) and is
-  used exactly as given, without `harbor-prefix`. Leave it empty to use the
-  org mirror (see [Tool images](#tool-images)).
-
-A caller that still passes a removed input gets an "unexpected input" warning
-and the input has no effect.
-
-Output: `images`, a JSON array with one `{name, repo, digest, build_digest,
-tags}` entry per published target (`[]` when no target pushes).
 
 ## Inputs shared by both actions
 
