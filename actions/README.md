@@ -160,8 +160,11 @@ and `build-digest` (the index BuildKit built, before enrichment, never tagged).
 
 ### Images without an SBOM
 
-For short-lived CI images that nobody audits after the run, `sbom: "false"`
-skips the SBOM work but keeps the gate:
+`sbom: "false"` skips the SBOM work but keeps the gate. **It is only for
+throwaway images**: short-lived CI images that are deleted after the run and
+that nobody pulls outside it, such as tt-metal's prebuilt test images. Any
+image published to a registry for distribution (releases, images other teams
+or users pull) MUST keep the SBOM.
 
 - BuildKit generates no SBOM attestation, syft is not installed, and the image
   is not rescanned or enriched. `attest-sbom` is ignored, since there is

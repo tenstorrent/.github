@@ -101,8 +101,10 @@ inputs:
       rescan that enriches it, and (with attest-sbom) its signature. "false"
       skips all of that, and attest-sbom is then ignored; the label check and
       the Trivy gate still run. The image is published exactly as built, so
-      its index gets no label annotations either. Meant for short-lived CI
-      images that nobody audits after the run.
+      its index gets no label annotations either. Only for throwaway images:
+      short-lived CI images that are deleted after the run and that nobody
+      pulls outside it. Any image published to a registry for distribution
+      (releases, images other teams or users pull) MUST keep the SBOM.
     required: false
     default: "true"
   sbom-generator:
