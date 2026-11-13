@@ -13,6 +13,7 @@
 # Env:   INPUT_REQUIRED_LABELS, INPUT_SEVERITY, INPUT_SCANNERS, INPUT_IGNORE_UNFIXED,
 #        INPUT_IGNOREFILE, INPUT_FAIL_ON_VULNS, INPUT_ALLOWED_PRIVATE_KEYS,
 #        INPUT_HARBOR_PREFIX, SBOM_SUPPLIER, REPORT_ROOT,
+#        SBOM (default true; false publishes each image as built, with no SBOM),
 #        ATTEST_SBOM (default true), GITHUB_TOKEN, ATTEST_CREATE_STORAGE_RECORD
 # Outputs: images (JSON, digests after enrichment), digest (first image)
 
@@ -31,6 +32,9 @@ SBOM_ROOT="$(mktemp -d)"
 mapfile -t LAYOUTS < <(jq -r '.[].layout // empty' "$IMAGES_JSON")
 [ "${#LAYOUTS[@]}" -eq "$COUNT" ] || die "Every image in ${IMAGES_JSON} needs a 'layout'."
 trap 'rm -rf "$SBOM_ROOT" "${LAYOUTS[@]}"' EXIT
+
+# Without an SBOM there is nothing to sign (prepare.sh already said so).
+[ "${SBOM:-true}" = true ] || ATTEST_SBOM=false
 
 FAILED=()
 for ((i = 0; i < COUNT; i++)); do
@@ -86,6 +90,11 @@ DIGESTS=()
 for ((i = 0; i < COUNT; i++)); do
   name="$(field "$i" name)"
   repo="$(field "$i" repo)"
+  if [ "${SBOM:-true}" = false ]; then
+    # No SBOM to enrich: the image is published as built.
+    DIGESTS+=("$(field "$i" digest)")
+    continue
+  fi
   echo "::group::[${name}] enrich SBOM"
   if [ "${ATTEST_SBOM:-true}" = true ]; then
     mkdir "${SBOM_ROOT}/${i}"

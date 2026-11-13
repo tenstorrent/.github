@@ -71,9 +71,12 @@ else
   syft_sha="$SYFT_SHA256_ARM64" oras_sha="$ORAS_SHA256_ARM64" trivy_sha="$TRIVY_SHA256_ARM64" trivy_arch="ARM64"
 fi
 
-install_pinned_binary \
-  "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${ARCH}.tar.gz" \
-  "$syft_sha" syft
+# Only the SBOM enrichment uses syft; INSTALL_SYFT=false skips it.
+if [ "${INSTALL_SYFT:-true}" = true ]; then
+  install_pinned_binary \
+    "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_${ARCH}.tar.gz" \
+    "$syft_sha" syft
+fi
 install_pinned_binary \
   "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${ARCH}.tar.gz" \
   "$oras_sha" oras

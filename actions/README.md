@@ -158,6 +158,19 @@ receive an identical copy with the same digest.
 Outputs: `digest` (the published index), `image` (`<primary-repo>@<digest>`)
 and `build-digest` (the index BuildKit built, before enrichment, never tagged).
 
+### Images without an SBOM
+
+For short-lived CI images that nobody audits after the run, `sbom: "false"`
+skips the SBOM work but keeps the gate:
+
+- BuildKit generates no SBOM attestation, syft is not installed, and the image
+  is not rescanned or enriched. `attest-sbom` is ignored, since there is
+  nothing to sign.
+- The label check and the Trivy scan, private key check included, run as
+  usual, and nothing is pushed unless they pass.
+- The image is published exactly as built: `digest` equals `build-digest`, and
+  the index gets no label annotations. Provenance is still attached.
+
 ## docker-bake-publish
 
 ```yaml

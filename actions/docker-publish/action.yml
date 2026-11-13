@@ -95,6 +95,16 @@ inputs:
       `compression=zstd,compression-level=22,force-compression=true,oci-mediatypes=true`.
     required: false
     default: "oci-mediatypes=true"
+  sbom:
+    description: >-
+      Generate an SBOM for the image: BuildKit's SBOM attestation, the syft
+      rescan that enriches it, and (with attest-sbom) its signature. "false"
+      skips all of that, and attest-sbom is then ignored; the label check and
+      the Trivy gate still run. The image is published exactly as built, so
+      its index gets no label annotations either. Meant for short-lived CI
+      images that nobody audits after the run.
+    required: false
+    default: "true"
   sbom-generator:
     description: >-
       BuildKit SBOM scanner image used to generate the initial SBOM attestation.
@@ -207,13 +217,15 @@ runs:
         INPUT_BUILDER: ${{ inputs.builder }}
         INPUT_SBOM_GENERATOR: ${{ inputs.sbom-generator }}
         INPUT_CACHE_TO: ${{ inputs.cache-to }}
+        INPUT_SBOM: ${{ inputs.sbom }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"
 
     - name: Install syft, oras and trivy
       shell: bash
       env:
-        INSTALL_ATTEST: ${{ inputs.attest-sbom }}
+        INSTALL_SYFT: ${{ steps.prepare.outputs.sbom }}
+        INSTALL_ATTEST: ${{ steps.prepare.outputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/install-tools.sh"
 
     # Export to a local OCI layout: nothing reaches a registry until the gates below pass.
@@ -236,7 +248,7 @@ runs:
         pull: ${{ inputs.pull }}
         no-cache: ${{ inputs.no-cache }}
         provenance: mode=max
-        attests: type=sbom,generator=${{ steps.prepare.outputs.sbom-generator }}
+        attests: ${{ steps.prepare.outputs.sbom == 'true' && format('type=sbom,generator={0}', steps.prepare.outputs.sbom-generator) || '' }}
         outputs: type=oci,dest=${{ runner.temp }}/docker-publish-layout-${{ steps.prepare.outputs.report-id }},tar=false${{ inputs.image-output-options != '' && format(',{0}', inputs.image-output-options) || '' }}
 
     - name: Gate, push, enrich SBOM and publish tags
@@ -252,6 +264,7 @@ runs:
         INPUT_ALLOWED_PRIVATE_KEYS: ${{ inputs.trivy-allowed-private-keys }}
         INPUT_HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         SBOM_SUPPLIER: ${{ inputs.sbom-supplier }}
+        SBOM: ${{ steps.prepare.outputs.sbom }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
         ATTEST_CREATE_STORAGE_RECORD: ${{ inputs.attest-storage-record }}
         GITHUB_TOKEN: ${{ inputs.github-token }}

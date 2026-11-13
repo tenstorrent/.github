@@ -4,8 +4,10 @@
 # Env: INPUT_TAGS (newline/comma separated), INPUT_BUILDER (optional),
 #      INPUT_SBOM_GENERATOR (optional; must be pinned by digest. Empty uses
 #      the org mirror pinned in actions/tool-images.json),
-#      ATTEST_SBOM (default true), INPUT_CACHE_TO (warned about if it leaves the runner)
-# Outputs: primary-repo, report-id, sbom-generator, tags (normalized, newline separated)
+#      INPUT_SBOM (default true), ATTEST_SBOM (default true; forced off without
+#      an SBOM), INPUT_CACHE_TO (warned about if it leaves the runner)
+# Outputs: primary-repo, report-id, sbom-generator, sbom, attest-sbom,
+#          tags (normalized, newline separated)
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -31,13 +33,24 @@ require_attesting_builder "${INPUT_BUILDER:-}"
 mapfile -t CACHE_TO < <(printf '%s\n' "${INPUT_CACHE_TO:-}")
 warn_ungated_cache "docker-publish" "${CACHE_TO[@]}"
 
+case "${INPUT_SBOM:-true}" in
+  true) SBOM=true ;;
+  false) SBOM=false ;;
+  *) die "sbom must be true or false; got '${INPUT_SBOM}'" ;;
+esac
+ATTEST_SBOM="${ATTEST_SBOM:-true}"
+if [ "$SBOM" = false ] && [ "$ATTEST_SBOM" = true ]; then
+  log "sbom is false: no SBOM is generated, so none is signed (attest-sbom ignored)"
+  ATTEST_SBOM=false
+fi
+
 # The SBOM scanner runs inside the build with access to the image's filesystem.
 SBOM_GENERATOR="${INPUT_SBOM_GENERATOR:-}"
 [ -n "$SBOM_GENERATOR" ] || SBOM_GENERATOR="$(pinned_tool_image buildkit-syft-scanner)"
 require_digest_pinned "$SBOM_GENERATOR" "sbom-generator"
 
 # Fail before building, not after the scan; attest-sbom.sh checks this again.
-if [ "${ATTEST_SBOM:-true}" = true ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+if [ "$ATTEST_SBOM" = true ] && [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
   die "SBOM attestation needs 'permissions: id-token: write' (and attestations: write) on the calling job."
 fi
 
@@ -45,6 +58,8 @@ log "primary repository: $PRIMARY_REPO"
 {
   echo "primary-repo=$PRIMARY_REPO"
   echo "sbom-generator=$SBOM_GENERATOR"
+  echo "sbom=$SBOM"
+  echo "attest-sbom=$ATTEST_SBOM"
   echo "report-id=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
   echo "tags<<__TAGS__"
   printf '%s\n' "${TAGS[@]}"
