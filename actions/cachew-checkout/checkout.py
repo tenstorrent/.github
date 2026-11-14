@@ -298,6 +298,9 @@ class Checkout:
             GIT_TERMINAL_PROMPT="0",
             GIT_ASKPASS="/bin/false",
             GIT_LFS_SKIP_SMUDGE="1",
+            # transport_error matches Git's English messages.
+            LC_ALL="C",
+            LANGUAGE="",
         )
         self.token = checkout_input(environ, "CACHEW_TOKEN")
         self.auth = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()

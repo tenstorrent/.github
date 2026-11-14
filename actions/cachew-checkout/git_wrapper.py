@@ -56,6 +56,7 @@ CLONE_OPTIONS_WITH_VALUE = {
     "--template",
     "--bundle-uri",
     "--ref-format",
+    "--revision",
 }
 READ_OPTIONS_WITH_VALUE = {
     "clone": CLONE_OPTIONS_WITH_VALUE,
@@ -127,6 +128,9 @@ def direct_network_operation(real_git, arguments, index, environ):
     # Every remote subcommand that can reach a remote (update, prune, show,
     # add -f, set-head --auto) goes upstream; the local ones are unaffected.
     if command in ("push", "pull", "submodule", "remote"):
+        return True
+    # A retry could not replay the refspecs the cache attempt consumed from stdin.
+    if command == "fetch" and "--stdin" in tail:
         return True
     recursive = [arg for arg in tail if arg.startswith(("--recursive", "--recurse-submodules"))]
     # For clone, --recurse-submodules=<value> is a pathspec, not a boolean:
@@ -303,7 +307,8 @@ def cache_attempt(real_git, arguments, environ, index):
         f"http.lowSpeedTime={max(1, math.ceil(stall))}",
         *arguments[index:],
     ]
-    cache_env = dict(environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false")
+    # transport_error matches Git's English messages.
+    cache_env = dict(environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false", LC_ALL="C", LANGUAGE="")
     tail = bytearray()
 
     def relay(stream):

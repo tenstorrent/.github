@@ -152,6 +152,26 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(self.upstream.requests)
         self.assertFalse((self.session / "cache-disabled").exists())
 
+    def test_fetch_stdin_refspecs_go_upstream_once(self):
+        # An upstream retry could not replay refspecs the cache attempt consumed.
+        self.dependency("cmake-dependency")
+        target = self.root / "cloned"
+        self.run_git("clone", self.upstream.url + "/org/cmake-dependency", str(target))
+        self.cache.fail_repo = "cmake-dependency"
+        requests = len(self.cache.requests)
+        result = subprocess.run(
+            ["git", "-C", str(target), "fetch", "--stdin", "origin"],
+            input="refs/heads/main:refs/remotes/origin/from-stdin\n",
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_git("-C", str(target), "rev-parse", "--verify", "refs/remotes/origin/from-stdin")
+        self.assertEqual(len(self.cache.requests), requests)
+        self.assertFalse((self.session / "cache-disabled").exists())
+
     def test_network_remote_subcommands_go_upstream(self):
         self.dependency("cmake-dependency")
         target = self.root / "cloned"
@@ -395,6 +415,7 @@ class DownstreamGitTests(unittest.TestCase):
             (["clone", "--bare", "https://h/o/repo.git"], cwd / "repo.git"),
             (["clone", "--mirror", "https://h/o/repo"], cwd / "repo.git"),
             (["clone", "--bare", "https://h/o/repo", "explicit"], cwd / "explicit"),
+            (["clone", "--revision", "v1.0", "https://h/o/repo"], cwd / "repo"),
         ]
         for arguments, expected in cases:
             index = wrapper.command_index(arguments)
