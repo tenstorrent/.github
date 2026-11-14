@@ -63,7 +63,7 @@ class DownstreamGitTests(unittest.TestCase):
             + shlex.quote(str(fixture.ACTION / "git_wrapper.py"))
             + ' "$@"\n'
         )
-        shim.chmod(0o700)
+        shim.chmod(0o500)  # read and execute for the owner only: PATH lookup needs no more
         self.env.update(
             CACHEW_REAL_GIT=self.real_git,
             CACHEW_SESSION_DIR=str(self.session),
