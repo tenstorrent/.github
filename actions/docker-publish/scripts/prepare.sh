@@ -5,7 +5,8 @@
 #      INPUT_SBOM_GENERATOR (optional; must be pinned by digest. Empty uses
 #      the org mirror pinned in actions/tool-images.json),
 #      INPUT_SBOM (default true), ATTEST_SBOM (default true; forced off without
-#      an SBOM), INPUT_CACHE_TO (warned about if it leaves the runner)
+#      an SBOM), INPUT_CACHE_TO (warned about if it leaves the runner),
+#      INPUT_IMAGE_OUTPUT_OPTIONS (exporter options, checked against an allowlist)
 # Outputs: primary-repo, report-id, sbom-generator, sbom, attest-sbom,
 #          tags (normalized, newline separated)
 
@@ -29,6 +30,43 @@ parse_ref "${TAGS[0]}"
 PRIMARY_REPO="$REF_REPO"
 
 require_attesting_builder "${INPUT_BUILDER:-}"
+
+# image-output-options is appended to the build's own `type=oci,dest=...`
+# output. A second line would add another output, and a repeated type, dest,
+# tar, push or name would override ours (the last value wins), either of which
+# could push before the gate. Only options that change how the layout is
+# written are accepted. Fields are CSV, so a quoted field may hold commas.
+OUTPUT_OPTS="${INPUT_IMAGE_OUTPUT_OPTIONS:-}"
+# A YAML block scalar (`|`) ends in a newline; trailing blank lines add no output.
+OUTPUT_OPTS="${OUTPUT_OPTS%"${OUTPUT_OPTS##*[!$'\n\r']}"}"
+case "$OUTPUT_OPTS" in
+  *$'\n'* | *$'\r'*) die "image-output-options must be one line of comma-separated exporter options." ;;
+esac
+OPT_FIELDS=()
+field="" quoted=false
+for ((i = 0; i < ${#OUTPUT_OPTS}; i++)); do
+  c="${OUTPUT_OPTS:i:1}"
+  if [ "$c" = '"' ]; then
+    if [ "$quoted" = true ]; then quoted=false; else quoted=true; fi
+  elif [ "$c" = , ] && [ "$quoted" = false ]; then
+    OPT_FIELDS+=("$field")
+    field=""
+    continue
+  fi
+  field+="$c"
+done
+OPT_FIELDS+=("$field")
+for field in "${OPT_FIELDS[@]}"; do
+  key="${field#"${field%%[![:space:]]*}"}"
+  key="${key#\"}"
+  key="${key%%=*}"
+  [ -n "$key" ] || continue
+  case "$key" in
+    compression | compression-level | force-compression | oci-mediatypes | oci-artifact | rewrite-timestamp \
+      | annotation | annotation.* | annotation-*) ;;
+    *) die "image-output-options: '${key}' is not accepted. Allowed: compression, compression-level, force-compression, oci-mediatypes, oci-artifact, rewrite-timestamp, annotation*." ;;
+  esac
+done
 
 mapfile -t CACHE_TO < <(printf '%s\n' "${INPUT_CACHE_TO:-}")
 warn_ungated_cache "docker-publish" "${CACHE_TO[@]}"

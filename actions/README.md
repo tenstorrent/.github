@@ -155,6 +155,13 @@ Trivy reports are uploaded as an artifact either way.
 repository is where the image is built and scanned; tags in other repositories
 receive an identical copy with the same digest.
 
+`image-output-options` is appended to the action's own local OCI output, so it
+is checked before the build: one line, and only `compression`,
+`compression-level`, `force-compression`, `oci-mediatypes`, `oci-artifact`,
+`rewrite-timestamp` and `annotation*` options. Anything else, such as `type`,
+`push`, `name`, `dest` or a second output line, could push before the gate and
+fails the step.
+
 Outputs: `digest` (the published index), `image` (`<primary-repo>@<digest>`)
 and `build-digest` (the index BuildKit built, before enrichment, never tagged).
 
@@ -421,9 +428,12 @@ cache instead:
   on a 429 or 5xx, not when a host is unreachable, so the action does this
   fallback.
 - Once Harbor has served the DB, the Java DB comes from
-  `<prefix>ghcr.io/aquasecurity/trivy-java-db:1` (then Trivy's defaults) and
-  the checks bundle from `<prefix>ghcr.io/aquasecurity/trivy-checks:2`. If the
-  checks bundle cannot be pulled, Trivy uses the checks built into the binary.
+  `<prefix>ghcr.io/aquasecurity/trivy-java-db:1` and the checks bundle from
+  `<prefix>ghcr.io/aquasecurity/trivy-checks:2`. Trivy is downloading the Java
+  DB lazily here, and again falls through to its defaults only on a 429 or
+  5xx, so a scan that errors with Harbor's Java DB is run once more with
+  Trivy's default Java DB repositories, with a warning. If the checks bundle
+  cannot be pulled, Trivy uses the checks built into the binary.
 - With an empty `harbor-prefix`, everything comes from upstream as before.
 
 **The scan cache** holds per-layer analysis results (package lists and so

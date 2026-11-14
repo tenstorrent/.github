@@ -22,8 +22,9 @@ BAKE = File.join(ROOT, 'docker-bake-publish', 'action.yml')
 PINS = File.join(ROOT, 'tool-images.json')
 MIRROR_PREFIX = 'ghcr.io/tenstorrent/'
 
-# Differ on purpose: each step reads its report id from its own earlier step.
-GATE_ENV_PER_ACTION = %w[REPORT_ROOT].freeze
+# Differ on purpose: each step reads its report id from its own earlier step,
+# and only docker-publish lets a caller turn the SBOM off.
+GATE_ENV_PER_ACTION = %w[REPORT_ROOT SBOM].freeze
 
 errors = []
 publish = YAML.safe_load(File.read(PUBLISH))

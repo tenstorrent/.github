@@ -93,6 +93,9 @@ inputs:
     description: >-
       Extra comma-separated image exporter options, e.g.
       `compression=zstd,compression-level=22,force-compression=true,oci-mediatypes=true`.
+      One line; only compression, compression-level, force-compression,
+      oci-mediatypes, oci-artifact, rewrite-timestamp and annotation options
+      are accepted, so nothing here can add an output or push before the gate.
     required: false
     default: "oci-mediatypes=true"
   sbom:
@@ -219,6 +222,7 @@ runs:
         INPUT_BUILDER: ${{ inputs.builder }}
         INPUT_SBOM_GENERATOR: ${{ inputs.sbom-generator }}
         INPUT_CACHE_TO: ${{ inputs.cache-to }}
+        INPUT_IMAGE_OUTPUT_OPTIONS: ${{ inputs.image-output-options }}
         INPUT_SBOM: ${{ inputs.sbom }}
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
       run: bash "${GITHUB_ACTION_PATH}/scripts/prepare.sh"

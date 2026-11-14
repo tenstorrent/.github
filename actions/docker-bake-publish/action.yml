@@ -215,6 +215,9 @@ runs:
         INPUT_ALLOWED_PRIVATE_KEYS: ${{ inputs.trivy-allowed-private-keys }}
         INPUT_HARBOR_PREFIX: ${{ inputs.harbor-prefix }}
         SBOM_SUPPLIER: ${{ inputs.sbom-supplier }}
+        # Always on: published bake targets must carry an SBOM, and a caller's
+        # env must not switch gate.sh's docker-publish-only opt-out on.
+        SBOM: "true"
         ATTEST_SBOM: ${{ inputs.attest-sbom }}
         ATTEST_CREATE_STORAGE_RECORD: ${{ inputs.attest-storage-record }}
         GITHUB_TOKEN: ${{ inputs.github-token }}

@@ -72,12 +72,18 @@ RESOLVED="$(bake_print "${SET_LINES[@]}")"
 mapfile -t TARGETS < <(printf '%s' "$RESOLVED" | jq -r '.target | keys[]')
 
 # Normalizes each output to an object (older buildx prints "type=...,k=v" strings).
+# push_on mirrors BuildKit's image exporter: an empty push= means true, and any
+# other value goes through Go's strconv.ParseBool (1, t, T, TRUE, true, True).
+# An absent push attribute is false. Anything that pushes must be gated.
 # shellcheck disable=SC2016
-CLASSIFY_JQ='
+OUTPUT_DEFS='
   def kv: if type == "string" then (split(",") | map(split("=") | {(.[0]): (.[1:] | join("="))}) | add) else . end;
+  def push_on: if . == null then false else (tostring | IN("", "1", "t", "T", "TRUE", "true", "True")) end;'
+# shellcheck disable=SC2016
+CLASSIFY_JQ="${OUTPUT_DEFS}"'
   .target | to_entries | map(
     (.value.output // [] | map(kv)) as $outs
-    | ($outs | map(select(.type == "registry" or (.type == "image" and ((.push // "false") | tostring) == "true")))) as $push
+    | ($outs | map(select(.type == "registry" or (.type == "image" and (.push | push_on))))) as $push
     | {
         name: .key,
         pushed: ($push | length > 0),
@@ -130,7 +136,7 @@ for s in "${SET_LINES[@]}"; do
   pattern="${s%%.*}"
   key="${s#*.}"; key="${key%%=*}"
   case "$key" in
-    tags | tags+ | output | output+)
+    tag | tag+ | tags | tags+ | output | output+)
       if is_pushed "$pattern"; then
         continue
       fi
@@ -185,11 +191,10 @@ mapfile -t -O "${#PRIMARY_SETS[@]}" PRIMARY_SETS < <(overrides "$GENERATOR")
 CHECK="$(bake_print "${PRIMARY_SETS[@]}")"
 for t in "${PUSHED[@]}"; do
   parse_ref "$(jq -r --arg t "$t" '.[] | select(.name == $t) | .tags[0]' "$WORKDIR/targets.json")"
-  ok="$(printf '%s' "$CHECK" | jq --arg t "$t" --arg repo "$REF_REPO" --arg dest "$(layout_of "$t")" '
-    def kv: if type == "string" then (split(",") | map(split("=") | {(.[0]): (.[1:] | join("="))}) | add) else . end;
+  ok="$(printf '%s' "$CHECK" | jq --arg t "$t" --arg repo "$REF_REPO" --arg dest "$(layout_of "$t")" "${OUTPUT_DEFS}"'
     .target[$t] | (.tags == [$repo])
       and (.output | length) == 1
-      and ([.output[] | kv | .type == "oci" and .dest == $dest and (.push // "false" | tostring) != "true"] | all)')"
+      and ([.output[] | kv | .type == "oci" and .dest == $dest and (.push | push_on | not)] | all)')"
   [ "$ok" = true ] || die "Could not rewrite target '$t' to a local OCI layout; resolved config: $(printf '%s' "$CHECK" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
 done
 
@@ -198,8 +203,11 @@ METADATA="$WORKDIR/metadata.json"
 # Bake refuses to export to a path outside its working directory unless the
 # path is granted ("additional privileges requested"). Grant exactly the layout
 # root. Older buildx has neither the check nor the flag.
+# The help text is read whole: `| grep -q` can exit before buildx finishes
+# writing, and under pipefail the SIGPIPE would read as "no --allow".
 ALLOW_ARGS=()
-if docker buildx bake --help 2>/dev/null | grep -q -- '--allow'; then
+BAKE_HELP="$(docker buildx bake --help 2>/dev/null || true)"
+if [[ "$BAKE_HELP" == *--allow* ]]; then
   ALLOW_ARGS=(--allow "fs.write=${LAYOUT_ROOT}")
 fi
 run_bake() {
@@ -225,6 +233,14 @@ if [ "$ok" != true ] && [ -n "${INPUT_HARBOR_PREFIX:-}" ]; then
   for s in "${FILTERED[@]}"; do
     FALLBACK_SETS+=("${s//"docker-image://${INPUT_HARBOR_PREFIX}"/"docker-image://"}")
   done
+  # Contexts from the bake file itself (or built from bake variables) are not
+  # in the set lines; override every resolved one that points at Harbor.
+  mapfile -t -O "${#FALLBACK_SETS[@]}" FALLBACK_SETS < <(
+    printf '%s' "$RESOLVED" | jq -r --arg p "docker-image://${INPUT_HARBOR_PREFIX}" '
+      .target | to_entries[] | .key as $t
+      | (.value.contexts // {}) | to_entries[]
+      | select(.value | startswith($p))
+      | "\($t).contexts.\(.key)=docker-image://\(.value | ltrimstr($p))"')
   mapfile -t -O "${#FALLBACK_SETS[@]}" FALLBACK_SETS < <(overrides "$GENERATOR")
   run_bake "${FALLBACK_SETS[@]}" && ok=true
 fi

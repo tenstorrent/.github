@@ -61,12 +61,16 @@ fi
 # --skip-db-update. --download-db-only is a no-op while the cached DB is still
 # current. The Java DB and checks bundle are fetched lazily during the scan;
 # they are pointed at Harbor only once the DB download proved it serves them.
-# The Java DB list keeps Trivy's defaults behind Harbor; a failed checks bundle
-# pull falls back to the checks embedded in the trivy binary.
+# The Java DB list keeps Trivy's defaults behind Harbor, but Trivy does not
+# reach them when Harbor fails with anything but a 429 or 5xx, so a scan that
+# errors with Harbor's Java DB is run once more with Trivy's defaults only
+# (JAVA_DB_HARBOR_ARGS). A failed checks bundle pull falls back to the checks
+# embedded in the trivy binary.
+JAVA_DB_HARBOR_ARGS=()
 if scanner_on vuln; then
   if [ -n "$HARBOR" ] && trivy image --download-db-only --no-progress \
        --db-repository "${HARBOR}ghcr.io/aquasecurity/trivy-db:2"; then
-    TRIVY_ARGS+=(
+    JAVA_DB_HARBOR_ARGS=(
       --java-db-repository "${HARBOR}ghcr.io/aquasecurity/trivy-java-db:1"
       --java-db-repository mirror.gcr.io/aquasec/trivy-java-db:1
       --java-db-repository ghcr.io/aquasecurity/trivy-java-db:1
@@ -145,7 +149,7 @@ crypto_inventory() {  # <view-dir> <platform>
       log "${2}: allowed private key /${path} (${name}, sha256:${fp})"
     else
       CRYPTO_BLOCKING=$((CRYPTO_BLOCKING + 1))
-      echo "::error title=Private key in image::${2}: /${path} is a private key (${name}, sha256:${fp}). Remove it from the image, or if it is a reviewed fixture add its path or sha256:${fp} to trivy-allowed-private-keys." >&2
+      echo "::error title=Private key in image::${2}: /${path} is a private key (${name}, sha256:${fp}). Remove it from the image, or if it is a reviewed fixture add '${path}' (no leading slash) or 'sha256:${fp}' to trivy-allowed-private-keys." >&2
     fi
   done < <(jq -r '.components[]? | select(.cryptoProperties.relatedCryptoMaterialProperties.type? == "private-key")
     | .name as $n | (.cryptoProperties.relatedCryptoMaterialProperties.fingerprint.content // "unknown") as $fp
@@ -181,7 +185,13 @@ for ((p = 0; p < ${#PLATFORMS[@]}; p++)); do
   others=0
   if [ -n "$GATE_SCANNERS" ]; then
     status=0
-    trivy image "${TRIVY_ARGS[@]}" --output "$report" --input "${VIEWS}/${p}" || status=$?
+    trivy image "${TRIVY_ARGS[@]}" "${JAVA_DB_HARBOR_ARGS[@]}" --output "$report" --input "${VIEWS}/${p}" || status=$?
+    if [ "$status" -ne 0 ] && [ "${#JAVA_DB_HARBOR_ARGS[@]}" -gt 0 ]; then
+      echo "::warning::Trivy errored scanning ${platform} with the Java DB from '${HARBOR}' (exit ${status}); retrying with Trivy's default Java DB repositories."
+      JAVA_DB_HARBOR_ARGS=()
+      status=0
+      trivy image "${TRIVY_ARGS[@]}" --output "$report" --input "${VIEWS}/${p}" || status=$?
+    fi
     [ "$status" -eq 0 ] || die "Trivy errored scanning ${platform} (exit ${status}); see log above."
     trivy convert --format table "$report"
 
