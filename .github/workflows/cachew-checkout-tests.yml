@@ -1,0 +1,70 @@
+name: Test cachew-checkout
+
+# Unit and integration tests for actions/cachew-checkout. They run against
+# local Git fixtures on a GitHub-hosted runner; the live check through a real
+# cachew endpoint needs a self-hosted runner on the CI VLAN and lives in the
+# consumer repository (tenstorrent/tt-metal's test-cachew-checkout workflow).
+
+on:
+  pull_request:
+    paths:
+      - "actions/cachew-checkout/**"
+      - ".github/workflows/cachew-checkout-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "actions/cachew-checkout/**"
+      - ".github/workflows/cachew-checkout-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # A plain checkout, so every later step tests this commit's action.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Working-tree action is a strict no-op on GitHub-hosted runners
+        id: hosted
+        uses: ./actions/cachew-checkout
+        with:
+          path: hosted-noop
+          persist-credentials: false
+      - name: Verify no cachew state on a GitHub-hosted runner
+        env:
+          CONFIGURED: ${{ steps.hosted.outputs.cachew-configured }}
+          CHECKED_OUT: ${{ steps.hosted.outputs.cachew-checked-out }}
+        run: |
+          test "$CONFIGURED" = false
+          test "$CHECKED_OUT" = false
+          test -z "${CACHEW_SESSION_DIR:-}"
+          test -z "${GIT_CONFIG_GLOBAL:-}"
+          if ls "$RUNNER_TEMP"/cachew-* >/dev/null 2>&1; then echo "::error::cachew session on a hosted runner"; exit 1; fi
+          test "$(command -v git)" = "$(PATH=/usr/bin:/bin command -v git)"
+          git -C hosted-noop rev-parse HEAD
+      # The exact actions/checkout the action forwards to: its dist/index.js is
+      # the reference the tests compare cachew's checkouts against.
+      - name: Obtain the exact checkout implementation under test
+        uses: ./actions/cachew-checkout
+        with:
+          repository: actions/checkout
+          ref: de0fac2e4500dabe0009e67214ff5f5447ce83dd
+          path: checkout-action
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Test cache reuse, immediate fallback and cleanup
+        env:
+          CHECKOUT_ACTION_JS: ${{ github.workspace }}/checkout-action/dist/index.js
+          # Test-only: the fixtures are plain-HTTP loopback servers. The action
+          # itself clears this variable, so it cannot affect real checkouts.
+          CACHEW_TEST_ALLOW_LOOPBACK_HTTP: '1'
+        run: |
+          cmake --version
+          python3 -m unittest discover -s actions/cachew-checkout/tests -v
