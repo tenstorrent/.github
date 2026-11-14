@@ -7,24 +7,32 @@ die() { echo "::error::$*" >&2; exit 1; }
 # logged value can never start a new line, which the runner would parse as a ::command::.
 oneline() { printf '%s' "$1" | tr '\r\n' '  ' | tr -d '\000-\010\013\014\016-\037'; }
 
-# The labels input, one trimmed key=value per line. A build of main
-# (GITHUB_REF=refs/heads/main) also gets org.opencontainers.image.revision=
-# GITHUB_SHA unless a line already sets it. Elsewhere labels pass as given: a
-# pull request's GITHUB_SHA is a temporary merge commit, and a checkout with
-# `ref:` builds some other commit, so the caller states which one it built.
+# The labels input, one trimmed key=value per line, then defaults for keys no
+# line sets:
+#   com.tenstorrent.git.ref     GITHUB_REF, the ref that ran the workflow
+#   com.tenstorrent.git.branch  the pull request's head branch, or the branch
+#                               that ran the workflow (none for a tag)
+#   org.opencontainers.image.revision  GITHUB_SHA, on a build of main only: a
+#       pull request's GITHUB_SHA is a temporary merge commit, and a checkout
+#       with `ref:` builds some other commit, so elsewhere the caller sets it.
 effective_labels() {  # <labels input>
-  local line has_revision=false
+  local line keys=" " branch="${GITHUB_HEAD_REF:-}" defaults=()
   while IFS= read -r line; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
     [ -n "$line" ] || continue
     [[ "$line" == ?*=* ]] || die "labels: '$(oneline "$line")' is not key=value."
-    [ "${line%%=*}" = org.opencontainers.image.revision ] && has_revision=true
+    keys+="${line%%=*} "
     printf '%s\n' "$line"
   done <<< "$1"
-  if [ "$has_revision" = false ] && [ "${GITHUB_REF:-}" = refs/heads/main ] && [ -n "${GITHUB_SHA:-}" ]; then
-    printf 'org.opencontainers.image.revision=%s\n' "$GITHUB_SHA"
-  fi
+  [ -n "$branch" ] || [[ "${GITHUB_REF:-}" != refs/heads/* ]] || branch="${GITHUB_REF#refs/heads/}"
+  [ -z "${GITHUB_REF:-}" ] || defaults+=("com.tenstorrent.git.ref=${GITHUB_REF}")
+  [ -z "$branch" ] || defaults+=("com.tenstorrent.git.branch=${branch}")
+  [ "${GITHUB_REF:-}" != refs/heads/main ] || [ -z "${GITHUB_SHA:-}" ] \
+    || defaults+=("org.opencontainers.image.revision=${GITHUB_SHA}")
+  for line in "${defaults[@]}"; do
+    [[ "$keys" == *" ${line%%=*} "* ]] || printf '%s\n' "$line"
+  done
   return 0
 }
 

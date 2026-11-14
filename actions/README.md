@@ -227,9 +227,20 @@ override `LABEL` in the Dockerfile and labels in a bake file. docker-bake-publis
 turns each line into a `*.labels.<key>=<value>` set line ahead of `set-lines`,
 so a set line can still change a label for one target.
 
-On a build of `main` (`GITHUB_REF` is `refs/heads/main`), both actions add
-`org.opencontainers.image.revision=$GITHUB_SHA` unless a `labels` line already
-sets it. On any other ref the labels pass through as given: on `pull_request`,
+Both actions add these labels unless a `labels` line already sets the key:
+
+| Label | Value | When |
+|---|---|---|
+| `com.tenstorrent.git.ref` | `GITHUB_REF`, the ref that ran the workflow (`refs/heads/main`, `refs/pull/123/merge`, `refs/tags/v1.0`) | Always |
+| `com.tenstorrent.git.branch` | The pull request's head branch, or the branch that ran the workflow | Not for tags |
+| `org.opencontainers.image.revision` | `GITHUB_SHA` | Builds of `main` (`GITHUB_REF` is `refs/heads/main`) only |
+
+The OCI spec has no key for a branch, so the first two use a Tenstorrent
+namespace, as the spec asks for keys it does not define. They describe the
+workflow run; a job that checks out another ref with `ref:` can set them
+itself.
+
+`revision` is left to the caller off `main`: on `pull_request`,
 `GITHUB_SHA` is a temporary merge commit, and a checkout with `ref:` builds a
 different commit, so the caller states which commit it built. Off `main`, set
 `revision` yourself, or the label check warns and nothing in the image ties it
@@ -252,7 +263,7 @@ says labels follow the same rules.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `labels` | none | OCI labels for every image, `key=value` per line; adds `revision` on `main` (see [Labels](#labels)) |
+| `labels` | none | OCI labels for every image, `key=value` per line; adds the git ref, the branch, and `revision` on `main` (see [Labels](#labels)) |
 | `required-labels` | `org.opencontainers.image.source`, `.revision`, `.licenses` | Label keys every platform image should carry; a missing one is a warning |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities Trivy reports; findings at them fail the gate (vulnerabilities only with the next input) |
 | `trivy-fail-on-vulnerabilities` | `false` | Let vulnerabilities fail the gate; otherwise they are only reported |

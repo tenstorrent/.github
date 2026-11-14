@@ -17,9 +17,11 @@ inputs:
     description: >-
       Newline-separated OCI labels as key=value (e.g. docker/metadata-action's
       `labels` output), set on every image; they override LABEL in the
-      Dockerfile and labels in a bake file. A build of main (GITHUB_REF refs/heads/main) also gets
-      org.opencontainers.image.revision set to GITHUB_SHA unless a line here
-      sets it; other refs get the labels as given.
+      Dockerfile and labels in a bake file. Unless a line here sets them,
+      com.tenstorrent.git.ref (GITHUB_REF) and com.tenstorrent.git.branch (the
+      pull request's head branch, or the branch that ran the workflow) are
+      added, and a build of main (GITHUB_REF refs/heads/main) also gets
+      org.opencontainers.image.revision set to GITHUB_SHA.
     required: false
     default: ""
   required-labels:
