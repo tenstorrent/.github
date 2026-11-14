@@ -140,7 +140,11 @@ used. Composite steps do not get the runner's bundled Node on `PATH`, so
 tt CI VMs run the runner from `/opt/runner` and have no system Node), then
 `/__e/node24`, where the runner mounts the same externals into job containers.
 If none runs (for example glibc Node in an Alpine container), the action falls
-back to the plain checkout without changing the job.
+back to the plain checkout without changing the job. If an earlier checkout in the
+job already started a session, `session/prepare.sh` disables it with Git alone
+(cachew's rewrite and headers are removed, the job's own settings kept), gives
+the official checkout a flattened throwaway copy of the job's global file, and
+a restore step points the job back at the real file afterwards.
 
 There is no post step: composite actions cannot have one, and a separate
 JavaScript action would need its own pin. The session directory lives in

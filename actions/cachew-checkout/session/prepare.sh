@@ -12,7 +12,68 @@
 # untouched so the plain checkout runs exactly as actions/checkout would.
 set -u
 
+# A session an earlier checkout in this job activated must not outlive a
+# not-ready report: the fallback checkout would still be rewritten to the cache.
+# Without Node this is done with Git alone. The marker turns the Git wrapper and
+# later activations into pass-throughs; cachew's keys in the job's global file
+# are the url.<cache>/git/<host>/.insteadOf rewrite and that cache's http.*
+# entries, which are removed while everything the job wrote is kept.
+#
+# As with a ready session, the official checkout then gets a throwaway copy of
+# the job's global file (its `git config --global include.path` would replace
+# the include that carries the job's own settings), and the restore step
+# (restore.sh) points the job back at the real file afterwards.
+disable_existing_session() {
+  local directory=${CACHEW_SESSION_DIR:-} global fallback
+  [ -n "$directory" ] && [ -f "$directory/global.config" ] || return 0
+  global=$directory/global.config
+  (umask 077 && : >"$directory/cache-disabled") || true
+  disable_existing_rewrites "$global"
+  fallback=$directory/fallback-checkout.config
+  write_flattened "$global" "$fallback" || return 0
+  [ -n "${GITHUB_ENV:-}" ] && echo "GIT_CONFIG_GLOBAL=$fallback" >>"$GITHUB_ENV"
+  [ -n "${GITHUB_OUTPUT:-}" ] && echo "fallback-config=$fallback" >>"$GITHUB_OUTPUT"
+  return 0
+}
+
+# The job's global file with its includes resolved and include.path dropped,
+# like the helper's checkout.config: the checkout may replace include.path, so
+# nothing may depend on it. Conditional includes are kept as entries.
+write_flattened() {
+  local source=$1 target=$2 entry key value
+  (umask 077 && : >"$target") || return 1
+  while IFS= read -r -d '' entry; do
+    key=${entry%%$'\n'*}
+    if [ "$key" = "$entry" ]; then value=true; else value=${entry#*$'\n'}; fi
+    [ "$key" = include.path ] && continue
+    git config --file "$target" --add "$key" "$value" || return 1
+  done < <(git config --file "$source" --includes --null --list 2>/dev/null)
+}
+
+disable_existing_rewrites() {
+  local global=$1 key prefix
+  local -a prefixes=()
+  while IFS= read -r key; do
+    case "$key" in
+      url.*/git/*/.insteadof)
+        prefix=${key#url.}
+        prefixes+=("${prefix%/git/*/.insteadof}")
+        git config --file "$global" --unset-all "$key" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < <(git config --file "$global" --name-only --list 2>/dev/null)
+  [ "${#prefixes[@]}" -gt 0 ] || return 0
+  while IFS= read -r key; do
+    for prefix in "${prefixes[@]}"; do
+      case "$key" in
+        "http.$prefix/"*) git config --file "$global" --unset-all "$key" >/dev/null 2>&1 || true ;;
+      esac
+    done
+  done < <(git config --file "$global" --name-only --list 2>/dev/null)
+}
+
 not_ready() {
+  disable_existing_session
   echo "$1; using standard checkout only."
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "ready=false" >>"$GITHUB_OUTPUT"
   exit 0

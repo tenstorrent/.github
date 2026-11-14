@@ -153,6 +153,10 @@ def direct_network_operation(real_git, arguments, index, environ):
     if command in ("push", "pull", "submodule") or (command == "remote" and tail and tail[0] in ("update", "prune")):
         return True
     recursive = [arg for arg in tail if arg.startswith(("--recursive", "--recurse-submodules"))]
+    # For clone, --recurse-submodules=<value> is a pathspec, not a boolean:
+    # `--recurse-submodules=false` still runs the recursive submodule update
+    # (for paths matching "false") and records submodule.active=false. So any
+    # spelling makes a clone recursive; only other commands take false/no/0.
     if (command == "clone" and recursive) or any(
         arg.split("=", 1)[-1].lower() not in ("false", "no", "0") for arg in recursive
     ):
@@ -192,6 +196,7 @@ def working_directory(arguments, index):
 def clone_destination(arguments, index):
     """Where `git clone` will create its repository, or None if unknown."""
     positional = []
+    bare = False
     position = index + 1
     while position < len(arguments):
         arg = arguments[position]
@@ -201,6 +206,8 @@ def clone_destination(arguments, index):
         if arg in CLONE_OPTIONS_WITH_VALUE:
             position += 2
             continue
+        if arg in ("--bare", "--mirror"):
+            bare = True
         if not arg.startswith("-"):
             positional.append(arg)
         position += 1
@@ -214,6 +221,9 @@ def clone_destination(arguments, index):
         name = name.replace(":", "/").rsplit("/", 1)[-1]
         if not name:
             return None
+        if bare:
+            # Git names a bare or mirror clone <humanish>.git.
+            name += ".git"
     return working_directory(arguments, index) / name
 
 

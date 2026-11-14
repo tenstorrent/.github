@@ -212,6 +212,25 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual((target / "deps/child/deep/grand/content.txt").read_text(), "grand")
         self.assertFalse((self.session / "cache-disabled").exists())
 
+    def test_clone_recurse_submodules_false_is_still_recursive(self):
+        # For clone the value is a pathspec, so this is a recursive clone
+        # (Git records submodule.active=false) and goes upstream like one.
+        wrapper = load_wrapper()
+        arguments = ["clone", "--recurse-submodules=false", self.upstream.url + "/org/main"]
+        self.assertTrue(wrapper.direct_network_operation(self.real_git, arguments, 0, self.env))
+        fetch = ["fetch", "--recurse-submodules=false", "origin"]
+        self.assertFalse(wrapper.direct_network_operation(self.real_git, ["-C", str(self.root), *fetch], 2, self.env))
+
+    def test_stalled_bare_clone_without_destination_falls_back(self):
+        self.dependency("cmake-dependency")
+        self.env["CACHEW_GIT_FETCH_TIMEOUT"] = "1"
+        self.cache.fail_repo = "cmake-dependency"
+        self.cache.fetch_delay = 6
+        self.run_git("clone", "--bare", self.upstream.url + "/org/cmake-dependency", cwd=self.root)
+        self.assertEqual(self.run_git("-C", str(self.root / "cmake-dependency.git"), "rev-parse", "--is-bare-repository"), "true")
+        self.assertFalse((self.root / "cmake-dependency").exists())
+        self.assert_disabled()
+
     def test_push_bypasses_read_only_cache(self):
         self.dependency("cmake-dependency")
         target = self.root / "push-source"
@@ -327,6 +346,9 @@ class DownstreamGitTests(unittest.TestCase):
             (["-C", "/tmp", "clone", "--no-checkout", "--config", "a=b", "https://h/o/r/", "x"], Path("/tmp/x")),
             (["clone", "--", "https://h/o/repo", "--odd"], cwd / "--odd"),
             (["clone", "git@github.com:o/name.git"], cwd / "name"),
+            (["clone", "--bare", "https://h/o/repo.git"], cwd / "repo.git"),
+            (["clone", "--mirror", "https://h/o/repo"], cwd / "repo.git"),
+            (["clone", "--bare", "https://h/o/repo", "explicit"], cwd / "explicit"),
         ]
         for arguments, expected in cases:
             index = wrapper.command_index(arguments)

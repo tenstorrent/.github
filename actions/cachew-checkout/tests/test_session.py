@@ -408,6 +408,59 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("git-credentials-", global_config.read_text())
         self.finish()
 
+    def test_missing_node_after_activation_disables_the_session_for_the_fallback(self):
+        # A later checkout in the job finds no usable Node: prepare reports
+        # ready=false, and the session the first checkout activated must not
+        # rewrite that checkout (or later reads) to the cache.
+        self.assertEqual(self.flow(), (True, True))
+        directory = Path(self.env["CACHEW_SESSION_DIR"])
+        global_config = directory / "global.config"
+        self.assertIn(self.fixture.cache.url, global_config.read_text())
+        (self.fixture.root / "output").write_text("")
+        (self.fixture.root / "env").write_text("")
+        result = subprocess.run(
+            ["bash", str(PREPARE)],
+            cwd=self.fixture.workspace,
+            env=dict(self.env, PATH=self.node_free_path()),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Node.js 22+ unavailable", result.stdout)
+        outputs = fixtures.runner_file(self.fixture.root / "output")
+        self.assertEqual(outputs.get("ready"), "false")
+        self.assertTrue((directory / "cache-disabled").exists())
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        # The official checkout gets a flattened throwaway copy, as with a ready session.
+        fallback = outputs["fallback-config"]
+        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], fallback)
+        self.assert_caller_settings_visible()
+        upstream = f"{self.fixture.upstream.url}/org/child"
+        self.assertEqual(self.real_git("ls-remote", "--get-url", upstream), upstream)
+        # action.yml then runs only the official checkout, which must reach upstream,
+        # and the restore step.
+        self.env["CACHEW_PATH"] = "second-checkout"
+        self.checkout()
+        self.assertTrue((self.fixture.workspace / "second-checkout/content.txt").exists())
+        (self.fixture.root / "env").write_text("")
+        result = subprocess.run(
+            ["bash", str(PREPARE.parent / "restore.sh")],
+            cwd=self.fixture.workspace,
+            env=dict(self.env, CACHEW_FALLBACK_CONFIG=fallback),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        target = str((self.fixture.workspace / "second-checkout").resolve())
+        self.assertIn(target, self.safe_directories(global_config))
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        self.finish()
+
     def test_checkout_include_path_write_keeps_the_job_settings_visible(self):
         # actions/checkout's submodule setup: `git config --global include.path <credentials>`,
         # without --add, against the checkout-time global file.

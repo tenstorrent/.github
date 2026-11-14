@@ -127,6 +127,13 @@ class RunnerGateTests(unittest.TestCase):
                 self.assertEqual(self.active_steps(context), ["session", "checkout", "configure"])
         self.assertEqual(self.active_steps(runner("self-hosted", os="macOS")), ["checkout"])
 
+    def test_restore_runs_only_after_a_fallback_with_an_existing_session(self):
+        restore = next(step for step in self.steps if step.get("id") == "restore")
+        self.assertFalse(evaluate(restore["if"], {}))
+        self.assertTrue(evaluate(restore["if"], {"steps.session.outputs.fallback-config": "/t/cachew-x/fallback-checkout.config"}))
+        order = [step["id"] for step in self.steps]
+        self.assertLess(order.index("checkout"), order.index("restore"))
+
     def test_explicit_opt_in_on_other_linux_runners(self):
         self.assertEqual(
             self.active_steps(runner("github-hosted", cachew="true")), ["session", "cachew", "checkout", "configure"]

@@ -182,6 +182,16 @@ runs:
         submodules: ${{ inputs.submodules }}
         set-safe-directory: ${{ inputs.set-safe-directory }}
         github-server-url: ${{ inputs.github-server-url }}
+    # Only after a not-ready fallback in a job whose earlier checkout started a
+    # session: prepare.sh gave the official checkout a throwaway copy of the
+    # job's global Git file; point the job back at the real one.
+    - name: Restore job Git configuration after upstream-only checkout
+      id: restore
+      if: steps.session.outputs.fallback-config != ''
+      shell: bash
+      env:
+        CACHEW_FALLBACK_CONFIG: ${{ steps.session.outputs.fallback-config }}
+      run: bash "$GITHUB_ACTION_PATH/session/restore.sh"
     - name: Configure job-global cachew Git transport
       id: configure
       if: steps.session.outputs.ready == 'true'
