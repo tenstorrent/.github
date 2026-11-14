@@ -152,6 +152,18 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(self.upstream.requests)
         self.assertFalse((self.session / "cache-disabled").exists())
 
+    def test_network_remote_subcommands_go_upstream(self):
+        self.dependency("cmake-dependency")
+        target = self.root / "cloned"
+        url = self.upstream.url + "/org/cmake-dependency"
+        self.run_git("clone", url, str(target))
+        self.cache.fail_repo = "cmake-dependency"
+        cache_requests = len(self.cache.requests)
+        self.run_git("-C", str(target), "remote", "show", "origin")
+        self.run_git("-C", str(target), "remote", "add", "-f", "again", url)
+        self.assertEqual(len(self.cache.requests), cache_requests)
+        self.assertFalse((self.session / "cache-disabled").exists())
+
     def test_cmake_clone_error_removes_rewrite_and_later_dependency_stays_upstream(self):
         first = self.dependency("cmake-dependency")
         second = self.dependency("next-dependency")

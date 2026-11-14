@@ -182,8 +182,8 @@ partial clone's lazy fetches itself, past the wrapper, so after a clone or fetch
 each promisor remote the cache rewrite reaches is pinned upstream with the same
 repository-local `insteadOf` as the checkout's `origin`.
 
-Native recursive clones, submodule commands, initialized-submodule fetches,
-pushes and pulls use upstream directly.
+Native recursive clones, submodule and `remote` commands, initialized-submodule
+fetches, pushes and pulls use upstream directly.
 
 ## Tests
 

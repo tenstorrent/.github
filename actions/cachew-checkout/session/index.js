@@ -91,7 +91,6 @@ function entry(key, value) {
   return `[${section}${subsection}]\n\t${key.slice(last + 1)} = ${quote(value)}\n`;
 }
 
-// A boolean input as actions/checkout reads it: trimmed, true only for TRUE in any case.
 // An input as actions/checkout reads it (core.getInput): trimmed, the fallback when empty.
 function checkoutInput(name, fallback = '') {
   return (process.env[name] || '').trim() || fallback;
@@ -109,6 +108,8 @@ function writePrivate(file, content) {
 
 function writeState(directory, state) {
   writePrivate(path.join(directory, 'state.json'), JSON.stringify(state));
+  // The managed key names, for prepare.sh's cleanup when this helper cannot run.
+  writePrivate(path.join(directory, 'managed-keys'), [...new Set((state.managed || []).map(([key]) => `${key}\n`))].join(''));
 }
 
 function readState(directory) {
@@ -427,11 +428,13 @@ function activate() {
     if (value === '') trusted.length = 0;
     if (!trusted.includes(value)) trusted.push(value);
   }
-  const present = getAll(state, global, 'safe.directory', true);
+  const all = getAll(state, global, 'safe.directory', true);
+  const present = all.slice(all.lastIndexOf('') + 1);
   for (const value of trusted) {
     if (value !== '' && present.includes(value)) continue;
     run(state.realGit, ['config', '--file', global, '--add', 'safe.directory', value]);
-    present.push(value);
+    if (value === '') present.length = 0;
+    else present.push(value);
   }
   const disabled = path.join(directory, 'cache-disabled');
   let python;

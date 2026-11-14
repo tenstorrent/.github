@@ -161,7 +161,9 @@ def direct_network_operation(real_git, arguments, index, environ):
     """Avoid Git's internal recursive clone retries and keep pushes upstream."""
     command = arguments[index]
     tail = arguments[index + 1 :]
-    if command in ("push", "pull", "submodule") or (command == "remote" and tail and tail[0] in ("update", "prune")):
+    # Every remote subcommand that can reach a remote (update, prune, show,
+    # add -f, set-head --auto) goes upstream; the local ones are unaffected.
+    if command in ("push", "pull", "submodule", "remote"):
         return True
     recursive = [arg for arg in tail if arg.startswith(("--recursive", "--recurse-submodules"))]
     # For clone, --recurse-submodules=<value> is a pathspec, not a boolean:

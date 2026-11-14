@@ -15,24 +15,30 @@ set -u
 # A session an earlier checkout in this job activated must not outlive a
 # not-ready report: the fallback checkout would still be rewritten to the cache.
 # Without Node this is done with Git alone. The marker turns the Git wrapper and
-# later activations into pass-throughs; cachew's keys in the job's global file
-# are the url.<cache>/git/<host>/.insteadOf rewrite and that cache's http.*
-# entries, which are removed while everything the job wrote is kept.
+# later activations into pass-throughs, and exactly the keys the session wrote
+# (index.js lists their names in managed-keys) leave the job's global file;
+# everything else in it is the job's own.
 #
 # As with a ready session, the official checkout then gets a throwaway copy of
 # the job's global file (its `git config --global include.path` would replace
 # the include that carries the job's own settings), and the restore step
 # (restore.sh) points the job back at the real file afterwards.
 disable_existing_session() {
-  local directory=${CACHEW_SESSION_DIR:-} global fallback
+  local directory=${CACHEW_SESSION_DIR:-} global fallback key
+  local -a managed=()
   [ -n "$directory" ] && [ -f "$directory/global.config" ] || return 0
   global=$directory/global.config
   (umask 077 && : >"$directory/cache-disabled") || true
-  disable_existing_rewrites "$global"
+  [ -f "$directory/managed-keys" ] && mapfile -t managed <"$directory/managed-keys"
+  for key in "${managed[@]}"; do
+    git config --file "$global" --unset-all "$key" >/dev/null 2>&1 || true
+  done
   fallback=$directory/fallback-checkout.config
-  (umask 077 && : >"$fallback") && flatten "$global" "$fallback" || return 0
-  # Again on the copy: removal from the job's file fails while it is locked.
-  disable_existing_rewrites "$fallback"
+  # The copy skips them too: removal from the job's file fails while it is locked.
+  (umask 077 && : >"$fallback") && flatten "$global" "$fallback" "${managed[@]}" || return 0
+  # restore.sh copies back only the safe.directory entries the checkout adds after these.
+  git config --file "$fallback" --null --get-all safe.directory 2>/dev/null | tr -cd '\0' | wc -c | tr -d ' ' \
+    >"$fallback.safe-directories" || return 0
   [ -n "${GITHUB_ENV:-}" ] && echo "GIT_CONFIG_GLOBAL=$fallback" >>"$GITHUB_ENV"
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "fallback-config=$fallback" >>"$GITHUB_OUTPUT"
   return 0
@@ -40,40 +46,39 @@ disable_existing_session() {
 
 # Appends <source>'s entries to <target>, inlining unconditional includes and
 # keeping conditional ones as directives, like the helper's flatten (index.js):
-# the checkout may replace include.path, so nothing may depend on it.
+# the checkout may replace include.path, so nothing may depend on it. Entries
+# are written as text, never as Git arguments, since values may be credentials.
+# Keys named after <source> <target> are left out.
 flatten() {
-  local source=$1 target=$2 entry key value
+  local source=$1 target=$2 entry key value skip
+  shift 2
   while IFS= read -r -d '' entry; do
     key=${entry%%$'\n'*}
     if [ "$key" = "$entry" ]; then value=true; else value=${entry#*$'\n'}; fi
+    for skip in "$@"; do [ "${key,,}" = "${skip,,}" ] && continue 2; done
     if [ "$key" = include.path ]; then
-      [ -f "$value" ] && { flatten "$value" "$target" || return 1; }
+      [ -f "$value" ] && { flatten "$value" "$target" "$@" || return 1; }
       continue
     fi
-    git config --file "$target" --add "$key" "$value" || return 1
+    render "$key" "$value" >>"$target" || return 1
   done < <(git config --file "$source" --no-includes --null --list 2>/dev/null)
 }
 
-disable_existing_rewrites() {
-  local global=$1 key prefix
-  local -a prefixes=()
-  while IFS= read -r key; do
-    case "$key" in
-      url.*/git/*/.insteadof)
-        prefix=${key#url.}
-        prefixes+=("${prefix%/git/*/.insteadof}")
-        git config --file "$global" --unset-all "$key" >/dev/null 2>&1 || true
-        ;;
-    esac
-  done < <(git config --file "$global" --name-only --list 2>/dev/null)
-  [ "${#prefixes[@]}" -gt 0 ] || return 0
-  while IFS= read -r key; do
-    for prefix in "${prefixes[@]}"; do
-      case "$key" in
-        "http.$prefix/"*) git config --file "$global" --unset-all "$key" >/dev/null 2>&1 || true ;;
-      esac
-    done
-  done < <(git config --file "$global" --name-only --list 2>/dev/null)
+# One entry in Git's config syntax, as index.js's entry() writes it.
+render() {
+  local key=$1 section=${1%%.*} name=${1##*.} subsection=""
+  [ "$section.$name" = "$key" ] || { subsection=${key#*.}; subsection=" $(quote "${subsection%.*}")"; }
+  printf '[%s%s]\n\t%s = %s\n' "$section" "$subsection" "$name" "$(quote "$2")"
+}
+
+quote() {
+  local v=$1
+  v=${v//\\/\\\\}
+  v=${v//\"/\\\"}
+  v=${v//$'\n'/\\n}
+  v=${v//$'\r'/\\n}
+  v=${v//$'\t'/\\t}
+  printf '"%s"' "$v"
 }
 
 not_ready() {

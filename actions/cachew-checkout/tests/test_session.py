@@ -194,6 +194,18 @@ class SessionTests(unittest.TestCase):
         self.assertEqual({str(Path(value).resolve()) for value in self.safe_directories(config) if value}, expected)
         self.finish()
 
+    def test_checkout_path_before_a_reset_is_trusted_again(self):
+        # The job reset the list after the first checkout trusted its path; the
+        # next checkout of that path must be trusted again, not skipped as known.
+        self.assertEqual(self.flow(), (True, True))
+        self.real_git("config", "--global", "--add", "safe.directory", "")
+        shutil.rmtree(self.fixture.target)
+        self.assertEqual(self.flow(), (True, True))
+        values = self.safe_directories()
+        effective = values[len(values) - values[::-1].index(""):]
+        self.assertEqual([str(Path(value).resolve()) for value in effective], [str(self.fixture.target.resolve())])
+        self.finish()
+
     def test_safe_directory_false_does_not_add_checkout_path(self):
         self.env["CACHEW_SET_SAFE_DIRECTORY"] = "false"
         self.assertEqual(self.flow(), (True, True))
@@ -460,18 +472,36 @@ class SessionTests(unittest.TestCase):
         self.assertIn(self.fixture.cache.url, global_config.read_text())
         (self.fixture.root / "output").write_text("")
         (self.fixture.root / "env").write_text("")
+        # Job-owned settings: a rewrite shaped like cachew's, its header, and an
+        # inherited `safe.directory=*` the job reset afterwards.
+        mirror = "https://mirror.example"
+        self.real_git("config", "--file", str(global_config), "--add", f"url.{mirror}/git/gitlab.com/.insteadOf", "https://gitlab.com/")
+        self.real_git("config", "--file", str(global_config), "--add", f"http.{mirror}/.extraheader", "X-Mirror: job")
+        inherited = self.fixture.root / "inherited.gitconfig"
+        inherited.write_text("[safe]\n\tdirectory = *\n")
+        self.real_git("config", "--file", str(global_config), "--add", "include.path", str(inherited))
+        self.real_git("config", "--file", str(global_config), "--add", "safe.directory", "")
+        # Every Git command prepare runs is logged: no cache credential may be an argument.
+        log = self.fixture.root / "prepare-git.log"
+        logging = self.fixture.root / "prepare-logging"
+        logging.mkdir()
+        (logging / "git").write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{self.env["CACHEW_REAL_GIT"]}" "$@"\n')
+        (logging / "git").chmod(0o500)
+        path = self.env["PATH"] if node else self.node_free_path()
         lock_file = directory / "global.config.lock"
         if lock:
             lock_file.touch()
         result = subprocess.run(
             ["bash", str(PREPARE)],
             cwd=self.fixture.workspace,
-            env=self.env if node else dict(self.env, PATH=self.node_free_path()),
+            env=dict(self.env, PATH=f"{logging}{os.pathsep}{path}"),
             text=True,
             capture_output=True,
             timeout=30,
         )
         lock_file.unlink(missing_ok=True)
+        encoded = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertNotIn(encoded, log.read_text() if log.exists() else "")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(message, result.stdout)
         outputs = fixtures.runner_file(self.fixture.root / "output")
@@ -483,6 +513,9 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn(self.fixture.cache.url, Path(fallback).read_text())
         if not lock:
             self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        for config in (Path(fallback), global_config):
+            self.assertIn(f"{mirror}/git/gitlab.com/", config.read_text(), config.name)
+            self.assertIn("X-Mirror: job", config.read_text(), config.name)
         self.env.update(fixtures.runner_file(self.fixture.root / "env"))
         self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], fallback)
         self.assert_caller_settings_visible()
@@ -505,8 +538,11 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.env.update(fixtures.runner_file(self.fixture.root / "env"))
         self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        # Only the checkout's own entry comes back, after the job's reset: not the inherited `*`.
+        values = self.safe_directories(global_config)
+        effective = values[len(values) - values[::-1].index(""):]
         target = str((self.fixture.workspace / "second-checkout").resolve())
-        self.assertIn(target, self.safe_directories(global_config))
+        self.assertEqual([str(Path(value).resolve()) for value in effective], [target])
         self.finish()
 
     def test_checkout_include_path_write_keeps_the_job_settings_visible(self):
