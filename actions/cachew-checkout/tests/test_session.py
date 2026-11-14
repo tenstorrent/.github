@@ -511,6 +511,54 @@ class SessionTests(unittest.TestCase):
         self.assertEqual([str(Path(value).resolve()) for value in effective], [target])
         self.finish()
 
+    def test_relative_include_added_after_activation_reaches_a_later_checkout(self):
+        # Git resolves a relative include.path against the including file's directory.
+        self.assertEqual(self.flow(), (True, True))
+        directory = Path(self.env["CACHEW_SESSION_DIR"])
+        (directory / "extra.config").write_text("[fixture]\n\textra = beside-the-global-file\n")
+        self.real_git("config", "--global", "--add", "include.path", "extra.config")
+        self.prepare()
+        self.assertEqual(self.real_git("config", "--global", "--get", "fixture.extra"), "beside-the-global-file")
+        self.assertTrue(self.activate("true"))
+        self.finish()
+
+    def test_activation_never_writes_past_another_writers_lock(self):
+        # Activation writes the job's file under Git's lock: while another writer
+        # holds it, caching stays off rather than racing that writer.
+        self.env["CACHEW_SET_SAFE_DIRECTORY"] = "false"
+        self.prepare()
+        self.assertTrue(self.fixture.attempt())
+        global_config = Path(self.env["CACHEW_SESSION_DIR"]) / "global.config"
+        lock = global_config.with_name("global.config.lock")
+        lock.touch()
+        try:
+            self.assertFalse(self.activate())
+        finally:
+            lock.unlink()
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        self.real_git("ls-remote", f"{self.fixture.upstream.url}/org/main")
+        self.finish()
+
+    def test_session_python_outlives_the_environment_it_was_started_from(self):
+        # A virtual environment's python is a link; removing the environment later
+        # in the job must not break the Git wrapper or a later checkout.
+        environment = self.fixture.root / "venv" / "bin"
+        environment.mkdir(parents=True)
+        real = Path(shutil.which("python3", path=self.env["PATH"])).resolve()
+        (environment / "python3").symlink_to(real)
+        self.env["PATH"] = f"{environment}{os.pathsep}{self.env['PATH']}"
+        self.assertEqual(self.flow(), (True, True))
+        self.assertEqual(self.env["CACHEW_PYTHON"], str(real))
+        shutil.rmtree(self.fixture.root / "venv")
+        result = subprocess.run(
+            ["git", "ls-remote", f"{self.fixture.upstream.url}/org/main"], env=self.env, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.env["CACHEW_PATH"] = "second-checkout"
+        self.assertEqual(self.flow(), (True, True))
+        self.finish()
+
     def test_checkout_include_path_write_keeps_the_job_settings_visible(self):
         # actions/checkout's submodule setup: `git config --global include.path <credentials>`,
         # without --add, against the checkout-time global file.

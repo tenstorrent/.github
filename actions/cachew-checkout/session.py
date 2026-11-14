@@ -131,6 +131,23 @@ def write_private(file, content):
     os.replace(temporary, file)
 
 
+def append_locked(file, text):
+    """Append as `git config` writes: through <file>.lock, then an atomic
+    replacement, so a concurrent `git config --global` neither interleaves with
+    this write nor replaces the file with a copy read before it. Like Git, an
+    existing lock fails the write instead of waiting."""
+    lock = file.with_name(file.name + ".lock")
+    descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w") as stream:
+            content = file.read_text()
+            stream.write(content + ("\n" if content and not content.endswith("\n") else "") + text)
+        os.replace(lock, file)
+    except BaseException:
+        lock.unlink(missing_ok=True)
+        raise
+
+
 def file_command(variable, key, value):
     if file := os.environ.get(variable):
         delimiter = f"cachew_{uuid.uuid4().hex}"
@@ -279,13 +296,25 @@ def cache_host(value, caches):
     return f"{url.scheme}://{url.netloc}".lower() in caches or host == "cachew" or host.startswith("cachew.")
 
 
+def include_target(value, source, environ):
+    """The file an include path names, resolved as Git does: `~/` against HOME,
+    a relative path against the directory of the file that includes it."""
+    if value.startswith("~/"):
+        return os.path.join(home_directory(environ), value[2:])
+    return os.path.join(os.path.dirname(os.path.abspath(source)), value)
+
+
+def home_directory(environ):
+    return environ.get("HOME") or os.path.expanduser("~")
+
+
 def copy_globals(session, real_git, environ, caches):
     """Include directives for private copies of the caller's global files,
     following includes, without any inherited cachew rewrite or cache header."""
     selected = environ.get("GIT_CONFIG_GLOBAL")
     if selected == "":
         return ""
-    home = environ.get("HOME") or os.path.expanduser("~")
+    home = home_directory(environ)
     xdg = environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
     originals = (
         [selected] if selected is not None else [os.path.join(xdg, "git", "config"), os.path.join(home, ".gitconfig")]
@@ -312,12 +341,7 @@ def copy_globals(session, real_git, environ, caches):
             if header is not None and cache_host(header, caches):
                 continue
             if key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower()):
-                included = (
-                    os.path.join(home, value[2:])
-                    if value.startswith("~/")
-                    else os.path.join(os.path.dirname(source), value)
-                )
-                if not (copied := copy(included)):
+                if not (copied := copy(include_target(value, source, environ))):
                     continue
                 value = str(copied)
                 relative = {"./": os.path.dirname(source), "~/": home}
@@ -341,7 +365,8 @@ def flatten(real_git, environ, file, skip):
     entries = []
     for key, value in config_entries(real_git, environ, "--file", str(file), "--no-includes"):
         if key.lower() == "include.path":
-            entries += flatten(real_git, environ, value, skip) if os.path.exists(value) else []
+            included = include_target(value, file, environ)
+            entries += flatten(real_git, environ, included, skip) if os.path.exists(included) else []
         elif key.lower() not in skip:
             entries.append((key, value))
     return entries
@@ -401,7 +426,7 @@ def prepare(environ):
     environment("CACHEW_SESSION_DIR", str(session))
     environment("CACHEW_REAL_GIT", state["real_git"])
     # Later steps of the job run this interpreter, which the Git wrapper needs anyway.
-    environment("CACHEW_PYTHON", sys.executable)
+    environment("CACHEW_PYTHON", interpreter())
     environment("GIT_CONFIG_GLOBAL", str(session / "checkout.config"))
 
 
@@ -429,6 +454,12 @@ def auth_entries(url, header):
     return [(f"http.{url}/.extraHeader", ""), (f"http.{url}/.extraHeader", header)]
 
 
+def interpreter():
+    """This interpreter's real file: a virtual environment the job removes later
+    must not take the session's Python with it."""
+    return os.path.realpath(sys.executable)
+
+
 def shell_quote(value):
     return "'" + value.replace("'", "'\\''") + "'"
 
@@ -444,7 +475,7 @@ for argument in "$@"; do
   case "$argument" in
     -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) skip=1 ;;
     -*) ;;
-    clone|fetch|ls-remote|push|pull|submodule|remote) exec {shell_quote(sys.executable)} {shell_quote(str(ACTION / "git_wrapper.py"))} "$@" ;;
+    clone|fetch|ls-remote|push|pull|submodule|remote) exec {shell_quote(interpreter())} {shell_quote(str(ACTION / "git_wrapper.py"))} "$@" ;;
     *) break ;;
   esac
 done
@@ -506,8 +537,7 @@ def activate(environ):
         # Recorded first, so a partial failure is still removed by the next cleanup.
         state["managed"] = [list(entry) for entry in entries]
         write_state(session, state)
-        with global_config.open("a") as stream:
-            stream.write(render(entries))
+        append_locked(global_config, render(entries))
         state["active"] = True
         checkout = Path(environ.get("GITHUB_WORKSPACE", "."), checkout_input(environ, "CACHEW_PATH"))
         view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
