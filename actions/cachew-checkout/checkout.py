@@ -92,9 +92,14 @@ def origin(value, environ):
     return f"{url.scheme}://{url.netloc}"
 
 
+def checkout_input(environ, name, default=""):
+    """An input as actions/checkout reads it (core.getInput): trimmed, the default when empty."""
+    return environ.get(name, "").strip() or default
+
+
 def checkout_flag(environ, name, default):
-    """A boolean input as actions/checkout reads it: trimmed, true only for TRUE in any case."""
-    return (environ.get(name, "").strip() or default).upper() == "TRUE"
+    """A boolean input as actions/checkout reads it: true only for TRUE in any case."""
+    return checkout_input(environ, name, default).upper() == "TRUE"
 
 
 def relative_path(value):
@@ -151,12 +156,19 @@ def git_version_at_least(executable, minimum):
     return bool(match) and (int(match[1]), int(match[2])) >= minimum
 
 
+# tempfile.TemporaryDirectory's names: the prefix and eight random characters.
+STAGE_NAME = re.compile(re.escape(STAGE_PREFIX) + r"[a-z0-9_]{8}")
+
+
 def remove_stale_stages(target):
-    """A cancelled earlier attempt can leave its private staging directory behind."""
+    """A cancelled earlier attempt can leave its private staging directory behind.
+    Stages are removed only when they are all the target holds: a target with
+    anything else goes to upstream untouched, so nothing of the caller's is lost."""
     if not target.is_dir():
         return
-    for entry in target.iterdir():
-        if entry.name.startswith(STAGE_PREFIX) and entry.is_dir() and not entry.is_symlink():
+    entries = list(target.iterdir())
+    if entries and all(STAGE_NAME.fullmatch(e.name) and e.is_dir() and not e.is_symlink() for e in entries):
+        for entry in entries:
             shutil.rmtree(entry, ignore_errors=True)
 
 
@@ -164,14 +176,14 @@ class Checkout:
     def __init__(self, environ):
         self.git_executable = environ.get("CACHEW_REAL_GIT", "git")
         for key in ("SSH_KEY", "SSH_KEY_SET", "LFS"):
-            value = environ.get(f"CACHEW_{key}", "")
+            value = checkout_input(environ, f"CACHEW_{key}")
             if value and value.lower() != "false":
                 raise Bypass("checkout mode uses upstream directly")
         # actions/checkout's getMultilineInput: trim the input, drop empty lines, trim each.
-        sparse = environ.get("CACHEW_SPARSE_CHECKOUT", "").strip()
+        sparse = checkout_input(environ, "CACHEW_SPARSE_CHECKOUT")
         self.sparse = [line.strip() for line in sparse.split("\n") if line] if sparse else []
         self.sparse_cone = checkout_flag(environ, "CACHEW_SPARSE_CHECKOUT_CONE_MODE", "true")
-        self.filter = environ.get("CACHEW_FILTER", "").strip()
+        self.filter = checkout_input(environ, "CACHEW_FILTER")
         if not self.filter and self.sparse:
             # Standard checkout's implied filter for sparse checkouts.
             self.filter = "blob:none"
@@ -182,21 +194,21 @@ class Checkout:
         # them and use inherited helpers and rewrites.
         if not git_version_at_least(self.git_executable, (2, 32)):
             raise Bypass("Git 2.32 or newer is required")
-        self.upstream = origin(environ.get("CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
-        self.caches = cache_candidates(environ.get("CACHEW_CACHEW_URL", "auto"), self.upstream, environ)
+        self.upstream = origin(checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
+        self.caches = cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), self.upstream, environ)
         self.cache = None
         self.health_timeout = duration(environ["CACHEW_CACHEW_HEALTH_TIMEOUT"], MAX_HEALTH_TIMEOUT_SECONDS)
         # Seconds without progress before a cache transfer is abandoned.
         self.fetch_timeout = duration(environ["CACHEW_CACHEW_FETCH_TIMEOUT"], MAX_FETCH_TIMEOUT_SECONDS)
         budget = duration(environ.get("CACHEW_CHECKOUT_BUDGET", str(CHECKOUT_BUDGET_SECONDS)), MAX_DEADLINE_SECONDS)
         self.deadline = time.monotonic() + budget
-        repository = environ.get("CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]
+        repository = checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository, re.ASCII):
             raise Bypass("unsupported repository name")
         relative_path(repository)
         self.url = f"{self.upstream}/{repository}"
         # The same ref and commit as actions/checkout's input helper.
-        self.ref = environ.get("CACHEW_REF", "").strip()
+        self.ref = checkout_input(environ, "CACHEW_REF")
         self.commit = ""
         if not self.ref:
             if repository.lower() == environ["GITHUB_REPOSITORY"].lower():
@@ -211,11 +223,11 @@ class Checkout:
         self.commit = self.commit.lower()
         if self.ref.startswith(("-", "+")) or any(c.isspace() or c in ":*?[^~\\" for c in self.ref):
             raise Bypass("unsupported checkout ref")
-        self.depth = int(environ.get("CACHEW_FETCH_DEPTH", "1") or "1")
+        self.depth = int(checkout_input(environ, "CACHEW_FETCH_DEPTH", "1"))
         if self.depth < 0:
             raise Bypass("unsupported fetch depth")
         self.tags = checkout_flag(environ, "CACHEW_FETCH_TAGS", "false")
-        self.submodules = environ.get("CACHEW_SUBMODULES", "false").lower()
+        self.submodules = checkout_input(environ, "CACHEW_SUBMODULES", "false").lower()
         if self.sparse and self.submodules in ("true", "recursive"):
             raise Bypass("sparse checkout with submodules uses upstream directly")
         self.persist = checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
@@ -233,9 +245,10 @@ class Checkout:
             pass
         # Unresolved, as actions/checkout writes them into persisted configuration.
         self.workspace_path = os.path.abspath(environ["GITHUB_WORKSPACE"])
-        self.repository_path = os.path.abspath(os.path.join(self.workspace_path, environ.get("CACHEW_PATH", "")))
+        path = checkout_input(environ, "CACHEW_PATH")
+        self.repository_path = os.path.abspath(os.path.join(self.workspace_path, path))
         workspace = Path(environ["GITHUB_WORKSPACE"]).resolve()
-        target = workspace / environ.get("CACHEW_PATH", "")
+        target = workspace / path
         # Resolve existing ancestors before creating anything, including symlinks.
         self.target = target.resolve()
         if not self.target.is_relative_to(workspace):
@@ -266,7 +279,7 @@ class Checkout:
             GIT_ASKPASS="/bin/false",
             GIT_LFS_SKIP_SMUDGE="1",
         )
-        self.token = environ.get("CACHEW_TOKEN", "")
+        self.token = checkout_input(environ, "CACHEW_TOKEN")
         self.auth = base64.b64encode(f"x-access-token:{self.token}".encode()).decode()
         self.upstream_env = dict(self.env)
         upstream_config = [

@@ -175,7 +175,10 @@ the cache. Only failures of the cache endpoint itself (connection, TLS, 3xx/5xx,
 a stall longer than `cachew-fetch-timeout`, or the one-hour hard deadline) remove
 the job's cache rewrite; answers about one repository or ref (401/403/404, a
 missing ref, `ls-remote --exit-code` finding nothing) keep caching on. A failed
-cache clone's partial destination is removed before the upstream retry.
+cache clone's partial destination is removed before the upstream retry. Git runs a
+partial clone's lazy fetches itself, past the wrapper, so after a clone or fetch
+each promisor remote the cache rewrite reaches is pinned upstream with the same
+repository-local `insteadOf` as the checkout's `origin`.
 
 Native recursive clones, submodule commands, initialized-submodule fetches,
 pushes and pulls use upstream directly.

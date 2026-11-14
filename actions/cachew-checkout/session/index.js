@@ -92,8 +92,13 @@ function entry(key, value) {
 }
 
 // A boolean input as actions/checkout reads it: trimmed, true only for TRUE in any case.
+// An input as actions/checkout reads it (core.getInput): trimmed, the fallback when empty.
+function checkoutInput(name, fallback = '') {
+  return (process.env[name] || '').trim() || fallback;
+}
+
 function checkoutFlag(name, fallback) {
-  return ((process.env[name] || '').trim() || fallback).toUpperCase() === 'TRUE';
+  return checkoutInput(name, fallback).toUpperCase() === 'TRUE';
 }
 
 function writePrivate(file, content) {
@@ -134,9 +139,9 @@ function settings() {
   let caches = [];
   let upstreamValid = true;
   let valid = true;
-  try { upstream = origin(process.env.CACHEW_GITHUB_SERVER_URL || process.env.GITHUB_SERVER_URL); }
+  try { upstream = origin(checkoutInput('CACHEW_GITHUB_SERVER_URL') || process.env.GITHUB_SERVER_URL); }
   catch { upstreamValid = false; valid = false; }
-  const requested = (process.env.CACHEW_CACHEW_URL || 'auto').trim();
+  const requested = checkoutInput('CACHEW_CACHEW_URL', 'auto');
   if (requested.toLowerCase() === 'auto') caches = [...TRUSTED_CACHES];
   else {
     try {
@@ -145,7 +150,7 @@ function settings() {
     } catch {}
   }
   if (!caches.length) valid = false;
-  const repository = process.env.CACHEW_REPOSITORY || process.env.GITHUB_REPOSITORY || '';
+  const repository = checkoutInput('CACHEW_REPOSITORY') || process.env.GITHUB_REPOSITORY || '';
   const repositoryValid = /^[\w.-]+\/[\w.-]+$/.test(repository) && !repository.split('/').some(part => ['.', '..'].includes(part));
   if (!repositoryValid) valid = false;
   let timeout = Number(process.env.CACHEW_CACHEW_FETCH_TIMEOUT);
@@ -391,7 +396,7 @@ exec "$CACHEW_REAL_GIT" "$@"
 // checkout's promisor origin keeps reaching upstream directly, as standard
 // checkout leaves it.
 function pinPromisorOrigin(state, config) {
-  const repository = path.resolve(process.env.GITHUB_WORKSPACE || '.', process.env.CACHEW_PATH || '');
+  const repository = path.resolve(process.env.GITHUB_WORKSPACE || '.', checkoutInput('CACHEW_PATH'));
   const file = path.join(repository, '.git', 'config');
   if (!fs.existsSync(file)) return;
   if (!getAll(state, file, 'remote.origin.promisor').some(value => value.toLowerCase() === 'true')) return;
@@ -406,7 +411,7 @@ function activate() {
   const state = readState(directory);
   const global = path.join(directory, 'global.config');
   const config = settings();
-  const token = process.env.CACHEW_TOKEN || '';
+  const token = checkoutInput('CACHEW_TOKEN');
   const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
   mask(token);
   mask(header.slice('AUTHORIZATION: basic '.length));

@@ -136,6 +136,22 @@ class DownstreamGitTests(unittest.TestCase):
             self.upstream.url + "/org/cmake-dependency",
         )
 
+    def test_partial_clone_lazy_fetches_go_upstream(self):
+        # Git runs lazy fetches itself, past the wrapper; without the pin they
+        # would follow the rewrite to a cache that cannot serve this repository.
+        self.dependency("cmake-dependency")
+        target = self.root / "partial"
+        url = self.upstream.url + "/org/cmake-dependency"
+        self.run_git("clone", "--filter=blob:none", "--no-checkout", url, str(target))
+        self.assertEqual(len(self.cache.discoveries()), 1)
+        self.assertEqual(self.run_git("-C", str(target), "config", "--get-all", f"url.{url}.insteadOf"), url)
+        self.cache.fail_repo = "cmake-dependency"
+        cache_requests = len(self.cache.requests)
+        self.assertIn("cmake_minimum_required", self.run_git("-C", str(target), "show", "HEAD:CMakeLists.txt"))
+        self.assertEqual(len(self.cache.requests), cache_requests)
+        self.assertTrue(self.upstream.requests)
+        self.assertFalse((self.session / "cache-disabled").exists())
+
     def test_cmake_clone_error_removes_rewrite_and_later_dependency_stays_upstream(self):
         first = self.dependency("cmake-dependency")
         second = self.dependency("next-dependency")

@@ -470,6 +470,10 @@ class CheckoutTests(unittest.TestCase):
                 CACHEW_REF=old, CACHEW_SUBMODULES="true", CACHEW_PERSIST_CREDENTIALS="false"
             ),
             "pull request merge ref": dict(CACHEW_REF="", GITHUB_REF="refs/pull/7/merge", GITHUB_SHA=old),
+            # actions/checkout trims every input (core.getInput).
+            "inputs with surrounding whitespace": dict(
+                CACHEW_REF="", CACHEW_SUBMODULES=" recursive\n", CACHEW_PATH="checkout\n"
+            ),
             "filtered history": dict(CACHEW_REF="", CACHEW_FILTER="tree:0"),
             "filtered full history": dict(CACHEW_REF="main", CACHEW_FILTER="blob:none", CACHEW_FETCH_DEPTH="0"),
             "sparse cone": dict(
@@ -954,10 +958,21 @@ class CheckoutTests(unittest.TestCase):
     def test_stale_staging_directory_from_cancelled_run_is_removed(self):
         # M4: a cancelled attempt must not block later seeding or leak into the worktree.
         self.target.mkdir()
-        stale = self.target / ".cachew-checkout-cancelled"
+        stale = self.target / ".cachew-checkout-a1b2c3_d"
         (stale / ".git").mkdir(parents=True)
         self.assertTrue(self.attempt())
         self.assertFalse(stale.exists())
+
+    def test_stage_like_directories_in_a_used_target_are_kept(self):
+        # A target holding anything else goes upstream; nothing in it is deleted.
+        self.target.mkdir()
+        for name in (".cachew-checkout-a1b2c3d4", ".cachew-checkout-tools", "README"):
+            (self.target / name).mkdir()
+        self.assertFalse(self.attempt())
+        self.assertEqual(
+            sorted(p.name for p in self.target.iterdir()),
+            [".cachew-checkout-a1b2c3d4", ".cachew-checkout-tools", "README"],
+        )
 
     def test_old_git_bypasses_before_contacting_cache(self):
         # M6: GIT_CONFIG_COUNT needs Git 2.31; older Git would ignore the transport settings.

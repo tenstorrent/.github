@@ -9,6 +9,8 @@ job's cache rewrite; answers about one repository or ref (401/403/404, missing
 ref, `ls-remote --exit-code` finding nothing) keep caching on for later reads.
 Reads whose effective URL is not the cache (other hosts, token-in-URL or SSH
 remotes, a promisor origin pinned upstream) run unchanged and never affect it.
+After a clone or fetch, partial-clone remotes are pinned upstream the same way,
+since Git's lazy fetches do not pass through this wrapper.
 """
 
 import json
@@ -305,6 +307,28 @@ def reaches_cache(real_git, arguments, index, environ, cache):
     return result.stdout.decode(errors="replace").strip().startswith(cache.rstrip("/") + "/git/")
 
 
+def pin_promisor_remotes(real_git, location, environ, cache):
+    """Git runs a partial clone's lazy fetches itself, not through this wrapper,
+    so they would follow the cache rewrite with no upstream retry. Pin each
+    promisor remote the rewrite reaches to its own URL, as the action pins its
+    checkout: a repository-local self-mapping is a longer insteadOf match."""
+    if not cache:
+        return
+
+    def git(*args):
+        result = subprocess.run(
+            [real_git, *location, *args], env=environ, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        return result.stdout.decode(errors="replace").strip() if result.returncode == 0 else ""
+
+    for line in git("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
+        key, _, value = line.partition(" ")
+        remote = key[len("remote.") : -len(".promisor")]
+        url = git("config", "--local", "--get", f"remote.{remote}.url")
+        if value.lower() == "true" and url and git("ls-remote", "--get-url", remote).startswith(cache.rstrip("/") + "/git/"):
+            git("config", "--local", "--add", f"url.{url}.insteadOf", url)
+
+
 def cache_attempt(real_git, arguments, environ, index):
     """Run once through the cache. Returns (exit status, stderr tail)."""
     stall = seconds(environ, "CACHEW_GIT_FETCH_TIMEOUT", DEFAULT_FETCH_TIMEOUT_SECONDS, MAX_FETCH_TIMEOUT_SECONDS)
@@ -383,28 +407,35 @@ def run(arguments, environ):
     if not state.get("active"):
         return subprocess.call([real_git, *arguments], env=environ)
     command = arguments[index]
+    target = CloneTarget(arguments, index)
+
+    def done(result):
+        # However the clone or fetch went, later lazy fetches would use the rewrite.
+        location = ["-C", str(target.path)] if command == "clone" and target.path else arguments[:index]
+        if result == 0 and command in ("clone", "fetch"):
+            pin_promisor_remotes(real_git, location, environ, state.get("cache"))
+        return result
+
     if command in ("clone", "fetch", "ls-remote", "push", "pull", "submodule", "remote") and direct_network_operation(
         real_git, arguments, index, environ
     ):
         with UpstreamView(real_git, environ, session, state) as upstream:
-            return subprocess.call([real_git, *arguments], env=upstream)
+            return done(subprocess.call([real_git, *arguments], env=upstream))
     if command not in ("clone", "fetch", "ls-remote") or not reaches_cache(
         real_git, arguments, index, environ, state.get("cache")
     ):
         return subprocess.call([real_git, *arguments], env=environ)
-    target = CloneTarget(arguments, index)
     result, errors = cache_attempt(real_git, arguments, environ, index)
     if result == 0 or result < 0:
-        return result
+        return done(result)
     target.reset()
     if result == 124 or transport_error(errors):
         state = disable_cache(real_git, session, state, environ)
         print("Cachew is unavailable; removed the job's cache rewrite and retrying upstream once.", file=sys.stderr)
-        with UpstreamView(real_git, environ, session, state) as upstream:
-            return subprocess.call([real_git, *arguments], env=upstream)
-    print("Cachew read did not succeed; retrying this operation upstream once.", file=sys.stderr)
+    else:
+        print("Cachew read did not succeed; retrying this operation upstream once.", file=sys.stderr)
     with UpstreamView(real_git, environ, session, state) as upstream:
-        return subprocess.call([real_git, *arguments], env=upstream)
+        return done(subprocess.call([real_git, *arguments], env=upstream))
 
 
 def main():
