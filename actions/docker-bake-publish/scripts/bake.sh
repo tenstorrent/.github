@@ -76,13 +76,22 @@ bake_print() {  # <set lines...> -> resolved JSON on stdout
 RESOLVED="$(bake_print "${SET_LINES[@]}")"
 mapfile -t TARGETS < <(printf '%s' "$RESOLVED" | jq -r '.target | keys[]')
 
-# Normalizes each output to an object (older buildx prints "type=...,k=v" strings).
+# Normalizes each output to an object. buildx 0.20 prints objects; older
+# versions (0.16 and earlier, at least) print the CSV string as written, so kv
+# decodes it the way buildx does: a field is either quoted whole ("" escapes a
+# quote) or unquoted, keys are lowercased, and the last value of a key wins.
 # push_on mirrors BuildKit's image exporter: an empty push= means true, and any
 # other value goes through Go's strconv.ParseBool (1, t, T, TRUE, true, True).
 # An absent push attribute is false. Anything that pushes must be gated.
 # shellcheck disable=SC2016
 OUTPUT_DEFS='
-  def kv: if type == "string" then (split(",") | map(split("=") | {(.[0]): (.[1:] | join("="))}) | add) else . end;
+  def kv: if type == "string" then
+      reduce ([scan("(?:^|,)(\"(?:[^\"]|\"\")*\"|[^,]*)") | .[0]
+               | if startswith("\"") then .[1:-1] | gsub("\"\""; "\"") else . end
+               | select(. != "")] | .[]) as $f
+        ({}; ($f | index("=")) as $i
+             | if $i == null then .[$f | ascii_downcase] = "" else .[$f[:$i] | ascii_downcase] = $f[$i + 1:] end)
+    else . end;
   def push_on: if . == null then false else (tostring | IN("", "1", "t", "T", "TRUE", "true", "True")) end;'
 # shellcheck disable=SC2016
 CLASSIFY_JQ="${OUTPUT_DEFS}"'

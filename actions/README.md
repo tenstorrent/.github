@@ -341,9 +341,15 @@ security levels, as a CycloneDX CBOM.
   artifact. The step summary shows the number of certificates and private
   keys per platform.
 - **Every private key fails the gate**, whatever `trivy-severity` is, unless
-  `trivy-allowed-private-keys` allows it. The error names the file and the
-  key's fingerprint. A failed crypto scan also fails the gate, since the
-  check could not run. Trivy marks the scanner experimental.
+  `trivy-allowed-private-keys` allows it. The error names the file, the
+  layer and the key's fingerprint. A failed crypto scan also fails the gate,
+  since the check could not run. Trivy marks the scanner experimental.
+- **Private keys are looked for in every layer.** The CBOM describes the
+  final filesystem, where Trivy has applied later layers' deletions, but a
+  key copied in one step and deleted in a later one is still in the published
+  layer. Each layer is therefore also scanned on its own. Trivy caches layer
+  analysis, so this adds about 0.2 s per layer after the full scan. Remove a
+  key in the step that adds it, or exclude it from the build context.
 - Key algorithms below 112 bits of classical security (NIST's floor, e.g.
   RSA below 2048) get a warning.
 - It runs separately because Trivy only accepts `--scanners crypto` with
@@ -384,6 +390,7 @@ other misses. Measured with Trivy 0.76.2:
 | PEM key in a file without a key extension | Yes | No |
 | OpenSSH private key | Yes | No |
 | Key under `tests/`, `usr/share/doc/`, `node_modules/` or `vendor/` | No (skipped by its built-in allow rules) | Yes |
+| Key in a layer, deleted by a later layer | Yes for the forms above | Yes (each layer is scanned on its own) |
 
 The secret scanner gates only at the configured severities, so with
 `trivy-severity: CRITICAL` the keys only it finds pass. Exceptions differ
@@ -655,6 +662,9 @@ publish step:
   together with both of its checksums.
 - Image digests live only in [`tool-images.json`](tool-images.json); the
   consistency check fails if a script or `action.yml` hardcodes one.
+- A step must set in its `env:` every variable its scripts read (the scripts
+  they run included), or a caller's job-level `env:` would reach them. The
+  consistency check fails on any it does not set.
 
 ## Tool images
 

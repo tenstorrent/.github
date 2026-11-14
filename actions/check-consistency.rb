@@ -12,6 +12,7 @@
 #     appears: both scanner inputs default to empty and no script or
 #     action.yml hardcodes one
 #   - every `uses:` is pinned to a full commit sha
+#   - every variable a step's scripts read is set in that step's env
 
 require 'json'
 require 'yaml'
@@ -91,6 +92,36 @@ end
     next if uses.match?(/@[0-9a-f]{40}\z/)
 
     errors << "#{path.delete_prefix("#{ROOT}/")}: '#{uses}' is not pinned to a full commit sha"
+  end
+end
+
+# A variable a script reads but its step does not set is inherited from the
+# caller's job env, so a job-level SBOM: "false" or INSTALL_SYFT: "false" could
+# turn off part of the mandatory pipeline. A script's reads include those of
+# the scripts it runs, minus what it assigns before running them.
+SCRIPTS = File.join(ROOT, 'docker-publish', 'scripts')
+RUNNER_VARS = /\A(GITHUB|RUNNER|ACTIONS)_/
+script_reads = lambda do |file, seen|
+  next [] if seen.include?(file)
+
+  seen << file
+  text = File.read(file)
+  children = text.scan(%r{/([\w-]+\.sh)"}).flatten.map { |f| File.join(SCRIPTS, f) } - [file]
+  assigned = text.scan(/\b([A-Z][A-Z0-9_]*)=/).flatten
+  text.scan(/\$\{([A-Z][A-Z0-9_]*):?[-?]/).flatten |
+    (children.flat_map { |c| script_reads.call(c, seen) } - assigned)
+end
+{ PUBLISH => publish, BAKE => bake }.each do |path, action|
+  action['runs']['steps'].each do |step|
+    run = step['run'].to_s
+    run.scan(%r{\$\{GITHUB_ACTION_PATH\}(/[\w./-]+\.sh)}).flatten.each do |rel|
+      script = File.expand_path(File.join(File.dirname(path), rel))
+      missing = script_reads.call(script, []).grep_v(RUNNER_VARS) -
+                (step['env'] || {}).keys - run.scan(/\b([A-Z][A-Z0-9_]*)=/).flatten
+      missing.each do |var|
+        errors << "#{path.delete_prefix("#{ROOT}/")} step '#{step['name']}': #{File.basename(script)} reads #{var}, which the step's env does not set"
+      end
+    end
   end
 end
 

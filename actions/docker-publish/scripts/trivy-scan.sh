@@ -9,7 +9,9 @@
 # --format cyclonedx, and its findings are an inventory with no severity. Any
 # private key in it fails the gate, whatever the severity threshold, unless
 # INPUT_ALLOWED_PRIVATE_KEYS allows it; .trivyignore does not apply to crypto
-# findings. Keys below 112 bits of classical security only get a warning.
+# findings. Private keys are looked for in every layer, including files a later
+# layer deletes or replaces (see layer_private_keys). Keys below 112 bits of
+# classical security only get a warning.
 # See https://trivy.dev/docs/latest/guide/
 #
 # Usage: trivy-scan.sh <oci-layout-dir>@<index-digest>
@@ -132,28 +134,68 @@ key_allowed() {  # <fingerprint> <path>
   return 1
 }
 
+# The CBOM describes the final filesystem: Trivy applies later layers'
+# deletions, so a key added in one layer and deleted in a later RUN is not in
+# it, although the layer that holds it is still published. So private keys are
+# looked for in each layer on its own, as a one-layer image sharing the
+# layout's blobs. Trivy caches layer analysis by diff ID, so after the full scan
+# this costs one quick Trivy run per layer.
+# Writes "<fingerprint>\t<path>\t<name>\t<layer>" per key occurrence.
+layer_private_keys() {  # <view-dir>
+  local manifest config n i digest dir cdesc
+  manifest="$(layout_blob "$1" "$(jq -r '.manifests[0].digest' "${1}/index.json")")"
+  config="$(layout_blob "$1" "$(jq -r .config.digest <<< "$manifest")")"
+  n="$(jq '.layers | length' <<< "$manifest")"
+  for ((i = 0; i < n; i++)); do
+    dir="${1}-layer${i}"
+    mkdir -p "${dir}/blobs/sha256"
+    cp "${1}/oci-layout" "${dir}/oci-layout"
+    digest="$(jq -r --argjson i "$i" '.layers[$i].digest' <<< "$manifest")"
+    ln -s "$(cd "${1}/blobs/sha256" && pwd -P)/${digest#sha256:}" "${dir}/blobs/sha256/${digest#sha256:}"
+    jq -c --argjson i "$i" '.rootfs.diff_ids |= [.[$i]] | del(.history)' <<< "$config" > "${dir}/blob"
+    cdesc="$(put_blob "$dir" "$(jq -c '.config.mediaType' <<< "$manifest")")"
+    jq -c --argjson i "$i" --argjson c "$cdesc" '.layers |= [.[$i]] | .config = $c' <<< "$manifest" > "${dir}/blob"
+    jq -n --argjson m "$(put_blob "$dir" "$(jq -c '.mediaType // "application/vnd.oci.image.manifest.v1+json"' <<< "$manifest")")" \
+      '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [$m]}' > "${dir}/index.json"
+    trivy image --quiet --scanners crypto --format cyclonedx --output "${dir}/cbom.json" --input "$dir" >&2 \
+      || die "Trivy's crypto scan errored on layer ${digest}; the private key check cannot run. See log above."
+    jq -r '.components[]? | select(.cryptoProperties.relatedCryptoMaterialProperties.type? == "private-key")
+      | .name as $n | (.cryptoProperties.relatedCryptoMaterialProperties.fingerprint.content // "unknown") as $fp
+      | .evidence.occurrences[]? | [$fp, .location, $n, $layer] | @tsv' --arg layer "$digest" "${dir}/cbom.json"
+    rm -rf "$dir"
+  done
+}
+
+# Moves <layout>/blob into the layout's blobs and prints its descriptor.
+put_blob() {  # <layout-dir> <media-type-json>
+  local d size
+  d="$(sha256_of "${1}/blob")"
+  size="$(wc -c < "${1}/blob" | tr -d ' ')"
+  mv "${1}/blob" "${1}/blobs/sha256/${d}"
+  jq -cn --argjson t "$2" --arg d "sha256:${d}" --argjson s "$size" '{mediaType: $t, digest: $d, size: $s}'
+}
+
 # Writes the platform's CBOM, gates on private keys and sets CRYPTO_SUMMARY
 # (the step summary cell) and CRYPTO_BLOCKING (private keys not allowed).
 crypto_inventory() {  # <view-dir> <platform>
-  local cbom="${REPORT_DIR}/cbom-${2//\//-}.cdx.json" certs weak fp path name keys=0 allowed=0
+  local cbom="${REPORT_DIR}/cbom-${2//\//-}.cdx.json" certs weak fp path name layer keys=0 allowed=0
   CRYPTO_BLOCKING=0
   trivy image --scanners crypto --format cyclonedx --output "$cbom" --input "$1" >&2 \
     || die "Trivy's crypto scan errored on ${2}; the private key check cannot run. See log above."
   certs="$(jq '[.components[]? | select(.cryptoProperties.assetType? == "certificate")] | length' "$cbom")"
-  # One component per distinct key; each file holding it is an occurrence.
-  while IFS=$'\t' read -r fp path name; do
+  # One line per file holding a key, per layer.
+  layer_private_keys "$1" > "${1}.keys"
+  while IFS=$'\t' read -r fp path name layer; do
     [ -n "$path" ] || continue
     keys=$((keys + 1))
     if key_allowed "$fp" "$path"; then
       allowed=$((allowed + 1))
-      log "${2}: allowed private key /${path} (${name}, sha256:${fp})"
+      log "${2}: allowed private key /${path} in layer ${layer} (${name}, sha256:${fp})"
     else
       CRYPTO_BLOCKING=$((CRYPTO_BLOCKING + 1))
-      echo "::error title=Private key in image::${2}: /${path} is a private key (${name}, sha256:${fp}). Remove it from the image, or if it is a reviewed fixture add '${path}' (no leading slash) or 'sha256:${fp}' to trivy-allowed-private-keys." >&2
+      echo "::error title=Private key in image::${2}: /${path} in layer ${layer} is a private key (${name}, sha256:${fp}). Remove it from the step that adds it (deleting it in a later step leaves it in the published layer), or if it is a reviewed fixture add '${path}' (no leading slash) or 'sha256:${fp}' to trivy-allowed-private-keys." >&2
     fi
-  done < <(jq -r '.components[]? | select(.cryptoProperties.relatedCryptoMaterialProperties.type? == "private-key")
-    | .name as $n | (.cryptoProperties.relatedCryptoMaterialProperties.fingerprint.content // "unknown") as $fp
-    | .evidence.occurrences[]? | [$fp, .location, $n] | @tsv' "$cbom")
+  done < "${1}.keys"
   # Weak: a key algorithm under 112 bits of classical security (NIST SP 800-57's
   # floor, e.g. RSA below 2048). Signature algorithms carry no level. Not gating.
   weak="$(jq -r '[.components[]? | select(.type == "cryptographic-asset"
