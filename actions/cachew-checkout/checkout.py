@@ -85,6 +85,11 @@ def origin(value, environ):
     return f"{url.scheme}://{url.netloc}"
 
 
+def checkout_flag(environ, name, default):
+    """A boolean input as actions/checkout reads it: trimmed, true only for TRUE in any case."""
+    return (environ.get(name, "").strip() or default).upper() == "TRUE"
+
+
 def relative_path(value):
     path = PurePosixPath(value)
     if not value or path.is_absolute() or any(p in ("", ".", "..", ".git") for p in value.split("/")):
@@ -158,7 +163,7 @@ class Checkout:
         # actions/checkout's getMultilineInput: trim the input, drop empty lines, trim each.
         sparse = environ.get("CACHEW_SPARSE_CHECKOUT", "").strip()
         self.sparse = [line.strip() for line in sparse.split("\n") if line] if sparse else []
-        self.sparse_cone = (environ.get("CACHEW_SPARSE_CHECKOUT_CONE_MODE", "").strip() or "true").upper() == "TRUE"
+        self.sparse_cone = checkout_flag(environ, "CACHEW_SPARSE_CHECKOUT_CONE_MODE", "true")
         self.filter = environ.get("CACHEW_FILTER", "").strip()
         if not self.filter and self.sparse:
             # Standard checkout's implied filter for sparse checkouts.
@@ -202,12 +207,12 @@ class Checkout:
         self.depth = int(environ.get("CACHEW_FETCH_DEPTH", "1") or "1")
         if self.depth < 0:
             raise Bypass("unsupported fetch depth")
-        self.tags = environ.get("CACHEW_FETCH_TAGS", "false").lower() == "true"
+        self.tags = checkout_flag(environ, "CACHEW_FETCH_TAGS", "false")
         self.submodules = environ.get("CACHEW_SUBMODULES", "false").lower()
         if self.sparse and self.submodules in ("true", "recursive"):
             raise Bypass("sparse checkout with submodules uses upstream directly")
-        self.persist = environ.get("CACHEW_PERSIST_CREDENTIALS", "true").lower() == "true"
-        self.safe_directory = environ.get("CACHEW_SET_SAFE_DIRECTORY", "true").lower() == "true"
+        self.persist = checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
+        self.safe_directory = checkout_flag(environ, "CACHEW_SET_SAFE_DIRECTORY", "true")
         self.runner_temp = environ.get("RUNNER_TEMP", "")
         if self.persist and not self.runner_temp:
             raise Bypass("RUNNER_TEMP is not defined")

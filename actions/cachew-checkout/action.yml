@@ -187,14 +187,16 @@ runs:
     # job's global Git file; point the job back at the real one.
     - name: Restore job Git configuration after upstream-only checkout
       id: restore
-      if: steps.session.outputs.fallback-config != ''
+      if: always() && steps.session.outputs.fallback-config != ''
       shell: bash
       env:
         CACHEW_FALLBACK_CONFIG: ${{ steps.session.outputs.fallback-config }}
       run: bash "$GITHUB_ACTION_PATH/session/restore.sh"
     - name: Configure job-global cachew Git transport
       id: configure
-      if: steps.session.outputs.ready == 'true'
+      # always(): after a failed checkout too, or later steps keep checkout's
+      # throwaway global file and its host-wide credentials include.
+      if: always() && steps.session.outputs.ready == 'true'
       shell: bash
       env:
         CACHEW_ACTION_PATH: ${{ github.action_path }}

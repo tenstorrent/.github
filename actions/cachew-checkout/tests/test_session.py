@@ -354,7 +354,8 @@ class SessionTests(unittest.TestCase):
             CACHEW_PATH="secondary",
             CACHEW_REF="main",
             CACHEW_TOKEN="do-not-persist-secondary",
-            CACHEW_PERSIST_CREDENTIALS="false",
+            # Padded, as actions/checkout trims inputs before parsing them.
+            CACHEW_PERSIST_CREDENTIALS=" false\n",
         )
         self.assertEqual(self.flow(), (True, True))
         state = json.loads((Path(self.env["CACHEW_SESSION_DIR"]) / "state.json").read_text())
@@ -406,6 +407,41 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("git-credentials-", global_config.read_text())
         self.assertTrue(self.activate())
         self.assertNotIn("git-credentials-", global_config.read_text())
+        self.finish()
+
+    def test_cache_credentials_never_appear_in_git_arguments(self):
+        log = self.fixture.root / "git-argv.log"
+        logging = self.fixture.root / "logging-git"
+        logging.mkdir()
+        (logging / "git").write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n')
+        (logging / "git").chmod(0o700)
+        self.env["PATH"] = f"{logging}{os.pathsep}{self.env['PATH']}"
+        self.assertEqual(self.flow(), (True, True))
+        self.assertIn(self.fixture.cache.url, (Path(self.env["CACHEW_SESSION_DIR"]) / "global.config").read_text())
+        encoded = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertNotIn(encoded, log.read_text())
+        self.finish()
+
+    def test_conditional_includes_stay_conditional_in_checkout_copies(self):
+        # A matching includeIf must not be copied unconditionally into the
+        # flattened files the official checkout uses (with and without Node).
+        subprocess.run(["git", "init", "-q", str(self.fixture.workspace)], check=True)
+        conditional = self.fixture.home / "conditional.gitconfig"
+        conditional.write_text("[fixture]\n\tconditional = only-here\n")
+        with (self.fixture.home / ".gitconfig").open("a") as config:
+            config.write(f'[includeIf "gitdir:{self.fixture.workspace.resolve()}/"]\n\tpath = {conditional}\n')
+        self.original_global = (self.fixture.home / ".gitconfig").read_bytes()
+        self.assertEqual(self.flow(), (True, True))
+        directory = Path(self.env["CACHEW_SESSION_DIR"])
+        copies = [directory / "checkout.config"]
+        (self.fixture.root / "output").write_text("")
+        (self.fixture.root / "env").write_text("")
+        subprocess.run(["bash", str(PREPARE)], cwd=self.fixture.workspace, env=dict(self.env, PATH=self.node_free_path()), check=True, capture_output=True)
+        copies.append(Path(fixtures.runner_file(self.fixture.root / "output")["fallback-config"]))
+        for copy in copies:
+            text = copy.read_text()
+            self.assertIn("includeif", text.lower(), copy.name)
+            self.assertNotIn("only-here", text, copy.name)
         self.finish()
 
     def test_missing_node_after_activation_disables_the_session_for_the_fallback(self):

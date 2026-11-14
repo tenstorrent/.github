@@ -62,9 +62,10 @@ CHECKOUT = re.compile(
     + r")@[0-9a-f]{40})"
     r"(?P=quote)(?:[ \t]*#[^\n]*)?[ \t]*$"
 )
+# The whole ref after @, so a branch, short SHA or padded SHA is compared as written.
 ANY_PIN = re.compile(
     r"(?P<repo>" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")"
-    r"(?P<subpath>/[\w./-]+)?@(?P<sha>[0-9a-f]{40})"
+    r"(?P<subpath>/[\w./-]+)?@(?P<ref>[^\s'\"#]+)"
 )
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v6.0.2"
 HOSTED_LABEL = re.compile(r"(?:ubuntu|windows|macos)-[\w.-]+")
@@ -199,7 +200,7 @@ def verify_pins(root, action_sha, exclude=()):
                 continue
             if match["subpath"]:
                 problems.append(f"{path} references {match[0]}; reference the action itself, not a subdirectory")
-            pins.setdefault(match["sha"], []).append(path.as_posix())
+            pins.setdefault(match["ref"], []).append(path.as_posix())
     if set(pins) - {action_sha}:
         problems.append(f"references pin {sorted(pins)}, expected only action_sha {action_sha}")
     for problem in problems:

@@ -30,24 +30,26 @@ disable_existing_session() {
   (umask 077 && : >"$directory/cache-disabled") || true
   disable_existing_rewrites "$global"
   fallback=$directory/fallback-checkout.config
-  write_flattened "$global" "$fallback" || return 0
+  (umask 077 && : >"$fallback") && flatten "$global" "$fallback" || return 0
   [ -n "${GITHUB_ENV:-}" ] && echo "GIT_CONFIG_GLOBAL=$fallback" >>"$GITHUB_ENV"
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "fallback-config=$fallback" >>"$GITHUB_OUTPUT"
   return 0
 }
 
-# The job's global file with its includes resolved and include.path dropped,
-# like the helper's checkout.config: the checkout may replace include.path, so
-# nothing may depend on it. Conditional includes are kept as entries.
-write_flattened() {
+# Appends <source>'s entries to <target>, inlining unconditional includes and
+# keeping conditional ones as directives, like the helper's flatten (index.js):
+# the checkout may replace include.path, so nothing may depend on it.
+flatten() {
   local source=$1 target=$2 entry key value
-  (umask 077 && : >"$target") || return 1
   while IFS= read -r -d '' entry; do
     key=${entry%%$'\n'*}
     if [ "$key" = "$entry" ]; then value=true; else value=${entry#*$'\n'}; fi
-    [ "$key" = include.path ] && continue
+    if [ "$key" = include.path ]; then
+      [ -f "$value" ] && { flatten "$value" "$target" || return 1; }
+      continue
+    fi
     git config --file "$target" --add "$key" "$value" || return 1
-  done < <(git config --file "$source" --includes --null --list 2>/dev/null)
+  done < <(git config --file "$source" --no-includes --null --list 2>/dev/null)
 }
 
 disable_existing_rewrites() {

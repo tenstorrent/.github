@@ -90,6 +90,11 @@ function entry(key, value) {
   return `[${section}${subsection}]\n\t${key.slice(last + 1)} = ${quote(value)}\n`;
 }
 
+// A boolean input as actions/checkout reads it: trimmed, true only for TRUE in any case.
+function checkoutFlag(name, fallback) {
+  return ((process.env[name] || '').trim() || fallback).toUpperCase() === 'TRUE';
+}
+
 function writePrivate(file, content) {
   const temporary = `${file}.${crypto.randomUUID()}`;
   fs.writeFileSync(temporary, content, {mode: 0o600});
@@ -247,8 +252,10 @@ function removeManaged(state, file) {
 
 function addManaged(state, file, entries) {
   // Record first, so a partial failure is still removed by the next cleanup.
+  // Appended as text, not `git config --add`: the values include cache auth
+  // headers, which must not appear in process arguments.
   state.managed = entries;
-  for (const [key, value] of entries) run(state.realGit, ['config', '--file', file, '--add', key, value]);
+  fs.appendFileSync(file, entries.map(([key, value]) => entry(key, value)).join(''));
 }
 
 function getAll(state, file, key, includes = false) {
@@ -257,17 +264,24 @@ function getAll(state, file, key, includes = false) {
   return result.status === 0 ? result.stdout.split('\0').slice(0, -1) : [];
 }
 
+// Entries of a config file with unconditional includes inlined. Conditional
+// includes stay directives, evaluated when Git reads the result; inlining them
+// would apply one repository's settings everywhere. session/prepare.sh's
+// flatten does the same without Node.
+function flatten(state, file) {
+  return listEntries(state, ['--file', file, '--no-includes']).flatMap(([key, value]) =>
+    key.toLowerCase() === 'include.path' ? (fs.existsSync(value) ? flatten(state, value) : []) : [[key, value]]);
+}
+
 // A flattened copy of global.config rather than an include of it: with submodules,
 // actions/checkout runs `git config --global include.path <credentials>`, which
-// replaces a single include.path (and fails on several). Conditional includes
-// stay as they are and are evaluated when Git reads the copy.
+// replaces a single include.path (and fails on several).
 //
 // The low-speed abort is scoped to the checked-out repository: actions/checkout
 // retries its fetch but not its submodule update, so a submodule must keep
 // crawling rather than fail.
 function writeCheckoutConfig(directory, state, config) {
-  const entries = listEntries(state, ['--file', path.join(directory, 'global.config'), '--includes'])
-    .filter(([key]) => key.toLowerCase() !== 'include.path');
+  const entries = flatten(state, path.join(directory, 'global.config'));
   if (config.upstreamValid && config.repositoryValid) {
     const scope = `http.${config.upstream}/${config.repository}`;
     entries.push([`${scope}.lowSpeedLimit`, FALLBACK_LOW_SPEED_LIMIT], [`${scope}.lowSpeedTime`, FALLBACK_LOW_SPEED_SECONDS]);
@@ -407,7 +421,7 @@ function activate() {
   const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
   mask(token);
   mask(header.slice('AUTHORIZATION: basic '.length));
-  if (token && config.upstreamValid && config.repositoryValid && (process.env.CACHEW_PERSIST_CREDENTIALS || 'true').toLowerCase() !== 'false') {
+  if (token && config.upstreamValid && config.repositoryValid && checkoutFlag('CACHEW_PERSIST_CREDENTIALS', 'true')) {
     // Cache-scoped only. Upstream credentials stay where actions/checkout put them.
     state.tokens[`${config.upstream}/${config.repository}`] = header;
     if (config.repository.toLowerCase() === (process.env.GITHUB_REPOSITORY || '').toLowerCase()) state.defaults[config.upstream] = header;

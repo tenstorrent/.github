@@ -190,6 +190,16 @@ class RepositoryTests(unittest.TestCase):
         # Without --write, --action-sha does not touch the config.
         self.assertEqual(json.loads(self.read(".github/cachew-checkout.json"))["action_sha"], SHA)
 
+    def test_verify_pins_compares_the_whole_ref(self):
+        self.run_main("--write")
+        workflow = self.root / ".github/workflows/ci.yml"
+        good = workflow.read_text()
+        for ref in ("main", SHA[:7], SHA + "0"):
+            workflow.write_text(good.replace(f"@{SHA}", f"@{ref}"))
+            code, out = self.run_main("--verify-pins")
+            self.assertEqual(code, 1, ref)
+            self.assertIn(ref, out)
+
     def test_bad_config_is_reported(self):
         for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of path prefixes")):
             self.write_config(data)

@@ -231,6 +231,24 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertFalse((self.root / "cmake-dependency").exists())
         self.assert_disabled()
 
+    def test_disabled_session_with_a_leftover_rewrite_stays_upstream(self):
+        # A concurrent disable (marker written, rewrite not yet removed), or a
+        # rewrite that could not be removed: reads must still go upstream.
+        self.dependency("cmake-dependency")
+        (self.session / "cache-disabled").touch()
+        self.run_git("ls-remote", self.upstream.url + "/org/cmake-dependency")
+        self.assertEqual(self.cache.requests, [])
+
+    def test_disable_keeps_keys_it_could_not_remove(self):
+        wrapper = load_wrapper()
+        lock = self.session / "global.config.lock"
+        lock.touch()
+        self.addCleanup(lock.unlink, missing_ok=True)
+        state = json.loads((self.session / "state.json").read_text())
+        state = wrapper.disable_cache(self.real_git, self.session, state, self.env)
+        self.assertEqual(state["managed"], self.managed)
+        self.assertEqual(json.loads((self.session / "state.json").read_text())["managed"], self.managed)
+
     def test_push_bypasses_read_only_cache(self):
         self.dependency("cmake-dependency")
         target = self.root / "push-source"

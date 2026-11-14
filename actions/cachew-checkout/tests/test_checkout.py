@@ -992,6 +992,10 @@ class CheckoutTests(unittest.TestCase):
             "https://evil.example",
         ]
 
+    def test_boolean_inputs_parse_like_actions_checkout(self):
+        for value, default, expected in (("", "true", True), (" false\n", "true", False), ("True", "false", True), ("yes", "true", False)):
+            self.assertEqual(cachew_checkout.checkout_flag({"X": value}, "X", default), expected, repr(value))
+
     def test_production_rejects_plain_http_and_untrusted_cache_origins(self):
         for url in self.rejected_cache_urls():
             with self.subTest(url=url):

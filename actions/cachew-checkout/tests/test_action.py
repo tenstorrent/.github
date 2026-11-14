@@ -50,7 +50,7 @@ def value(expression, context):
 
     python = CONTEXT.sub(lookup, expression.removeprefix("${{").removesuffix("}}"))
     python = re.sub(r"'([^']*)'", lambda m: repr(m[1].lower()), python)
-    python = python.replace("&&", " and ").replace("||", " or ")
+    python = python.replace("&&", " and ").replace("||", " or ").replace("always()", "True")
     return eval(python, {"__builtins__": {}}, {})  # noqa: S307 - fixed, test-only grammar
 
 

@@ -98,38 +98,47 @@ def config_environment(environ):
 
 
 def remove_managed(real_git, config, state, environ, rewrites_only=False):
-    keys = dict.fromkeys(key for key, _ in state.get("managed", []))
-    for key in keys:
+    """Unset cachew's keys; return the ones still present (e.g. the file was locked)."""
+    remaining = set()
+    for key in dict.fromkeys(key for key, _ in state.get("managed", [])):
         if rewrites_only and not key.lower().endswith(".insteadof"):
             continue
         # `git config` takes the file's lock, so concurrent user writes are safe.
-        subprocess.run(
+        result = subprocess.run(
             [real_git, "config", "--file", str(config), "--unset-all", key],
             env=config_environment(environ),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if result.returncode not in (0, 5):  # 5: the key was already gone
+            remaining.add(key)
+    return remaining
 
 
 def disable_cache(real_git, session, state, environ):
     # The marker stops concurrent and later wrappers first. Only cachew's own
     # keys are removed, so settings written by the job are never lost.
     (session / "cache-disabled").touch(mode=0o600, exist_ok=True)
-    remove_managed(real_git, session / "global.config", state, environ)
-    state = dict(state, active=False, managed=[])
+    remaining = remove_managed(real_git, session / "global.config", state, environ)
+    # Keys that could not be removed stay recorded, so UpstreamView still strips them.
+    state = dict(state, active=False, managed=[entry for entry in state.get("managed", []) if entry[0] in remaining])
     with tempfile.NamedTemporaryFile("w", dir=session, prefix="state-", delete=False) as stream:
         json.dump(state, stream)
     os.chmod(stream.name, 0o600)
     os.replace(stream.name, session / "state.json")
+    return state
 
 
 class UpstreamView:
-    """A private copy of the job's global configuration without the cache rewrite."""
+    """A private copy of the job's global configuration without the cache rewrite.
+
+    Also used once the session is disabled: until every rewrite is removed
+    (a concurrent disable, or a locked file), the recorded keys are still there."""
 
     def __init__(self, real_git, environ, session, state):
         self.path = None
         self.environ = environ
-        if (session / "cache-disabled").exists():
+        if not state.get("managed"):
             return
         descriptor, name = tempfile.mkstemp(dir=session, prefix="upstream-view-", suffix=".config")
         self.path = Path(name)
@@ -368,7 +377,10 @@ def run(arguments, environ):
     except (OSError, ValueError):
         # A missing session must not prevent Git from running after the runner empties RUNNER_TEMP.
         return subprocess.call([real_git, *arguments], env=environ)
-    if not state.get("active") or (session / "cache-disabled").exists():
+    if (session / "cache-disabled").exists():
+        with UpstreamView(real_git, environ, session, state) as upstream:
+            return subprocess.call([real_git, *arguments], env=upstream)
+    if not state.get("active"):
         return subprocess.call([real_git, *arguments], env=environ)
     command = arguments[index]
     if command in ("clone", "fetch", "ls-remote", "push", "pull", "submodule", "remote") and direct_network_operation(
@@ -386,9 +398,10 @@ def run(arguments, environ):
         return result
     target.reset()
     if result == 124 or TRANSPORT_ERRORS.search(errors):
-        disable_cache(real_git, session, state, environ)
+        state = disable_cache(real_git, session, state, environ)
         print("Cachew is unavailable; removed the job's cache rewrite and retrying upstream once.", file=sys.stderr)
-        return subprocess.call([real_git, *arguments], env=environ)
+        with UpstreamView(real_git, environ, session, state) as upstream:
+            return subprocess.call([real_git, *arguments], env=upstream)
     print("Cachew read did not succeed; retrying this operation upstream once.", file=sys.stderr)
     with UpstreamView(real_git, environ, session, state) as upstream:
         return subprocess.call([real_git, *arguments], env=upstream)
