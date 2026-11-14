@@ -194,15 +194,52 @@ that check stays in the consumer repository (tt-metal's
 Everything runs from this action's own directory, so a consumer's pin to this
 action is the only pin. Pin a full commit SHA of this repository. Only the
 runtime files (`action.yml`, `checkout.py`, `git_wrapper.py`, `session/`,
-`trusted_caches.json`) change behavior; README and test changes need no re-pin.
+`trusted_caches.json`) change behavior; README, test and `migrate.py` changes
+need no re-pin. To release a change, merge it here, then re-pin consumers to
+a commit that contains it.
 
-To release a change, merge it here, then re-pin consumers to a commit that
-contains it. tt-metal does that with its migration script,
-`python3 .github/scripts/utils/cachew_checkout.py --write`, after setting
-`ACTION_SHA` in that script. The script also migrates `actions/checkout`
-v6.0.2 steps to this action, except where cachew can never serve the
-checkout: steps marked `# cachew: keep`, jobs whose `runs-on` is a literal
-GitHub-hosted label, generated gh-aw workflows and vendored trees.
+## Migrating a repository
+
+[`migrate.py`](migrate.py) moves a repository's checkouts to this action and
+keeps every reference on one pin. It needs only Python 3 and Git, and works on
+the repository it is run in. The pin and any excluded paths live in that
+repository's `.github/cachew-checkout.json`:
+
+```json
+{
+  "action_sha": "<full commit SHA of tenstorrent/.github>",
+  "exclude": ["vendored/tree/"]
+}
+```
+
+```sh
+python3 migrate.py --write                     # migrate to action_sha
+python3 migrate.py --write --action-sha <sha>  # re-pin everything, and save <sha>
+python3 migrate.py --check                     # exit 1 if anything needs --write
+python3 migrate.py --verify-pins               # exit 1 unless every reference pins action_sha
+```
+
+`--write` replaces `actions/checkout` v6.0.2 steps (the version this action
+forwards to), pins to any other commit of this action, and pins to its old
+`tenstorrent/tt-metal/.github/actions/cachew-checkout` location. It leaves
+plain `actions/checkout` where cachew can never serve the checkout:
+
+- steps with a trailing `# cachew: keep` comment (a bootstrap checkout, or a
+  composite action whose callers run on GitHub-hosted runners or in an
+  already populated workspace);
+- jobs whose `runs-on` is a literal GitHub-hosted label (`ubuntu-*`,
+  `windows-*`, `macos-*`), where cachew is a no-op; cachew pins there are
+  turned back into `actions/checkout`. Labels behind expressions or
+  reusable-workflow inputs cannot be seen;
+- gh-aw generated `*.lock.yml` files and their `.md` sources;
+- paths under an `exclude` prefix.
+
+Other `actions/checkout` versions are never touched, so no step changes
+checkout version. `--verify-pins` does not check that the pin exists here;
+a consumer's CI can do that by fetching it, as tt-metal's
+`test-cachew-checkout` workflow does. Run the copy of `migrate.py` at the
+consumer's pin (tt-metal's `.github/scripts/utils/cachew_checkout.py`
+downloads and runs it), so the helper always matches the action in use.
 
 The remote `uses:` downloads this repository's archive at the pinned commit
 (well under 1 MB) the first time a job uses it, even where cachew is skipped.
