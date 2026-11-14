@@ -10,7 +10,7 @@
 # (type=docker, local exports) build unchanged.
 #
 # Env (see action.yml for descriptions):
-#   INPUT_BAKE_FILE, INPUT_TARGETS, INPUT_SET_LINES,
+#   INPUT_BAKE_FILE, INPUT_TARGETS, INPUT_LABELS, INPUT_SET_LINES,
 #   INPUT_RETRIES, INPUT_RETRY_DELAY_SECONDS,
 #   INPUT_USE_DEFAULT_BUILDER, INPUT_VALIDATE_IMAGES, INPUT_ENABLE_ATTESTATIONS,
 #   INPUT_ENRICH_SBOM, INPUT_HARBOR_PREFIX, INPUT_SYFT_SCANNER_IMAGE
@@ -45,7 +45,12 @@ while IFS= read -r t; do
 done < <(printf '%s\n' "${INPUT_TARGETS:-}" | tr ',' '\n')
 [ "${#REQUESTED[@]}" -gt 0 ] || die "No bake targets provided."
 
+# Labels go first so a set line can still override one for a single target.
+LABELS="$(effective_labels "${INPUT_LABELS:-}")"
 SET_LINES=()
+while IFS= read -r l; do
+  [ -n "$l" ] && SET_LINES+=("*.labels.${l}")
+done <<< "$LABELS"
 while IFS= read -r s; do
   s="$(trim "$s")"
   [ -n "$s" ] && SET_LINES+=("$s")

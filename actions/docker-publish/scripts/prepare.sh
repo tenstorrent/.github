@@ -6,9 +6,10 @@
 #      the org mirror pinned in actions/tool-images.json),
 #      INPUT_SBOM (default true), ATTEST_SBOM (default true; forced off without
 #      an SBOM), INPUT_CACHE_TO (warned about if it leaves the runner),
-#      INPUT_IMAGE_OUTPUT_OPTIONS (exporter options, checked against an allowlist)
+#      INPUT_IMAGE_OUTPUT_OPTIONS (exporter options, checked against an allowlist),
+#      INPUT_LABELS (key=value lines; see effective_labels in lib.sh)
 # Outputs: primary-repo, report-id, sbom-generator, sbom, attest-sbom,
-#          tags (normalized, newline separated)
+#          tags (normalized, newline separated), labels (for the build)
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -30,6 +31,8 @@ parse_ref "${TAGS[0]}"
 PRIMARY_REPO="$REF_REPO"
 
 require_attesting_builder "${INPUT_BUILDER:-}"
+
+LABELS="$(effective_labels "${INPUT_LABELS:-}")"
 
 # image-output-options is appended to the build's own `type=oci,dest=...`
 # output. A second line would add another output, and a repeated type, dest,
@@ -102,4 +105,7 @@ log "primary repository: $PRIMARY_REPO"
   echo "tags<<__TAGS__"
   printf '%s\n' "${TAGS[@]}"
   echo "__TAGS__"
+  echo "labels<<__LABELS__"
+  [ -z "$LABELS" ] || printf '%s\n' "$LABELS"
+  echo "__LABELS__"
 } >> "${GITHUB_OUTPUT:-/dev/stdout}"

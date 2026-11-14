@@ -25,6 +25,15 @@ inputs:
       pushed only after the gate passes.
     required: false
     default: ""
+  labels:
+    description: >-
+      Newline-separated OCI labels as key=value (e.g. docker/metadata-action's
+      `labels` output), set on every image; they override LABEL in the
+      Dockerfile and labels in a bake file. A build of main (GITHUB_REF refs/heads/main) also gets
+      org.opencontainers.image.revision set to GITHUB_SHA unless a line here
+      sets it; other refs get the labels as given.
+    required: false
+    default: ""
   retries:
     description: "Number of bake attempts before failing (or falling back, with harbor-prefix)"
     required: false
@@ -182,6 +191,7 @@ runs:
       env:
         INPUT_BAKE_FILE: ${{ inputs.bake-file }}
         INPUT_TARGETS: ${{ inputs.targets }}
+        INPUT_LABELS: ${{ inputs.labels }}
         INPUT_SET_LINES: ${{ inputs.set-lines }}
         INPUT_RETRIES: ${{ inputs.retries }}
         INPUT_RETRY_DELAY_SECONDS: ${{ inputs.retry-delay-seconds }}

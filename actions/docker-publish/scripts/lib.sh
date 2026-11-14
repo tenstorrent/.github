@@ -7,6 +7,26 @@ die() { echo "::error::$*" >&2; exit 1; }
 # logged value can never start a new line, which the runner would parse as a ::command::.
 oneline() { printf '%s' "$1" | tr '\r\n' '  ' | tr -d '\000-\010\013\014\016-\037'; }
 
+# The labels input, one trimmed key=value per line. A build of main
+# (GITHUB_REF=refs/heads/main) also gets org.opencontainers.image.revision=
+# GITHUB_SHA unless a line already sets it; elsewhere GITHUB_SHA may not be the
+# commit that was built (a pull request's merge commit), so labels pass as given.
+effective_labels() {  # <labels input>
+  local line has_revision=false
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [ -n "$line" ] || continue
+    [[ "$line" == ?*=* ]] || die "labels: '$(oneline "$line")' is not key=value."
+    [ "${line%%=*}" = org.opencontainers.image.revision ] && has_revision=true
+    printf '%s\n' "$line"
+  done <<< "$1"
+  if [ "$has_revision" = false ] && [ "${GITHUB_REF:-}" = refs/heads/main ] && [ -n "${GITHUB_SHA:-}" ]; then
+    printf 'org.opencontainers.image.revision=%s\n' "$GITHUB_SHA"
+  fi
+  return 0
+}
+
 sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 
 # Print a blob from a local OCI layout after checking it against its digest.

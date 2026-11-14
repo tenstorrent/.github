@@ -15,8 +15,11 @@ inputs:
     required: true
   labels:
     description: >-
-      Newline-separated OCI labels (e.g. docker/metadata-action's `labels`
-      output). Labels set via LABEL in the Dockerfile also count.
+      Newline-separated OCI labels as key=value (e.g. docker/metadata-action's
+      `labels` output), set on every image; they override LABEL in the
+      Dockerfile and labels in a bake file. A build of main (GITHUB_REF refs/heads/main) also gets
+      org.opencontainers.image.revision set to GITHUB_SHA unless a line here
+      sets it; other refs get the labels as given.
     required: false
     default: ""
   required-labels:
@@ -219,6 +222,7 @@ runs:
       shell: bash
       env:
         INPUT_TAGS: ${{ inputs.tags }}
+        INPUT_LABELS: ${{ inputs.labels }}
         INPUT_BUILDER: ${{ inputs.builder }}
         INPUT_SBOM_GENERATOR: ${{ inputs.sbom-generator }}
         INPUT_CACHE_TO: ${{ inputs.cache-to }}
@@ -245,7 +249,7 @@ runs:
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
         build-contexts: ${{ inputs.build-contexts }}
-        labels: ${{ inputs.labels }}
+        labels: ${{ steps.prepare.outputs.labels }}
         secrets: ${{ inputs.secrets }}
         secret-files: ${{ inputs.secret-files }}
         cache-from: ${{ inputs.cache-from }}

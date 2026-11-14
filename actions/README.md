@@ -219,25 +219,38 @@ To change a single target's attribute rather than a variable, use `set-lines`
 are the exception: the action reads them to decide what to publish and then
 replaces them, so set those per target, not with a wildcard.
 
-### Labels
+## Labels
 
-docker-bake-publish has no `labels` input, and bake does not add
-`org.opencontainers.image.revision` on its own. Set it on every target with
-`set-lines`, or the label check warns for each image and nothing in the image
-ties it to a commit. tt-metal builds the set lines in a shell step:
+Both actions take a `labels` input: newline-separated `key=value` lines, such
+as `docker/metadata-action`'s `labels` output, set on every image. They
+override `LABEL` in the Dockerfile and labels in a bake file. docker-bake-publish
+turns each line into a `*.labels.<key>=<value>` set line ahead of `set-lines`,
+so a set line can still change a label for one target.
 
-```bash
-# docker-bake-publish requires a revision label on every published image.
-SET+="*.labels.org.opencontainers.image.revision=$(git rev-parse HEAD)"$'\n'
+On a build of `main` (`GITHUB_REF` is `refs/heads/main`), both actions add
+`org.opencontainers.image.revision=$GITHUB_SHA` unless a `labels` line already
+sets it. On any other ref the labels pass through as given, because
+`GITHUB_SHA` is not always the commit that was built: on `pull_request` it is
+the merge commit. Off `main`, set `revision` yourself, or the label check warns
+and nothing in the image ties it to a commit:
+
+```yaml
+labels: |
+  org.opencontainers.image.revision=${{ github.event.pull_request.head.sha || github.sha }}
 ```
 
-`source` and `licenses` can come from `LABEL` in the Dockerfile or from more
-`*.labels.*` set lines in the same way.
+`source` and `licenses` can come from `labels`, from `LABEL` in the
+Dockerfile, or from the bake file. The OCI image spec defines the standard
+`org.opencontainers.image.*` keys as its
+[pre-defined annotation keys](https://github.com/opencontainers/image-spec/blob/main/annotations.md#pre-defined-annotation-keys),
+and its [image config](https://github.com/opencontainers/image-spec/blob/main/config.md#properties)
+says labels follow the same rules.
 
 ## Inputs shared by both actions
 
 | Input | Default | Meaning |
 |---|---|---|
+| `labels` | none | OCI labels for every image, `key=value` per line; adds `revision` on `main` (see [Labels](#labels)) |
 | `required-labels` | `org.opencontainers.image.source`, `.revision`, `.licenses` | Label keys every platform image should carry; a missing one is a warning |
 | `trivy-severity` | `CRITICAL,HIGH` | Severities Trivy reports; findings at them fail the gate (vulnerabilities only with the next input) |
 | `trivy-fail-on-vulnerabilities` | `false` | Let vulnerabilities fail the gate; otherwise they are only reported |
