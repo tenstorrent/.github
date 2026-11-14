@@ -8,7 +8,8 @@
 //                    copy of the caller's global settings (inherited cachew
 //                    rewrites removed). User `git config --global` writes land
 //                    here and are never discarded; cachew only adds and removes
-//                    its own keys (state.managed) in place, through Git's lock.
+//                    its own keys (state.managed) in place: adds are appended
+//                    (keeping auth headers out of argv), removals use git config.
 //   checkout.config  GIT_CONFIG_GLOBAL while actions/checkout runs. A flattened
 //                    copy of global.config, so checkout sees the caller's settings,
 //                    while checkout's temporary global writes (submodule auth, its
@@ -303,16 +304,12 @@ function prepare() {
   if (existing && fs.existsSync(existing)) {
     // A later checkout in the same job: remove the cache rewrite in place,
     // keeping user writes, so the official checkout talks to upstream.
+    // On failure prepare.sh's not_ready disables the session with Git alone.
     const state = readState(existing);
-    try {
-      removeManaged(state, path.join(existing, 'global.config'));
-      state.active = false;
-      writeCheckoutConfig(existing, state, config);
-      writeState(existing, state);
-    } catch (error) {
-      try { disableInPlace(existing, state); writeState(existing, state); } catch {}
-      throw error;
-    }
+    removeManaged(state, path.join(existing, 'global.config'));
+    state.active = false;
+    writeCheckoutConfig(existing, state, config);
+    writeState(existing, state);
     return {directory: existing, state, created: false};
   }
   // An unusable or untrusted cache/upstream origin means no session at all:
@@ -345,18 +342,10 @@ function prepare() {
   }
 }
 
+// Throws on failure: prepare.sh then reports ready=false and leaves (or puts)
+// the job's Git configuration in a state plain actions/checkout can use.
 function prepareMain() {
-  let prepared;
-  try {
-    prepared = prepare();
-  } catch {
-    // Never fail a checkout that plain actions/checkout could perform. When a
-    // new session cannot be created the job's Git configuration is untouched.
-    output('ready', 'false');
-    console.log('Cachew unavailable on this runner; using standard checkout only.');
-    return;
-  }
-  const {directory, state} = prepared;
+  const {directory, state} = prepare();
   output('ready', 'true');
   environment('CACHEW_SESSION_DIR', directory);
   environment('CACHEW_REAL_GIT', state.realGit);
@@ -506,7 +495,7 @@ if (require.main === module) {
       output('configured', 'false');
       console.log('Cachew configuration unavailable; later Git operations use upstream.');
     } else {
-      output('ready', 'false');
+      process.exitCode = 1;
     }
   }
 }

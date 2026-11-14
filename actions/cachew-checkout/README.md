@@ -158,7 +158,10 @@ runner process itself dies, the files remain until that runner's next job starts
 The session directory and its files are private to the runner user because the
 configuration holds cache-scoped tokens. A step that runs Git as another user
 with this environment must set its own `GIT_CONFIG_GLOBAL`, or the job should use
-`cachew: false`.
+`cachew: false`. The same goes for Docker container actions (`docker://` or
+Dockerfile actions): the runner passes `GIT_CONFIG_GLOBAL` into them unchanged,
+but the host path it names does not exist inside the container, so Git there
+ignores the image's own global configuration and cannot write a global one.
 
 ## Upstream fallback
 

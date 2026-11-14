@@ -209,6 +209,7 @@ runs:
         CACHEW_GITHUB_SERVER_URL: ${{ inputs.github-server-url }}
         CACHEW_REPOSITORY: ${{ inputs.repository }}
         CACHEW_PATH: ${{ inputs.path }}
-        CACHEW_TOKEN: ${{ inputs.token }}
+        # Not for an opted-out checkout: its token must not reach the cache.
+        CACHEW_TOKEN: ${{ (inputs.cachew != 'false' && env.CACHEW_CHECKOUT != 'false') && inputs.token || '' }}
         CACHEW_PERSIST_CREDENTIALS: ${{ inputs.persist-credentials }}
       run: '"$CACHEW_NODE" "$CACHEW_CONFIG_HELPER" activate'

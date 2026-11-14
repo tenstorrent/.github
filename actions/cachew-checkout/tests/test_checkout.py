@@ -992,6 +992,12 @@ class CheckoutTests(unittest.TestCase):
             "https://evil.example",
         ]
 
+    def test_4xx_pack_answers_are_not_transport_errors(self):
+        answer = b"error: RPC failed; HTTP 404 curl 22 The requested URL returned error: 404\nfatal: the remote end hung up unexpectedly\n"
+        self.assertFalse(cachew_checkout.transport_error(answer))
+        self.assertTrue(cachew_checkout.transport_error(answer.replace(b"404", b"503")))
+        self.assertTrue(cachew_checkout.transport_error(b"fatal: unable to access: Failed to connect to cachew\n"))
+
     def test_boolean_inputs_parse_like_actions_checkout(self):
         for value, default, expected in (("", "true", True), (" false\n", "true", False), ("True", "false", True), ("yes", "true", False)):
             self.assertEqual(cachew_checkout.checkout_flag({"X": value}, "X", default), expected, repr(value))

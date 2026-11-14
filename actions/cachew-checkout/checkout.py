@@ -33,6 +33,13 @@ TRANSPORT_ERRORS = re.compile(
     rb"returned error: (?:3|5)\d\d",
     re.IGNORECASE,
 )
+# A 4xx on the pack request also prints "RPC failed" and "remote end hung up",
+# but it is the cache answering about one repository.
+CLIENT_ANSWER = re.compile(rb"(?:HTTP |returned error: )4\d\d", re.IGNORECASE)
+
+
+def transport_error(errors):
+    return bool(TRANSPORT_ERRORS.search(errors)) and not CLIENT_ANSWER.search(errors)
 # Input limits for cachew-health-timeout and cachew-fetch-timeout. session/index.js
 # settings() enforces the same values; keep them in sync.
 MAX_HEALTH_TIMEOUT_SECONDS = 30
@@ -313,7 +320,7 @@ class Checkout:
         if process.returncode:
             # Git's diagnostics may contain credentials or untrusted server text,
             # so they are only classified, never printed.
-            transport = not upstream and bool(TRANSPORT_ERRORS.search(errors or b""))
+            transport = not upstream and transport_error(errors or b"")
             raise Bypass(f"{message} failed", transport=transport)
         return output
 
@@ -719,7 +726,8 @@ def main():
             available = "false"
         print(f"Cachew checkout bypassed: {error}. Continuing with upstream checkout.")
     except Exception:
-        available = "false"
+        # A local error, not the cache endpoint: leave the verdict to activation's probe.
+        available = "unknown"
         print("Cachew checkout unavailable. Continuing immediately with upstream checkout.")
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a") as stream:

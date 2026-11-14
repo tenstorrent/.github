@@ -31,6 +31,8 @@ disable_existing_session() {
   disable_existing_rewrites "$global"
   fallback=$directory/fallback-checkout.config
   (umask 077 && : >"$fallback") && flatten "$global" "$fallback" || return 0
+  # Again on the copy: removal from the job's file fails while it is locked.
+  disable_existing_rewrites "$fallback"
   [ -n "${GITHUB_ENV:-}" ] && echo "GIT_CONFIG_GLOBAL=$fallback" >>"$GITHUB_ENV"
   [ -n "${GITHUB_OUTPUT:-}" ] && echo "fallback-config=$fallback" >>"$GITHUB_OUTPUT"
   return 0

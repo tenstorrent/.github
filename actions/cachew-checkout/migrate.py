@@ -21,7 +21,7 @@ With no paths, every tracked .yml/.yaml under a .github/actions or
 .github/workflows directory is inspected.
 
 Only checkouts of the exact version the action forwards to (actions/checkout
-v6.0.2, or a v6 tag) are migrated, so no step changes checkout version. Left
+v6.0.2, by commit or tag) are migrated, so no step changes checkout version. Left
 as plain actions/checkout on purpose:
   * steps with a trailing `# cachew: keep` comment;
   * jobs whose runs-on is a literal GitHub-hosted label (ubuntu-*, windows-*,
@@ -47,7 +47,7 @@ ACTION_REPO = "tenstorrent/.github/actions/cachew-checkout"
 LEGACY_REPO = "tenstorrent/tt-metal/.github/actions/cachew-checkout"
 # The actions/checkout commit action.yml forwards to (checked by the tests).
 FORWARDED_CHECKOUT = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-MIGRATABLE_REFS = (FORWARDED_CHECKOUT, "v6", "v6.0.2")
+MIGRATABLE_REFS = (FORWARDED_CHECKOUT, "v6.0.2")
 CONFIG = Path(".github/cachew-checkout.json")
 SHA = re.compile(r"[0-9a-f]{40}")
 

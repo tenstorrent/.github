@@ -28,7 +28,7 @@ from checkout import (  # noqa: E402
     HARD_DEADLINE_SECONDS,
     MAX_DEADLINE_SECONDS,
     MAX_FETCH_TIMEOUT_SECONDS,
-    TRANSPORT_ERRORS,
+    transport_error,
 )
 
 
@@ -397,7 +397,7 @@ def run(arguments, environ):
     if result == 0 or result < 0:
         return result
     target.reset()
-    if result == 124 or TRANSPORT_ERRORS.search(errors):
+    if result == 124 or transport_error(errors):
         state = disable_cache(real_git, session, state, environ)
         print("Cachew is unavailable; removed the job's cache rewrite and retrying upstream once.", file=sys.stderr)
         with UpstreamView(real_git, environ, session, state) as upstream:

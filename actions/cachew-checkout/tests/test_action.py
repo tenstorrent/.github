@@ -127,6 +127,14 @@ class RunnerGateTests(unittest.TestCase):
                 self.assertEqual(self.active_steps(context), ["session", "checkout", "configure"])
         self.assertEqual(self.active_steps(runner("self-hosted", os="macOS")), ["checkout"])
 
+    def test_an_opted_out_checkout_never_hands_its_token_to_the_cache(self):
+        configure = next(step for step in self.steps if step.get("id") == "configure")
+        expression = re.search(r"CACHEW_TOKEN: (\$\{\{.*\}\})", configure["raw"])[1]
+        token = {"inputs.token": "secret", "inputs.cachew": "auto"}
+        self.assertEqual(value(expression, token), "secret")
+        self.assertFalse(value(expression, dict(token, **{"inputs.cachew": "false"})))
+        self.assertFalse(value(expression, dict(token, **{"env.CACHEW_CHECKOUT": "false"})))
+
     def test_restore_runs_only_after_a_fallback_with_an_existing_session(self):
         restore = next(step for step in self.steps if step.get("id") == "restore")
         self.assertFalse(evaluate(restore["if"], {}))

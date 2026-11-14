@@ -445,31 +445,44 @@ class SessionTests(unittest.TestCase):
         self.finish()
 
     def test_missing_node_after_activation_disables_the_session_for_the_fallback(self):
-        # A later checkout in the job finds no usable Node: prepare reports
-        # ready=false, and the session the first checkout activated must not
-        # rewrite that checkout (or later reads) to the cache.
+        self.assert_not_ready_fallback_after_activation("Node.js 22+ unavailable", node=False)
+
+    def test_failed_prepare_after_activation_disables_the_session_for_the_fallback(self):
+        # Node runs, but the helper cannot update the job's global file.
+        self.assert_not_ready_fallback_after_activation("Cachew session could not start", lock=True)
+
+    def assert_not_ready_fallback_after_activation(self, message, node=True, lock=False):
+        # A later checkout in the job reports ready=false: the session the first
+        # checkout activated must not rewrite that checkout (or later reads) to the cache.
         self.assertEqual(self.flow(), (True, True))
         directory = Path(self.env["CACHEW_SESSION_DIR"])
         global_config = directory / "global.config"
         self.assertIn(self.fixture.cache.url, global_config.read_text())
         (self.fixture.root / "output").write_text("")
         (self.fixture.root / "env").write_text("")
+        lock_file = directory / "global.config.lock"
+        if lock:
+            lock_file.touch()
         result = subprocess.run(
             ["bash", str(PREPARE)],
             cwd=self.fixture.workspace,
-            env=dict(self.env, PATH=self.node_free_path()),
+            env=self.env if node else dict(self.env, PATH=self.node_free_path()),
             text=True,
             capture_output=True,
             timeout=30,
         )
+        lock_file.unlink(missing_ok=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Node.js 22+ unavailable", result.stdout)
+        self.assertIn(message, result.stdout)
         outputs = fixtures.runner_file(self.fixture.root / "output")
         self.assertEqual(outputs.get("ready"), "false")
         self.assertTrue((directory / "cache-disabled").exists())
-        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
-        # The official checkout gets a flattened throwaway copy, as with a ready session.
+        # The official checkout gets a flattened throwaway copy without cachew's
+        # keys, as with a ready session, even when the job's file was locked.
         fallback = outputs["fallback-config"]
+        self.assertNotIn(self.fixture.cache.url, Path(fallback).read_text())
+        if not lock:
+            self.assertNotIn(self.fixture.cache.url, global_config.read_text())
         self.env.update(fixtures.runner_file(self.fixture.root / "env"))
         self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], fallback)
         self.assert_caller_settings_visible()
@@ -494,7 +507,6 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
         target = str((self.fixture.workspace / "second-checkout").resolve())
         self.assertIn(target, self.safe_directories(global_config))
-        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
         self.finish()
 
     def test_checkout_include_path_write_keeps_the_job_settings_visible(self):

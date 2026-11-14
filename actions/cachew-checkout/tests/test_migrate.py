@@ -109,7 +109,8 @@ jobs:
         self.assertEqual(migrate.rewrite(before, SHA), expected)
 
     def test_other_checkout_versions_are_left_alone(self):
-        text = "steps:\n  - uses: actions/checkout@v4\n  - uses: actions/checkout@main\n"
+        # Floating tags too: v6 may point past the v6.0.2 the action forwards to.
+        text = "steps:\n  - uses: actions/checkout@v4\n  - uses: actions/checkout@main\n  - uses: actions/checkout@v6\n"
         self.assertEqual(migrate.rewrite(text, SHA), text)
 
     def test_rewrite_refuses_a_short_sha(self):
