@@ -13,7 +13,6 @@ After a clone or fetch, partial-clone remotes are pinned upstream the same way,
 since Git's lazy fetches do not pass through this wrapper.
 """
 
-import json
 import math
 import os
 from pathlib import Path
@@ -32,7 +31,7 @@ from checkout import (  # noqa: E402
     MAX_FETCH_TIMEOUT_SECONDS,
     transport_error,
 )
-
+from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed  # noqa: E402
 
 OPTIONS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
 CLONE_OPTIONS_WITH_VALUE = {
@@ -93,42 +92,6 @@ def command_index(arguments):
         else:
             return index
     return None
-
-
-def config_environment(environ):
-    return {key: value for key, value in environ.items() if not key.startswith(("GIT_CONFIG_", "GIT_TRACE"))}
-
-
-def remove_managed(real_git, config, state, environ, rewrites_only=False):
-    """Unset cachew's keys; return the ones still present (e.g. the file was locked)."""
-    remaining = set()
-    for key in dict.fromkeys(key for key, _ in state.get("managed", [])):
-        if rewrites_only and not key.lower().endswith(".insteadof"):
-            continue
-        # `git config` takes the file's lock, so concurrent user writes are safe.
-        result = subprocess.run(
-            [real_git, "config", "--file", str(config), "--unset-all", key],
-            env=config_environment(environ),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if result.returncode not in (0, 5):  # 5: the key was already gone
-            remaining.add(key)
-    return remaining
-
-
-def disable_cache(real_git, session, state, environ):
-    # The marker stops concurrent and later wrappers first. Only cachew's own
-    # keys are removed, so settings written by the job are never lost.
-    (session / "cache-disabled").touch(mode=0o600, exist_ok=True)
-    remaining = remove_managed(real_git, session / "global.config", state, environ)
-    # Keys that could not be removed stay recorded, so UpstreamView still strips them.
-    state = dict(state, active=False, managed=[entry for entry in state.get("managed", []) if entry[0] in remaining])
-    with tempfile.NamedTemporaryFile("w", dir=session, prefix="state-", delete=False) as stream:
-        json.dump(state, stream)
-    os.chmod(stream.name, 0o600)
-    os.replace(stream.name, session / "state.json")
-    return state
 
 
 class UpstreamView:
@@ -309,28 +272,6 @@ def reaches_cache(real_git, arguments, index, environ, cache):
     return result.stdout.decode(errors="replace").strip().startswith(cache.rstrip("/") + "/git/")
 
 
-def pin_promisor_remotes(real_git, location, environ, cache):
-    """Git runs a partial clone's lazy fetches itself, not through this wrapper,
-    so they would follow the cache rewrite with no upstream retry. Pin each
-    promisor remote the rewrite reaches to its own URL, as the action pins its
-    checkout: a repository-local self-mapping is a longer insteadOf match."""
-    if not cache:
-        return
-
-    def git(*args):
-        result = subprocess.run(
-            [real_git, *location, *args], env=environ, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-        return result.stdout.decode(errors="replace").strip() if result.returncode == 0 else ""
-
-    for line in git("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
-        key, _, value = line.partition(" ")
-        remote = key[len("remote.") : -len(".promisor")]
-        url = git("config", "--local", "--get", f"remote.{remote}.url")
-        if value.lower() == "true" and url and git("ls-remote", "--get-url", remote).startswith(cache.rstrip("/") + "/git/"):
-            git("config", "--local", "--add", f"url.{url}.insteadOf", url)
-
-
 def cache_attempt(real_git, arguments, environ, index):
     """Run once through the cache. Returns (exit status, stderr tail)."""
     stall = seconds(environ, "CACHEW_GIT_FETCH_TIMEOUT", DEFAULT_FETCH_TIMEOUT_SECONDS, MAX_FETCH_TIMEOUT_SECONDS)
@@ -399,7 +340,7 @@ def run(arguments, environ):
     if not owned_config:
         return subprocess.call([real_git, *arguments], env=environ)
     try:
-        state = json.loads((session / "state.json").read_text())
+        state = read_state(session)
     except (OSError, ValueError):
         # A missing session must not prevent Git from running after the runner empties RUNNER_TEMP.
         return subprocess.call([real_git, *arguments], env=environ)
@@ -432,7 +373,7 @@ def run(arguments, environ):
         return done(result)
     target.reset()
     if result == 124 or transport_error(errors):
-        state = disable_cache(real_git, session, state, environ)
+        state = remove_cache_keys(real_git, session, state, environ)
         print("Cachew is unavailable; removed the job's cache rewrite and retrying upstream once.", file=sys.stderr)
     else:
         print("Cachew read did not succeed; retrying this operation upstream once.", file=sys.stderr)

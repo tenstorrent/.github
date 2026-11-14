@@ -21,7 +21,6 @@ import time
 import urllib.parse
 import uuid
 
-
 ACTION = Path(__file__).resolve().parent
 TRUSTED_CACHES = tuple(json.loads((ACTION / "trusted_caches.json").read_text())["origins"])
 STAGE_PREFIX = ".cachew-checkout-"
@@ -40,8 +39,9 @@ CLIENT_ANSWER = re.compile(rb"(?:HTTP |returned error: )4\d\d", re.IGNORECASE)
 
 def transport_error(errors):
     return bool(TRANSPORT_ERRORS.search(errors)) and not CLIENT_ANSWER.search(errors)
-# Input limits for cachew-health-timeout and cachew-fetch-timeout. session/index.js
-# settings() enforces the same values; keep them in sync.
+
+
+# Input limits for cachew-health-timeout and cachew-fetch-timeout.
 MAX_HEALTH_TIMEOUT_SECONDS = 30
 MAX_FETCH_TIMEOUT_SECONDS = 600
 DEFAULT_FETCH_TIMEOUT_SECONDS = 120
@@ -145,6 +145,26 @@ def cache_candidates(value, upstream, environ):
     return [cache]
 
 
+def healthy(cache, timeout, env):
+    """Whether a trusted cache origin answers its unauthenticated liveness probe."""
+    # --disable ignores ~/.curlrc, which could otherwise add auth or retries.
+    # The process deadline also bounds DNS resolution, unlike a socket timeout.
+    command = ["curl", "--disable", "--silent", "--fail", "--retry", "0", "--max-time", str(timeout)]
+    command += ["--output", os.devnull, "--write-out", "%{http_code}", cache + "/_liveness"]
+    try:
+        health = subprocess.run(command, env=env, capture_output=True, timeout=timeout + 0.5)
+    except subprocess.TimeoutExpired:
+        return False
+    return health.returncode == 0 and health.stdout == b"200"
+
+
+def repository_name(value):
+    if not re.fullmatch(r"[\w.-]+/[\w.-]+", value, re.ASCII):
+        raise Bypass("unsupported repository name")
+    relative_path(value)
+    return value
+
+
 def git_version_at_least(executable, minimum):
     try:
         output = subprocess.run(
@@ -194,7 +214,9 @@ class Checkout:
         # them and use inherited helpers and rewrites.
         if not git_version_at_least(self.git_executable, (2, 32)):
             raise Bypass("Git 2.32 or newer is required")
-        self.upstream = origin(checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
+        self.upstream = origin(
+            checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ
+        )
         self.caches = cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), self.upstream, environ)
         self.cache = None
         self.health_timeout = duration(environ["CACHEW_CACHEW_HEALTH_TIMEOUT"], MAX_HEALTH_TIMEOUT_SECONDS)
@@ -203,9 +225,7 @@ class Checkout:
         budget = duration(environ.get("CACHEW_CHECKOUT_BUDGET", str(CHECKOUT_BUDGET_SECONDS)), MAX_DEADLINE_SECONDS)
         self.deadline = time.monotonic() + budget
         repository = checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]
-        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository, re.ASCII):
-            raise Bypass("unsupported repository name")
-        relative_path(repository)
+        repository_name(repository)
         self.url = f"{self.upstream}/{repository}"
         # The same ref and commit as actions/checkout's input helper.
         self.ref = checkout_input(environ, "CACHEW_REF")
@@ -569,37 +589,9 @@ class Checkout:
             child_commit = self.seed(child_dir, child_url, sha.decode())
             self.seed_children(child_dir, child_url, child_commit, level + 1)
 
-    def healthy(self, cache):
-        # --disable ignores ~/.curlrc, which could otherwise add auth or retries.
-        # The process deadline also bounds DNS resolution, unlike a socket timeout.
-        try:
-            health = subprocess.run(
-                [
-                    "curl",
-                    "--disable",
-                    "--silent",
-                    "--fail",
-                    "--retry",
-                    "0",
-                    "--max-time",
-                    str(self.health_timeout),
-                    "--output",
-                    os.devnull,
-                    "--write-out",
-                    "%{http_code}",
-                    cache + "/_liveness",
-                ],
-                env=self.env,
-                capture_output=True,
-                timeout=self.health_timeout + 0.5,
-            )
-        except subprocess.TimeoutExpired:
-            return False
-        return health.returncode == 0 and health.stdout == b"200"
-
     def probe(self):
         for cache in self.caches:
-            if self.healthy(cache):
+            if healthy(cache, self.health_timeout, self.env):
                 self.cache = cache
                 self.configure_transport()
                 return

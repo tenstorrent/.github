@@ -1,0 +1,551 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Session lifecycle for cachew checkout: `session.py prepare | activate`.
+
+Files in the action-owned session directory under RUNNER_TEMP:
+  global.config    The job's GIT_CONFIG_GLOBAL after activation. Starts as a
+                   copy of the caller's global settings (inherited cachew
+                   rewrites removed). The job's own `git config --global` writes
+                   land here and are kept: cachew appends its own keys (state
+                   "managed") as text, keeping auth headers out of process
+                   arguments, and removes exactly those with `git config`.
+  checkout.config  GIT_CONFIG_GLOBAL while actions/checkout runs: a flattened
+                   copy of global.config without cachew's keys, so checkout sees
+                   the job's settings while its temporary global writes
+                   (submodule auth, its transient safe.directory) stay here.
+  state.json       Session state, including cache-scoped auth headers.
+  cache-disabled   Present once caching is off for the rest of the job.
+
+Upstream authentication is never added to the global file: actions/checkout
+already persists repository-scoped credentials, and a job-wide Authorization
+header would override the credentials of every later upstream request.
+
+There is no cleanup step. The runner empties RUNNER_TEMP, and with it the
+session and actions/checkout's own credentials file, when the job completes.
+Until then later steps and post steps keep a working GIT_CONFIG_GLOBAL.
+"""
+
+import sys
+
+if sys.version_info < (3, 10):
+    sys.exit("Python 3.10 or newer is required")
+
+import base64  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+import re  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import tempfile  # noqa: E402
+import urllib.parse  # noqa: E402
+import uuid  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from checkout import (  # noqa: E402
+    ACTION,
+    DEFAULT_FETCH_TIMEOUT_SECONDS,
+    MAX_FETCH_TIMEOUT_SECONDS,
+    MAX_HEALTH_TIMEOUT_SECONDS,
+    Bypass,
+    cache_candidates,
+    checkout_flag,
+    checkout_input,
+    duration,
+    git_version_at_least,
+    healthy,
+    origin,
+    repository_name,
+)
+
+PERFORMANCE = [
+    ("checkout.workers", "0"),
+    ("checkout.thresholdForParallelism", "50"),
+    ("submodule.fetchJobs", "0"),
+    ("gc.auto", "0"),
+]
+# The upstream fallback aborts a fetch that averages under this rate for this
+# long, so actions/checkout's own fetch retry (3 attempts) reconnects. Some
+# connections to GitHub from CI networks lose packets for their whole life and
+# crawl at ~140KB/s until the job times out; a new connection usually takes a
+# healthy path. Healthy fetches run at several MB/s.
+FALLBACK_LOW_SPEED_LIMIT = "524288"
+FALLBACK_LOW_SPEED_SECONDS = "60"
+MAX_INCLUDED_FILES = 30
+
+
+def config_environment(environ):
+    """The environment for Git commands that must see only the named file."""
+    return {key: value for key, value in environ.items() if not key.startswith(("GIT_CONFIG_", "GIT_TRACE"))}
+
+
+def git(real_git, environ, *arguments, allowed=(0,)):
+    result = subprocess.run([real_git, *arguments], env=config_environment(environ), capture_output=True, text=True)
+    if result.returncode not in allowed:
+        raise RuntimeError("Git configuration command failed")
+    return result
+
+
+def config_entries(real_git, environ, *selection):
+    """Every (key, value) of `git config <selection> --list`; a key without a value is true."""
+    entries = []
+    for item in git(real_git, environ, "config", *selection, "--null", "--list").stdout.split("\0"):
+        if item:
+            key, separator, value = item.partition("\n")
+            entries.append((key, value if separator else "true"))
+    return entries
+
+
+def get_all(real_git, environ, file, key, includes=False):
+    if not Path(file).exists():
+        return []
+    selection = ["--file", str(file), "--includes" if includes else "--no-includes"]
+    result = git(real_git, environ, "config", *selection, "--null", "--get-all", key, allowed=(0, 1))
+    return result.stdout.split("\0")[:-1] if result.returncode == 0 else []
+
+
+def quote(value):
+    for character, escaped in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\r", "\\n"), ("\t", "\\t")):
+        value = value.replace(character, escaped)
+    return f'"{value}"'
+
+
+def render(entries):
+    """Entries in Git's config file syntax. Written as text, never as Git
+    arguments, since values may be credentials."""
+    text = []
+    for key, value in entries:
+        section, _, rest = key.partition(".")
+        middle, _, name = rest.rpartition(".")
+        if not section or not name:
+            raise ValueError("Invalid Git configuration key")
+        text.append(f"[{section}{f' {quote(middle)}' if middle else ''}]\n\t{name} = {quote(value)}\n")
+    return "".join(text)
+
+
+def write_private(file, content):
+    temporary = file.with_name(f"{file.name}.{uuid.uuid4().hex}")
+    temporary.touch(mode=0o600)
+    temporary.write_text(content)
+    os.replace(temporary, file)
+
+
+def file_command(variable, key, value):
+    if file := os.environ.get(variable):
+        delimiter = f"cachew_{uuid.uuid4().hex}"
+        with open(file, "a") as stream:
+            stream.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
+
+
+def output(key, value):
+    file_command("GITHUB_OUTPUT", key, value)
+
+
+def environment(key, value):
+    file_command("GITHUB_ENV", key, value)
+
+
+def mask(value):
+    if value:
+        print("::add-mask::" + value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+
+
+def find_git(environ):
+    """The real Git on PATH, never an earlier session's wrapper."""
+    for directory in environ.get("PATH", "").split(os.pathsep):
+        folder = Path(directory)
+        if not directory or (folder.name == "bin" and folder.parent.name.startswith("cachew-")):
+            continue
+        candidate = folder / "git"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    raise RuntimeError("Git unavailable")
+
+
+class Settings:
+    """The validated inputs; each is None when unusable, and any unusable input
+    means no caching at all."""
+
+    def __init__(self, environ):
+        def parse(read):
+            try:
+                return read()
+            except (Bypass, KeyError, ValueError):
+                return None
+
+        self.upstream = parse(
+            lambda: origin(checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
+        )
+        self.caches = self.upstream and parse(
+            lambda: cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), self.upstream, environ)
+        )
+        self.repository = parse(
+            lambda: repository_name(checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"])
+        )
+        self.fetch_timeout = parse(lambda: duration(environ["CACHEW_CACHEW_FETCH_TIMEOUT"], MAX_FETCH_TIMEOUT_SECONDS))
+        self.health_timeout = parse(
+            lambda: duration(environ["CACHEW_CACHEW_HEALTH_TIMEOUT"], MAX_HEALTH_TIMEOUT_SECONDS)
+        )
+        self.valid = None not in (self.upstream, self.caches, self.repository, self.fetch_timeout, self.health_timeout)
+
+
+def owned_session(environ):
+    directory = Path(environ["CACHEW_SESSION_DIR"]).resolve()
+    if directory.parent != Path(environ["RUNNER_TEMP"]).resolve() or not directory.name.startswith("cachew-"):
+        raise RuntimeError("Invalid cachew session directory")
+    return directory
+
+
+def read_state(session):
+    return json.loads((session / "state.json").read_text())
+
+
+def write_state(session, state):
+    write_private(session / "state.json", json.dumps(state))
+
+
+def remove_managed(real_git, config, state, environ, rewrites_only=False):
+    """Unset cachew's keys; return the ones still present (e.g. the file was locked)."""
+    remaining = set()
+    for key in dict.fromkeys(key for key, _ in state.get("managed", [])):
+        if rewrites_only and not key.lower().endswith(".insteadof"):
+            continue
+        # `git config` takes the file's lock, so concurrent job writes are safe.
+        if git(
+            real_git, environ, "config", "--file", str(config), "--unset-all", key, allowed=range(256)
+        ).returncode not in (0, 5):
+            remaining.add(key)  # 5: the key was already gone
+    return remaining
+
+
+def remove_cache_keys(real_git, session, state, environ, disable=True):
+    """Take cachew's keys out of the job's global file, keeping everything the job
+    wrote. With disable, caching stays off for the rest of the job; so it does
+    when a key cannot be removed, and such keys stay recorded so every copy and
+    upstream view keeps leaving them out."""
+    marker = session / "cache-disabled"
+    if disable:
+        # First, so concurrent and later wrappers stop using the cache at once.
+        marker.touch(mode=0o600, exist_ok=True)
+    remaining = remove_managed(real_git, session / "global.config", state, environ)
+    if remaining:
+        marker.touch(mode=0o600, exist_ok=True)
+    state = dict(state, active=False, managed=[entry for entry in state.get("managed", []) if entry[0] in remaining])
+    write_state(session, state)
+    return state
+
+
+def pin_promisor_remotes(real_git, location, environ, cache):
+    """Git runs a partial clone's lazy fetches itself, not through the wrapper,
+    so they would follow the cache rewrite with no upstream retry. Pin each
+    promisor remote the rewrite reaches to its own URL: a repository-local
+    self-mapping is a longer insteadOf match."""
+    if not cache:
+        return
+
+    def run(*arguments):
+        result = subprocess.run(
+            [real_git, *location, *arguments], env=environ, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        return result.stdout.decode(errors="replace").strip() if result.returncode == 0 else ""
+
+    for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
+        key, _, value = line.partition(" ")
+        remote = key[len("remote.") : -len(".promisor")]
+        url = run("config", "--local", "--get", f"remote.{remote}.url")
+        if (
+            value.lower() == "true"
+            and url
+            and run("ls-remote", "--get-url", remote).startswith(cache.rstrip("/") + "/git/")
+        ):
+            run("config", "--local", "--add", f"url.{url}.insteadOf", url)
+
+
+def subsection(key, prefix, suffix):
+    """The subsection of `<prefix><subsection><suffix>` (matched case-insensitively), or None."""
+    lower = key.lower()
+    if lower.startswith(prefix) and lower.endswith(suffix) and len(key) >= len(prefix) + len(suffix):
+        return key[len(prefix) : len(key) - len(suffix)]
+    return None
+
+
+def cache_host(value, caches):
+    try:
+        url = urllib.parse.urlsplit(value)
+        host = url.hostname or ""
+    except ValueError:
+        return False
+    return f"{url.scheme}://{url.netloc}".lower() in caches or host == "cachew" or host.startswith("cachew.")
+
+
+def copy_globals(session, real_git, environ, caches):
+    """Include directives for private copies of the caller's global files,
+    following includes, without any inherited cachew rewrite or cache header."""
+    selected = environ.get("GIT_CONFIG_GLOBAL")
+    if selected == "":
+        return ""
+    home = environ.get("HOME") or os.path.expanduser("~")
+    xdg = environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    originals = (
+        [selected] if selected is not None else [os.path.join(xdg, "git", "config"), os.path.join(home, ".gitconfig")]
+    )
+    copies = {}
+
+    def copy(source):
+        source = os.path.abspath(source)
+        if source in copies or not os.path.exists(source):
+            return copies.get(source)
+        if len(copies) > MAX_INCLUDED_FILES:
+            raise RuntimeError("Too many included Git configuration files")
+        destination = copies[source] = session / f"base-{len(copies)}.config"
+        entries = []
+        for key, value in config_entries(real_git, environ, "--file", source, "--no-includes"):
+            rewritten = subsection(key, "url.", ".insteadof")
+            if (
+                rewritten is not None
+                and urllib.parse.urlsplit(rewritten).path.startswith("/git/")
+                and cache_host(rewritten, caches)
+            ):
+                continue
+            header = subsection(key, "http.", ".extraheader")
+            if header is not None and cache_host(header, caches):
+                continue
+            if key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower()):
+                included = (
+                    os.path.join(home, value[2:])
+                    if value.startswith("~/")
+                    else os.path.join(os.path.dirname(source), value)
+                )
+                if not (copied := copy(included)):
+                    continue
+                value = str(copied)
+                relative = {"./": os.path.dirname(source), "~/": home}
+                key = re.sub(
+                    r"^(includeif\.gitdir(?:/i)?:)(\./|~/)",
+                    lambda m: f"{m[1]}{relative[m[2]]}/",
+                    key,
+                    flags=re.IGNORECASE,
+                )
+            entries.append((key, value))
+        write_private(destination, render(entries))
+        return destination
+
+    return render(("include.path", str(copied)) for copied in map(copy, originals) if copied)
+
+
+def flatten(real_git, environ, file, skip):
+    """Entries of a config file with unconditional includes inlined, except keys
+    named in skip. Conditional includes stay directives, evaluated when Git reads
+    the result; inlining them would apply one repository's settings everywhere."""
+    entries = []
+    for key, value in config_entries(real_git, environ, "--file", str(file), "--no-includes"):
+        if key.lower() == "include.path":
+            entries += flatten(real_git, environ, value, skip) if os.path.exists(value) else []
+        elif key.lower() not in skip:
+            entries.append((key, value))
+    return entries
+
+
+def write_checkout_config(session, state, settings, environ):
+    """A flattened copy of global.config rather than an include of it: with
+    submodules, actions/checkout runs `git config --global include.path
+    <credentials>`, which replaces a single include.path (and fails on several).
+
+    The low-speed abort is scoped to the checked-out repository: actions/checkout
+    retries its fetch but not its submodule update, so a submodule must keep
+    crawling rather than fail."""
+    skip = {key.lower() for key, _ in state["managed"]}
+    entries = flatten(state["real_git"], environ, session / "global.config", skip)
+    if settings.upstream and settings.repository:
+        scope = f"http.{settings.upstream}/{settings.repository}"
+        entries += [
+            (f"{scope}.lowSpeedLimit", FALLBACK_LOW_SPEED_LIMIT),
+            (f"{scope}.lowSpeedTime", FALLBACK_LOW_SPEED_SECONDS),
+        ]
+    # activate copies back only what checkout adds after this snapshot.
+    state["checkout_safe_directories"] = sum(key.lower() == "safe.directory" for key, _ in entries)
+    write_private(session / "checkout.config", render(entries))
+
+
+def prepare(environ):
+    settings = Settings(environ)
+    if existing := environ.get("CACHEW_SESSION_DIR"):
+        # A later checkout in the same job: take the cache rewrite out of the job's
+        # file in place, keeping the job's writes, so this checkout talks to upstream.
+        session = owned_session(environ)
+        state = read_state(session)
+        state = remove_cache_keys(state["real_git"], session, state, environ, disable=False)
+    else:
+        # An unusable or untrusted cache or upstream origin means no session at all:
+        # plain checkout, no token anywhere, no wrapper and no configuration change.
+        if not settings.valid:
+            raise RuntimeError("Unsupported cachew configuration")
+        real_git = find_git(environ)
+        # GIT_CONFIG_GLOBAL needs Git 2.32. Older Git would silently ignore the isolation.
+        if not git_version_at_least(real_git, (2, 32)):
+            raise RuntimeError("Git 2.32 or newer is required")
+        session = Path(tempfile.mkdtemp(prefix="cachew-", dir=Path(environ["RUNNER_TEMP"]).resolve()))
+        state = {"active": False, "real_git": real_git, "tokens": {}, "defaults": {}, "managed": [], "cache": None}
+    try:
+        if not existing:
+            base = copy_globals(session, state["real_git"], environ, settings.caches)
+            write_private(session / "global.config", base + render(PERFORMANCE))
+        write_checkout_config(session, state, settings, environ)
+        write_state(session, state)
+    except BaseException:
+        if not existing:
+            shutil.rmtree(session, ignore_errors=True)
+        raise
+    output("ready", "true")
+    environment("CACHEW_SESSION_DIR", str(session))
+    environment("CACHEW_REAL_GIT", state["real_git"])
+    # Later steps of the job run this interpreter, which the Git wrapper needs anyway.
+    environment("CACHEW_PYTHON", sys.executable)
+    environment("GIT_CONFIG_GLOBAL", str(session / "checkout.config"))
+
+
+def keep_safe_directories(real_git, environ, checkout_config, skip, global_config):
+    """Copy the safe.directory entries checkout added (after the first skip) to the
+    job's file. An empty value resets the list in Git, so on both sides only the
+    entries after the last reset count."""
+    added = []
+    for value in get_all(real_git, environ, checkout_config, "safe.directory")[skip:]:
+        if value == "":
+            added.clear()
+        if value not in added:
+            added.append(value)
+    present = get_all(real_git, environ, global_config, "safe.directory", includes=True)
+    present = present[len(present) - present[::-1].index("") :] if "" in present else present
+    for value in added:
+        if value and value in present:
+            continue
+        git(real_git, environ, "config", "--file", str(global_config), "--add", "safe.directory", value)
+        present = present + [value] if value else []
+
+
+def auth_entries(url, header):
+    # The empty value resets less specific headers, so exactly one is sent.
+    return [(f"http.{url}/.extraHeader", ""), (f"http.{url}/.extraHeader", header)]
+
+
+def shell_quote(value):
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def shim(real_git, session):
+    """Only commands that can reach a remote pay for the Python wrapper."""
+    return f"""#!/bin/sh
+export CACHEW_REAL_GIT={shell_quote(real_git)}
+export CACHEW_SESSION_DIR={shell_quote(str(session))}
+skip=0
+for argument in "$@"; do
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  case "$argument" in
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) skip=1 ;;
+    -*) ;;
+    clone|fetch|ls-remote|push|pull|submodule|remote) exec {shell_quote(sys.executable)} {shell_quote(str(ACTION / "git_wrapper.py"))} "$@" ;;
+    *) break ;;
+  esac
+done
+exec "$CACHEW_REAL_GIT" "$@"
+"""
+
+
+def activate(environ):
+    session = owned_session(environ)
+    state = read_state(session)
+    real_git = state["real_git"]
+    global_config = session / "global.config"
+    settings = Settings(environ)
+    token = checkout_input(environ, "CACHEW_TOKEN")
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    mask(token)
+    mask(encoded)
+    if (
+        token
+        and settings.upstream
+        and settings.repository
+        and checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
+    ):
+        # Cache-scoped only. Upstream credentials stay where actions/checkout put them.
+        header = f"AUTHORIZATION: basic {encoded}"
+        state["tokens"][f"{settings.upstream}/{settings.repository}"] = header
+        if settings.repository.lower() == environ.get("GITHUB_REPOSITORY", "").lower():
+            state["defaults"][settings.upstream] = header
+    keep_safe_directories(
+        real_git, environ, session / "checkout.config", state["checkout_safe_directories"], global_config
+    )
+    disabled = session / "cache-disabled"
+    available = environ.get("CACHEW_AVAILABLE") or "unknown"
+    cache = environ.get("CACHEW_SELECTED_URL", "")
+    if cache not in (settings.caches or []):
+        cache = ""
+    if not settings.valid or disabled.exists():
+        available = "false"
+    elif available == "true" and not cache:
+        available = "unknown"
+    if available == "unknown":
+        cache = next(
+            (candidate for candidate in settings.caches if healthy(candidate, settings.health_timeout, environ)), ""
+        )
+        available = "true" if cache else "false"
+    cache = cache if available == "true" else None
+    state = remove_cache_keys(real_git, session, dict(state, cache=cache), environ, disable=not cache)
+    if not disabled.exists():
+        host = urllib.parse.urlsplit(settings.upstream).netloc
+        entries = [(f"url.{cache}/git/{host}/.insteadOf", settings.upstream + "/")]
+        if default := state["defaults"].get(settings.upstream):
+            entries += auth_entries(cache, default)
+        for repository, header in state["tokens"].items():
+            if repository.startswith(settings.upstream + "/"):
+                cached = f"{cache}/git/{host}/{repository[len(settings.upstream) + 1 :]}"
+                entries += auth_entries(cached, header)
+                if not cached.endswith(".git"):
+                    entries += auth_entries(cached + ".git", header)
+        # Recorded first, so a partial failure is still removed by the next cleanup.
+        state["managed"] = [list(entry) for entry in entries]
+        write_state(session, state)
+        with global_config.open("a") as stream:
+            stream.write(render(entries))
+        state["active"] = True
+        checkout = Path(environ.get("GITHUB_WORKSPACE", "."), checkout_input(environ, "CACHEW_PATH"))
+        view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
+        pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache)
+        write_state(session, state)
+        wrapper = session / "bin"
+        wrapper.mkdir(mode=0o700, exist_ok=True)
+        write_private(wrapper / "git", shim(real_git, session))
+        (wrapper / "git").chmod(0o700)
+        with open(environ["GITHUB_PATH"], "a") as stream:
+            stream.write(f"{wrapper}\n")
+    environment("GIT_CONFIG_GLOBAL", str(global_config))
+    environment("CACHEW_GIT_FETCH_TIMEOUT", str(settings.fetch_timeout or DEFAULT_FETCH_TIMEOUT_SECONDS))
+    output("configured", str(state["active"]).lower())
+
+
+def main(phase):
+    environ = dict(os.environ)
+    try:
+        {"prepare": prepare, "activate": activate}[phase](environ)
+    except Exception:
+        # A session an earlier checkout activated must not rewrite later reads to
+        # the cache once this step cannot keep it consistent.
+        try:
+            session = owned_session(environ)
+            state = read_state(session)
+            remove_cache_keys(state["real_git"], session, state, environ)
+            if phase == "activate":
+                environment("GIT_CONFIG_GLOBAL", str(session / "global.config"))
+        except Exception:
+            pass
+        if phase == "prepare":
+            print("Cachew session could not start; using standard checkout only.")
+            output("ready", "false")
+        else:
+            print("Cachew configuration unavailable; later Git operations use upstream.")
+            output("configured", "false")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1] if len(sys.argv) == 2 else "")

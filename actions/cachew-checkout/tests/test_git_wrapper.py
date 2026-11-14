@@ -32,7 +32,7 @@ class DownstreamGitTests(unittest.TestCase):
         self.upstream = self.git_fixture.upstream
         self.cache = self.git_fixture.cache
         self.baseline = (self.git_fixture.home / ".gitconfig").read_bytes()
-        # Same layout as session/index.js after a successful activation: the
+        # Same layout as session.py after a successful activation: the
         # caller's settings plus performance keys, then cachew's managed keys.
         active = self.session / "global.config"
         active.write_bytes(self.baseline)
@@ -273,7 +273,7 @@ class DownstreamGitTests(unittest.TestCase):
         lock.touch()
         self.addCleanup(lock.unlink, missing_ok=True)
         state = json.loads((self.session / "state.json").read_text())
-        state = wrapper.disable_cache(self.real_git, self.session, state, self.env)
+        state = wrapper.remove_cache_keys(self.real_git, self.session, state, self.env)
         self.assertEqual(state["managed"], self.managed)
         self.assertEqual(json.loads((self.session / "state.json").read_text())["managed"], self.managed)
 

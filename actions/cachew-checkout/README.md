@@ -135,18 +135,15 @@ is used only for the checkout itself. Steps may write the global
 configuration (`git config --global ...`); cachew only adds and removes its own
 keys, so those writes survive cache fallback and later checkouts.
 
-The helper needs Node.js 22 or newer; end-of-life Node (20 and older) is never
-used. Composite steps do not get the runner's bundled Node on `PATH`, so
-`session/prepare.sh` uses `node` from `PATH`, then the runner's own
-`externals/node24` (found from `RUNNER_TEMP`, which is `<runner>/_work/_temp`;
-tt CI VMs run the runner from `/opt/runner` and have no system Node), then
-`/__e/node24`, where the runner mounts the same externals into job containers.
-If none runs (for example glibc Node in an Alpine container), the action falls
-back to the plain checkout without changing the job. If an earlier checkout in the
-job already started a session, `session/prepare.sh` disables it with Git alone
-(cachew's rewrite and headers are removed, the job's own settings kept), gives
-the official checkout a flattened throwaway copy of the job's global file, and
-a restore step points the job back at the real file afterwards.
+The session steps (`session.py`), the cache checkout and the Git wrapper all
+run on Python 3.10 or newer from `PATH`. Without it the action falls back to the
+plain checkout without changing the job. Once a session exists, later steps use
+the same interpreter (`CACHEW_PYTHON`), which the Git wrapper already depends on.
+A later checkout in the job removes cachew's rewrite and headers from the job's
+global file, keeping the job's own settings, and gives the official checkout a
+flattened throwaway copy of it. If the file cannot be changed (for example it is
+locked), caching is turned off for the rest of the job and the copy still leaves
+cachew's keys out.
 
 There is no post step: composite actions cannot have one, and a separate
 JavaScript action would need its own pin. The session directory lives in

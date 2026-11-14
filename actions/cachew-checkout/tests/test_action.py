@@ -45,6 +45,12 @@ def steps():
     return result
 
 
+def script(step):
+    """A step's run script as the runner receives it."""
+    run = step["run"]
+    return run[1:-1].replace("''", "'") if run.startswith("'") else run
+
+
 def value(expression, context):
     """Evaluate the subset of GitHub expression syntax used in action.yml."""
 
@@ -162,13 +168,6 @@ class RunnerGateTests(unittest.TestCase):
                 token = {"inputs.token": "secret", "steps.mode.outputs.cachew": mode(context)}
                 self.assertEqual(value(expression, token) or False, expected)
 
-    def test_restore_runs_only_after_a_fallback_with_an_existing_session(self):
-        restore = next(step for step in self.steps if step.get("id") == "restore")
-        self.assertFalse(evaluate(restore["if"], {}))
-        self.assertTrue(evaluate(restore["if"], {"steps.session.outputs.fallback-config": "/t/cachew-x/fallback-checkout.config"}))
-        order = [step["id"] for step in self.steps]
-        self.assertLess(order.index("checkout"), order.index("restore"))
-
     def test_explicit_opt_in_on_other_linux_runners(self):
         self.assertEqual(
             self.active_steps(runner("github-hosted", cachew="true\n")),
@@ -208,8 +207,8 @@ class RunnerGateTests(unittest.TestCase):
         text = ACTION.read_text()
         self.assertNotIn("tenstorrent/tt-metal/", text)
         self.assertEqual(re.findall(r"^\s*uses:\s*(\S+)", text, re.M), [self.checkout["uses"].split()[0]])
-        self.assertIn('run: bash "$GITHUB_ACTION_PATH/session/prepare.sh"', self.session["raw"])
-        self.assertFalse((ACTION.parent / "session" / "action.yml").exists())
+        self.assertIn('"$GITHUB_ACTION_PATH/session.py" prepare', self.session["run"])
+        self.assertFalse((ACTION.parent / "session").exists())
 
     def test_ssh_key_is_not_exposed_to_the_cachew_checkout(self):
         cachew = next(step for step in self.steps if step.get("id") == "cachew")

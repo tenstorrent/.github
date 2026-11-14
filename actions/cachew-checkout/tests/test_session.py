@@ -11,12 +11,12 @@ import unittest
 from unittest.mock import patch
 import urllib.parse
 
+import test_action
 import test_checkout as fixtures
 
 
-HELPER = fixtures.ACTION / "session" / "index.js"
-PREPARE = fixtures.ACTION / "session" / "prepare.sh"
 NODE = shutil.which("node")
+STEPS = {step["id"]: step for step in test_action.steps() if "id" in step}
 
 
 @unittest.skipUnless(fixtures.CHECKOUT_JS, "set CHECKOUT_ACTION_JS to the pinned checkout bundle")
@@ -48,6 +48,19 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result
 
+    def run_step(self, name, env=None):
+        """A run step of action.yml, exactly as the runner starts it."""
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", test_action.script(STEPS[name])],
+            cwd=self.fixture.workspace,
+            env=dict(env or self.env, GITHUB_ACTION_PATH=str(fixtures.ACTION)),
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
     def prepare(self):
         if not self.prepared:
             self.prepared = True
@@ -60,11 +73,7 @@ class SessionTests(unittest.TestCase):
                 capture_output=True,
             )
             self.original_name = original.stdout.strip() if original.returncode == 0 else None
-        # Exactly what action.yml runs: Node discovery, then `index.js prepare`.
-        result = subprocess.run(
-            ["bash", str(PREPARE)], cwd=self.fixture.workspace, env=self.env, text=True, capture_output=True, timeout=30
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_step("session")
         self.assertEqual(fixtures.runner_file(self.fixture.root / "output").get("ready"), "true", result.stdout)
         self.env.update(fixtures.runner_file(self.fixture.root / "env"))
 
@@ -96,7 +105,7 @@ class SessionTests(unittest.TestCase):
         self.env["CACHEW_AVAILABLE"] = available or fixtures.runner_file(self.fixture.root / "output").get(
             "available", "unknown"
         )
-        self.run_node(HELPER, "activate")
+        self.run_step("configure")
         self.env.update(fixtures.runner_file(self.fixture.root / "env"))
         bins = (self.fixture.root / "path").read_text().splitlines()
         self.env["PATH"] = os.pathsep.join(dict.fromkeys([*reversed(bins), *self.env["PATH"].split(os.pathsep)]))
@@ -186,7 +195,7 @@ class SessionTests(unittest.TestCase):
         directory = Path(self.env["CACHEW_SESSION_DIR"])
         wrapper = load_wrapper()
         state = json.loads((directory / "state.json").read_text())
-        wrapper.disable_cache(self.env["CACHEW_REAL_GIT"], directory, state, self.env)
+        wrapper.remove_cache_keys(self.env["CACHEW_REAL_GIT"], directory, state, self.env)
         self.env["CACHEW_PATH"] = "second-checkout"
         self.assertEqual(self.flow(), (False, False))
         expected = {str(self.fixture.target.resolve()), str((self.fixture.workspace / "second-checkout").resolve())}
@@ -436,7 +445,7 @@ class SessionTests(unittest.TestCase):
 
     def test_conditional_includes_stay_conditional_in_checkout_copies(self):
         # A matching includeIf must not be copied unconditionally into the
-        # flattened files the official checkout uses (with and without Node).
+        # flattened file the official checkout uses, first or later in the job.
         subprocess.run(["git", "init", "-q", str(self.fixture.workspace)], check=True)
         conditional = self.fixture.home / "conditional.gitconfig"
         conditional.write_text("[fixture]\n\tconditional = only-here\n")
@@ -444,34 +453,23 @@ class SessionTests(unittest.TestCase):
             config.write(f'[includeIf "gitdir:{self.fixture.workspace.resolve()}/"]\n\tpath = {conditional}\n')
         self.original_global = (self.fixture.home / ".gitconfig").read_bytes()
         self.assertEqual(self.flow(), (True, True))
-        directory = Path(self.env["CACHEW_SESSION_DIR"])
-        copies = [directory / "checkout.config"]
-        (self.fixture.root / "output").write_text("")
-        (self.fixture.root / "env").write_text("")
-        subprocess.run(["bash", str(PREPARE)], cwd=self.fixture.workspace, env=dict(self.env, PATH=self.node_free_path()), check=True, capture_output=True)
-        copies.append(Path(fixtures.runner_file(self.fixture.root / "output")["fallback-config"]))
-        for copy in copies:
+        copy = Path(self.env["CACHEW_SESSION_DIR"]) / "checkout.config"
+        for prepared in ("first", "later"):
+            if prepared == "later":
+                self.prepare()
             text = copy.read_text()
-            self.assertIn("includeif", text.lower(), copy.name)
-            self.assertNotIn("only-here", text, copy.name)
+            self.assertIn("includeif", text.lower(), prepared)
+            self.assertNotIn("only-here", text, prepared)
+        self.activate()
         self.finish()
 
-    def test_missing_node_after_activation_disables_the_session_for_the_fallback(self):
-        self.assert_not_ready_fallback_after_activation("Node.js 22+ unavailable", node=False)
-
-    def test_failed_prepare_after_activation_disables_the_session_for_the_fallback(self):
-        # Node runs, but the helper cannot update the job's global file.
-        self.assert_not_ready_fallback_after_activation("Cachew session could not start", lock=True)
-
-    def assert_not_ready_fallback_after_activation(self, message, node=True, lock=False):
-        # A later checkout in the job reports ready=false: the session the first
-        # checkout activated must not rewrite that checkout (or later reads) to the cache.
+    def test_locked_global_file_disables_the_cache_for_a_later_checkout(self):
+        # A later checkout cannot take cachew's keys out of the job's locked file:
+        # neither that checkout nor later reads may be rewritten to the cache.
         self.assertEqual(self.flow(), (True, True))
         directory = Path(self.env["CACHEW_SESSION_DIR"])
         global_config = directory / "global.config"
         self.assertIn(self.fixture.cache.url, global_config.read_text())
-        (self.fixture.root / "output").write_text("")
-        (self.fixture.root / "env").write_text("")
         # Job-owned settings: a rewrite shaped like cachew's, its header, and an
         # inherited `safe.directory=*` the job reset afterwards.
         mirror = "https://mirror.example"
@@ -481,63 +479,31 @@ class SessionTests(unittest.TestCase):
         inherited.write_text("[safe]\n\tdirectory = *\n")
         self.real_git("config", "--file", str(global_config), "--add", "include.path", str(inherited))
         self.real_git("config", "--file", str(global_config), "--add", "safe.directory", "")
-        # Every Git command prepare runs is logged: no cache credential may be an argument.
-        log = self.fixture.root / "prepare-git.log"
-        logging = self.fixture.root / "prepare-logging"
-        logging.mkdir()
-        (logging / "git").write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{self.env["CACHEW_REAL_GIT"]}" "$@"\n')
-        (logging / "git").chmod(0o500)
-        path = self.env["PATH"] if node else self.node_free_path()
         lock_file = directory / "global.config.lock"
-        if lock:
-            lock_file.touch()
-        result = subprocess.run(
-            ["bash", str(PREPARE)],
-            cwd=self.fixture.workspace,
-            env=dict(self.env, PATH=f"{logging}{os.pathsep}{path}"),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-        lock_file.unlink(missing_ok=True)
-        encoded = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
-        self.assertNotIn(encoded, log.read_text() if log.exists() else "")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(message, result.stdout)
-        outputs = fixtures.runner_file(self.fixture.root / "output")
-        self.assertEqual(outputs.get("ready"), "false")
+        lock_file.touch()
+        try:
+            self.prepare()
+        finally:
+            lock_file.unlink()
         self.assertTrue((directory / "cache-disabled").exists())
-        # The official checkout gets a flattened throwaway copy without cachew's
-        # keys, as with a ready session, even when the job's file was locked.
-        fallback = outputs["fallback-config"]
-        self.assertNotIn(self.fixture.cache.url, Path(fallback).read_text())
-        if not lock:
-            self.assertNotIn(self.fixture.cache.url, global_config.read_text())
-        for config in (Path(fallback), global_config):
+        # The official checkout's flattened copy leaves cachew's keys out; the job's stay.
+        checkout_config = directory / "checkout.config"
+        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(checkout_config))
+        self.assertNotIn(self.fixture.cache.url, checkout_config.read_text())
+        for config in (checkout_config, global_config):
             self.assertIn(f"{mirror}/git/gitlab.com/", config.read_text(), config.name)
             self.assertIn("X-Mirror: job", config.read_text(), config.name)
-        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
-        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], fallback)
         self.assert_caller_settings_visible()
         upstream = f"{self.fixture.upstream.url}/org/child"
         self.assertEqual(self.real_git("ls-remote", "--get-url", upstream), upstream)
-        # action.yml then runs only the official checkout, which must reach upstream,
-        # and the restore step.
+        # As action.yml runs it: the cachew step bypasses, the official checkout reaches upstream.
         self.env["CACHEW_PATH"] = "second-checkout"
+        self.assertFalse(self.fixture.attempt())
         self.checkout()
         self.assertTrue((self.fixture.workspace / "second-checkout/content.txt").exists())
-        (self.fixture.root / "env").write_text("")
-        result = subprocess.run(
-            ["bash", str(PREPARE.parent / "restore.sh")],
-            cwd=self.fixture.workspace,
-            env=dict(self.env, CACHEW_FALLBACK_CONFIG=fallback),
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertFalse(self.activate())
         self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
         # Only the checkout's own entry comes back, after the job's reset: not the inherited `*`.
         values = self.safe_directories(global_config)
         effective = values[len(values) - values[::-1].index(""):]
@@ -695,20 +661,6 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(self.original_name)
         self.finish()
 
-    def test_missing_python_keeps_upstream_usable_without_installing_shim(self):
-        binaries = self.fixture.root / "without-python"
-        binaries.mkdir()
-        python = binaries / "python3"
-        python.write_text("#!/bin/sh\nexit 127\n")
-        python.chmod(0o700)
-        self.env["PATH"] = str(binaries) + os.pathsep + self.env["PATH"]
-        self.prepare()
-        self.checkout()
-        self.assertFalse(self.activate("unknown"))
-        self.assertEqual((self.fixture.root / "path").read_text(), "")
-        self.real_git("ls-remote", self.fixture.upstream.url + "/org/main")
-        self.finish()
-
     def test_fixture_isolates_an_outer_action_session_and_path_shim(self):
         outer = self.fixture.root / "outer-action"
         outer.mkdir()
@@ -766,7 +718,7 @@ class SessionTests(unittest.TestCase):
         self.real_git("-C", target, "push", "origin", "HEAD:refs/heads/pushed-after-activation")
         directory = Path(self.env["CACHEW_SESSION_DIR"])
         state = json.loads((directory / "state.json").read_text())
-        load_wrapper().disable_cache(self.env["CACHEW_REAL_GIT"], directory, state, self.env)
+        load_wrapper().remove_cache_keys(self.env["CACHEW_REAL_GIT"], directory, state, self.env)
         result = subprocess.run(
             ["git", "-C", target, "fetch", "origin"], env=self.env, text=True, capture_output=True, timeout=30
         )
@@ -784,102 +736,29 @@ class SessionTests(unittest.TestCase):
         (self.fixture.root / "env").write_text("")
         (self.fixture.root / "output").write_text("")
         (self.fixture.root / "path").write_text("")
-        result = subprocess.run(
-            ["bash", str(PREPARE)],
-            cwd=self.fixture.workspace,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        result = self.run_step("session", env)
         self.assertEqual(fixtures.runner_file(self.fixture.root / "output").get("ready"), "false")
         self.assertEqual((self.fixture.root / "env").read_text(), "", "no job environment change")
         self.assertEqual((self.fixture.root / "path").read_text(), "", "no Git wrapper on PATH")
         self.assertEqual(list(self.fixture.runtime.glob("cachew-*")), [], "no session left behind")
         return result
 
-    def node_free_path(self):
-        """The test PATH with every `node` hidden (other tools stay available)."""
-        entries = []
-        for index, directory in enumerate(self.env["PATH"].split(os.pathsep)):
-            source = Path(directory)
-            if not (source / "node").exists():
-                entries.append(directory)
-                continue
-            shadow = self.fixture.root / f"no-node-{index}"
-            shadow.mkdir(exist_ok=True)
-            for item in source.iterdir():
-                if item.name != "node" and not (shadow / item.name).exists():
-                    (shadow / item.name).symlink_to(item)
-            entries.append(str(shadow))
-        return os.pathsep.join(entries)
-
-    def test_missing_node_falls_back_to_plain_checkout(self):
-        # Composite run steps do not get the runner's bundled Node on PATH.
-        env = dict(self.env, PATH=self.node_free_path())
-        result = self.run_prepare_expecting_fallback(env)
-        self.assertIn("Node.js 22+ unavailable", result.stdout)
+    def test_missing_python_falls_back_to_plain_checkout(self):
+        binaries = self.fixture.root / "without-python"
+        binaries.mkdir()
+        (binaries / "python3").write_text("#!/bin/sh\nexit 127\n")
+        (binaries / "python3").chmod(0o700)
+        result = self.run_prepare_expecting_fallback(dict(self.env, PATH=f"{binaries}{os.pathsep}{self.env['PATH']}"))
+        self.assertIn("Python 3.10+ unavailable", result.stdout)
         # action.yml skips the cachew and configure steps when the session is not ready.
         self.plain_checkout_without_cache(self.env, cachew=False)
-
-    def runner_externals(self, version):
-        """A runner root whose externals/<version> Node records that it ran."""
-        root = self.fixture.root / "runner-root"
-        temp = root / "_work" / "_temp"
-        temp.mkdir(parents=True)
-        externals = root / "externals" / version / "bin"
-        externals.mkdir(parents=True)
-        marker = self.fixture.root / "externals-node-used"
-        (externals / "node").write_text(f'#!/bin/sh\ntouch "{marker}"\nexec "{shutil.which("node")}" "$@"\n')
-        (externals / "node").chmod(0o755)
-        return temp, marker
-
-    def end_of_life_node_dir(self):
-        """A directory whose `node` reports Node.js 20."""
-        directory = self.fixture.root / "node20-bin"
-        directory.mkdir()
-        preload = directory / "v20.cjs"
-        preload.write_text('Object.defineProperty(process.versions, "node", {value: "20.19.0"});\n')
-        (directory / "node").write_text(f'#!/bin/sh\nexec "{shutil.which("node")}" --require "{preload}" "$@"\n')
-        (directory / "node").chmod(0o755)
-        return directory
-
-    def test_runner_externals_node_is_used_when_node_is_not_on_path(self):
-        # tt CI VMs: runner in /opt/runner, RUNNER_TEMP=/opt/runner/_work/_temp,
-        # Node only in /opt/runner/externals/node24.
-        temp, marker = self.runner_externals("node24")
-        self.fixture.runtime = temp
-        self.env.update(RUNNER_TEMP=str(temp), PATH=self.node_free_path())
-        self.assertEqual(self.flow(), (True, True))
-        self.assertTrue(marker.exists())
-        self.assertTrue(Path(self.env["CACHEW_SESSION_DIR"]).is_relative_to(temp))
-        self.finish()
-
-    def test_end_of_life_node_on_path_is_skipped_for_runner_node24(self):
-        temp, marker = self.runner_externals("node24")
-        self.fixture.runtime = temp
-        path = os.pathsep.join([str(self.end_of_life_node_dir()), self.node_free_path()])
-        self.env.update(RUNNER_TEMP=str(temp), PATH=path)
-        self.assertEqual(self.flow(), (True, True))
-        self.assertTrue(marker.exists())
-        self.finish()
-
-    def test_end_of_life_node_is_never_used(self):
-        # Neither an old `node` on PATH nor the runner's externals/node20.
-        temp, marker = self.runner_externals("node20")
-        self.fixture.runtime = temp
-        path = os.pathsep.join([str(self.end_of_life_node_dir()), self.node_free_path()])
-        result = self.run_prepare_expecting_fallback(dict(self.env, RUNNER_TEMP=str(temp), PATH=path))
-        self.assertIn("Node.js 22+ unavailable", result.stdout)
-        self.assertFalse(marker.exists())
 
     def test_prepare_errors_fall_back_to_plain_checkout(self):
         # H3: whatever prevents cachew must never fail a checkout that plain
         # actions/checkout performs.
         no_git = self.fixture.root / "no-git-bin"
         no_git.mkdir()
-        for tool in ("node", "bash", "dirname"):
+        for tool in ("python3", "bash"):
             (no_git / tool).symlink_to(shutil.which(tool))
         self.run_prepare_expecting_fallback(dict(self.env, PATH=str(no_git)))
 
