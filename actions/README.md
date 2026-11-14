@@ -229,15 +229,17 @@ so a set line can still change a label for one target.
 
 On a build of `main` (`GITHUB_REF` is `refs/heads/main`), both actions add
 `org.opencontainers.image.revision=$GITHUB_SHA` unless a `labels` line already
-sets it. On any other ref the labels pass through as given, because
-`GITHUB_SHA` is not always the commit that was built: on `pull_request` it is
-the merge commit. Off `main`, set `revision` yourself, or the label check warns
-and nothing in the image ties it to a commit:
+sets it. On any other ref the labels pass through as given: on `pull_request`,
+`GITHUB_SHA` is a temporary merge commit, and a checkout with `ref:` builds a
+different commit, so the caller states which commit it built. Off `main`, set
+`revision` yourself, or the label check warns and nothing in the image ties it
+to a commit. With the default checkout, `github.sha` is the commit checked out:
 
 ```yaml
-labels: |
-  org.opencontainers.image.revision=${{ github.event.pull_request.head.sha || github.sha }}
+labels: org.opencontainers.image.revision=${{ github.sha }}
 ```
+
+With `ref:`, write `git rev-parse HEAD` to a step output and use that instead.
 
 `source` and `licenses` can come from `labels`, from `LABEL` in the
 Dockerfile, or from the bake file. The OCI image spec defines the standard

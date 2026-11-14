@@ -9,8 +9,9 @@ oneline() { printf '%s' "$1" | tr '\r\n' '  ' | tr -d '\000-\010\013\014\016-\03
 
 # The labels input, one trimmed key=value per line. A build of main
 # (GITHUB_REF=refs/heads/main) also gets org.opencontainers.image.revision=
-# GITHUB_SHA unless a line already sets it; elsewhere GITHUB_SHA may not be the
-# commit that was built (a pull request's merge commit), so labels pass as given.
+# GITHUB_SHA unless a line already sets it. Elsewhere labels pass as given: a
+# pull request's GITHUB_SHA is a temporary merge commit, and a checkout with
+# `ref:` builds some other commit, so the caller states which one it built.
 effective_labels() {  # <labels input>
   local line has_revision=false
   while IFS= read -r line; do
