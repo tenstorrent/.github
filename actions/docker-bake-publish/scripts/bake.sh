@@ -92,7 +92,8 @@ OUTPUT_DEFS='
         ({}; ($f | index("=")) as $i
              | if $i == null then .[$f | ascii_downcase] = "" else .[$f[:$i] | ascii_downcase] = $f[$i + 1:] end)
     else . end;
-  def push_on: if . == null then false else (tostring | IN("", "1", "t", "T", "TRUE", "true", "True")) end;'
+  def push_on: if . == null then false else (tostring | IN("", "1", "t", "T", "TRUE", "true", "True")) end;
+  def csv_field: if test("[,\"\n\r]") then "\"" + gsub("\""; "\"\"") + "\"" else . end;'
 # shellcheck disable=SC2016
 CLASSIFY_JQ="${OUTPUT_DEFS}"'
   .target | to_entries | map(
@@ -167,39 +168,45 @@ done
 # The caller's exporter options (compression, oci-mediatypes, annotations) are
 # kept; the ones that only mean something for a registry push are dropped.
 # shellcheck disable=SC2016
-OUTPUT_JQ='
+OUTPUT_JQ="${OUTPUT_DEFS}"'
   .output | to_entries
   | map(select(.key | IN("type", "name", "push", "push-by-digest", "name-canonical",
                          "registry.insecure", "unpack", "store", "dest", "tar") | not) | "\(.key)=\(.value)")
   | . + ["dest=\($dest)", "tar=false"]
-  | map(if test("[,\"]") then "\"" + gsub("\""; "\"\"") + "\"" else . end)
+  | map(csv_field)
   | "type=oci," + join(",")'
+# A local target's resolved tags and outputs, as set lines. A target inherits
+# from its parent after --set overrides apply, so rewriting a pushed parent's
+# tags or output would otherwise change every local target that inherits them.
+# shellcheck disable=SC2016
+PIN_JQ="${OUTPUT_DEFS}"'
+  .target[$t] | ((.tags // [])[] | "\($t).tags=\(.)"),
+    ((.output // [])[] | "\($t).output=" + (if type == "string" then . else to_entries | map("\(.key)=\(.value)" | csv_field) | join(",") end))'
 
 layout_of() { printf '%s/%s' "$LAYOUT_ROOT" "$1"; }
 
+# NUL-delimited: an exporter annotation may hold a newline.
 overrides() {  # <generator-image>
   local t info
   for t in "${PUSHED[@]}"; do
     info="$(jq -c --arg t "$t" '.[] | select(.name == $t)' "$WORKDIR/targets.json")"
     parse_ref "$(jq -r '.tags[0]' <<< "$info")"
-    echo "${t}.tags=${REF_REPO}"
-    echo "${t}.output=$(jq -r --arg dest "$(layout_of "$t")" "$OUTPUT_JQ" <<< "$info")"
-    echo "${t}.attest=type=provenance,mode=max"
-    echo "${t}.attest=type=sbom,generator=$1"
+    printf '%s\0' "${t}.tags=${REF_REPO}" \
+      "${t}.output=$(jq -r --arg dest "$(layout_of "$t")" "$OUTPUT_JQ" <<< "$info")" \
+      "${t}.attest=type=provenance,mode=max" "${t}.attest=type=sbom,generator=$1"
   done
   for t in "${LOCAL[@]}"; do
+    printf '%s' "$RESOLVED" | jq -j --arg t "$t" "$PIN_JQ"' | . + "\u0000"'
     if [ "${INPUT_ENABLE_ATTESTATIONS:-true}" = true ]; then
-      echo "${t}.attest=type=provenance,mode=max"
-      echo "${t}.attest=type=sbom,generator=$1"
+      printf '%s\0' "${t}.attest=type=provenance,mode=max" "${t}.attest=type=sbom,generator=$1"
     else
-      echo "${t}.attest=type=provenance,disabled=true"
-      echo "${t}.attest=type=sbom,disabled=true"
+      printf '%s\0' "${t}.attest=type=provenance,disabled=true" "${t}.attest=type=sbom,disabled=true"
     fi
   done
 }
 
 PRIMARY_SETS=("${FILTERED[@]}")
-mapfile -t -O "${#PRIMARY_SETS[@]}" PRIMARY_SETS < <(overrides "$GENERATOR")
+mapfile -d '' -t -O "${#PRIMARY_SETS[@]}" PRIMARY_SETS < <(overrides "$GENERATOR")
 
 # Guard against anything (bake file, globs, groups) re-introducing tags.
 CHECK="$(bake_print "${PRIMARY_SETS[@]}")"
@@ -210,6 +217,11 @@ for t in "${PUSHED[@]}"; do
       and (.output | length) == 1
       and ([.output[] | kv | .type == "oci" and .dest == $dest and (.push | push_on | not)] | all)')"
   [ "$ok" = true ] || die "Could not rewrite target '$t' to a local OCI layout; resolved config: $(printf '%s' "$CHECK" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
+done
+for t in "${LOCAL[@]}"; do
+  before="$(printf '%s' "$RESOLVED" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
+  after="$(printf '%s' "$CHECK" | jq -c --arg t "$t" '.target[$t] | {tags, output}')"
+  [ "$before" = "$after" ] || die "Rewriting the pushed targets changed local target '$t': ${before} became ${after}."
 done
 
 # --- build: retries, then Harbor -> GHCR direct fallback ---
@@ -255,7 +267,7 @@ if [ "$ok" != true ] && [ -n "${INPUT_HARBOR_PREFIX:-}" ]; then
       | (.value.contexts // {}) | to_entries[]
       | select(.value | startswith($p))
       | "\($t).contexts.\(.key)=docker-image://\(.value | ltrimstr($p))"')
-  mapfile -t -O "${#FALLBACK_SETS[@]}" FALLBACK_SETS < <(overrides "$GENERATOR")
+  mapfile -d '' -t -O "${#FALLBACK_SETS[@]}" FALLBACK_SETS < <(overrides "$GENERATOR")
   run_bake "${FALLBACK_SETS[@]}" && ok=true
 fi
 [ "$ok" = true ] || die "docker buildx bake failed."
@@ -278,10 +290,12 @@ done < <(jq -r '.[].layout' "$IMAGES_JSON")
 jq -r '.[] | "[docker-publish] built \(.name): \(.digest) in \(.layout) (not pushed yet; pending tags: \(.tags | join(", ")))"' "$IMAGES_JSON" >&2
 
 # --- validate docker-loaded local targets ---
+# Only a type=docker output without dest loads the image; with dest it writes
+# an archive and the daemon never sees the tag.
 if [ "${INPUT_VALIDATE_IMAGES:-true}" = true ]; then
   for t in "${LOCAL[@]}"; do
-    tag="$(printf '%s' "$RESOLVED" | jq -r --arg t "$t" '
-      .target[$t] | select([.output[]? | if type == "string" then test("type=docker") else .type == "docker" end] | any)
+    tag="$(printf '%s' "$RESOLVED" | jq -r --arg t "$t" "${OUTPUT_DEFS}"'
+      .target[$t] | select([.output[]? | kv | .type == "docker" and (.dest // "") == ""] | any)
       | (.tags // [])[0] // empty')"
     [ -n "$tag" ] || continue
     docker image inspect "$tag" >/dev/null 2>&1 || die "Local image for target '$t' (${tag}) is not inspectable after build."
