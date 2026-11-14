@@ -5,11 +5,15 @@
 
 GitHub-hosted runners cannot reach cachew. On them the action must not probe,
 send a token, install the Git wrapper or change any Git configuration, so every
-cachew step has to be skipped by the runner before any process starts.
+cachew step has to be skipped. On Linux only the step that reads the cachew
+setting runs first; the harness runs its script for real.
 """
 
+import os
 from pathlib import Path
 import re
+import subprocess
+import tempfile
 import unittest
 
 
@@ -25,7 +29,7 @@ def steps():
         lines = block.splitlines()
         step = {"name": lines[0].removeprefix("name: ").strip(), "raw": block}
         for index, line in enumerate(lines):
-            match = re.match(r"\s*(id|if|uses):\s*(.*)$", line)
+            match = re.match(r"\s*(id|if|uses|run):\s*(.*)$", line)
             if not match or match[1] in step:
                 continue
             key, value = match[1], match[2].strip()
@@ -34,8 +38,8 @@ def steps():
                 for following in lines[index + 1 :]:
                     if not following.startswith("        "):
                         break
-                    continued.append(following.strip())
-                value = " ".join(continued)
+                    continued.append(following[8:] if value == "|" else following.strip())
+                value = ("\n" if value == "|" else " ").join(continued)
             step[key] = value
         result.append(step)
     return result
@@ -70,6 +74,17 @@ def runner(environment, os="Linux", cachew="auto", kill_switch=None):
     return context
 
 
+def mode(context):
+    """The mode step's output, from running its script as the runner would."""
+    step = next(step for step in steps() if step.get("id") == "mode")
+    with tempfile.NamedTemporaryFile() as output:
+        env = {"PATH": os.environ["PATH"], "GITHUB_OUTPUT": output.name, "CACHEW_INPUT": context.get("inputs.cachew", "")}
+        if "env.CACHEW_CHECKOUT" in context:
+            env["CACHEW_CHECKOUT"] = context["env.CACHEW_CHECKOUT"]
+        subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]], env=env, check=True)
+        return dict(line.split("=", 1) for line in Path(output.name).read_text().splitlines())["cachew"]
+
+
 class RunnerGateTests(unittest.TestCase):
     def setUp(self):
         self.steps = steps()
@@ -86,7 +101,9 @@ class RunnerGateTests(unittest.TestCase):
             if evaluate(condition, local):
                 started.append(step["id"])
                 # A skipped step publishes no outputs.
-                if step["id"] == "session":
+                if step["id"] == "mode":
+                    local["steps.mode.outputs.cachew"] = mode(local)
+                elif step["id"] == "session":
                     local["steps.session.outputs.ready"] = "true"
                 elif step["id"] == "cachew":
                     local["steps.cachew.outputs.checked-out"] = str(cloned).lower()
@@ -95,25 +112,31 @@ class RunnerGateTests(unittest.TestCase):
     def test_github_hosted_runners_only_run_the_official_checkout(self):
         for environment in ("github-hosted", ""):
             with self.subTest(environment=environment):
-                self.assertEqual(self.active_steps(runner(environment)), ["checkout"])
-                self.assertEqual(self.active_steps(runner(environment), cloned=True), ["checkout"])
+                self.assertEqual(self.active_steps(runner(environment)), ["mode", "checkout"])
+                self.assertEqual(self.active_steps(runner(environment), cloned=True), ["mode", "checkout"])
 
     def test_self_hosted_linux_runs_cachew_by_default(self):
-        self.assertEqual(self.active_steps(runner("self-hosted")), ["session", "cachew", "checkout", "configure"])
+        self.assertEqual(
+            self.active_steps(runner("self-hosted")), ["mode", "session", "cachew", "checkout", "configure"]
+        )
 
     def test_official_checkout_runs_only_when_cachew_did_not_check_out(self):
-        self.assertEqual(self.active_steps(runner("self-hosted"), cloned=True), ["session", "cachew", "configure"])
+        self.assertEqual(self.active_steps(runner("self-hosted"), cloned=True), ["mode", "session", "cachew", "configure"])
 
     def test_opt_out_and_unsupported_platforms_are_no_ops(self):
         for context in (
             runner("self-hosted", cachew="false"),
+            # Read as actions/checkout reads inputs: trimmed, any case.
+            runner("self-hosted", cachew=" False\n"),
             runner("self-hosted", kill_switch="false"),
-            runner("self-hosted", os="Windows"),
-            runner("self-hosted", os="macOS"),
+            runner("self-hosted", kill_switch="FALSE \n"),
             runner("github-hosted", cachew="true", kill_switch="false"),
         ):
             with self.subTest(context=context):
-                self.assertEqual(self.active_steps(context), ["checkout"])
+                self.assertEqual(self.active_steps(context), ["mode", "checkout"])
+        for os_name in ("Windows", "macOS"):
+            with self.subTest(os=os_name):
+                self.assertEqual(self.active_steps(runner("self-hosted", os=os_name)), ["checkout"])
 
     def test_opt_out_after_an_activated_session_still_isolates_the_checkout(self):
         # An earlier checkout activated the session: prepare must take the job-wide
@@ -124,16 +147,20 @@ class RunnerGateTests(unittest.TestCase):
         ):
             with self.subTest(context=context):
                 context["env.CACHEW_SESSION_DIR"] = "/runner/_work/_temp/cachew-session"
-                self.assertEqual(self.active_steps(context), ["session", "checkout", "configure"])
+                self.assertEqual(self.active_steps(context), ["mode", "session", "checkout", "configure"])
         self.assertEqual(self.active_steps(runner("self-hosted", os="macOS")), ["checkout"])
 
     def test_an_opted_out_checkout_never_hands_its_token_to_the_cache(self):
         configure = next(step for step in self.steps if step.get("id") == "configure")
         expression = re.search(r"CACHEW_TOKEN: (\$\{\{.*\}\})", configure["raw"])[1]
-        token = {"inputs.token": "secret", "inputs.cachew": "auto"}
-        self.assertEqual(value(expression, token), "secret")
-        self.assertFalse(value(expression, dict(token, **{"inputs.cachew": "false"})))
-        self.assertFalse(value(expression, dict(token, **{"env.CACHEW_CHECKOUT": "false"})))
+        for context, expected in (
+            ({"inputs.cachew": "auto"}, "secret"),
+            ({"inputs.cachew": "false\n"}, False),
+            ({"inputs.cachew": "auto", "env.CACHEW_CHECKOUT": " false"}, False),
+        ):
+            with self.subTest(context=context):
+                token = {"inputs.token": "secret", "steps.mode.outputs.cachew": mode(context)}
+                self.assertEqual(value(expression, token) or False, expected)
 
     def test_restore_runs_only_after_a_fallback_with_an_existing_session(self):
         restore = next(step for step in self.steps if step.get("id") == "restore")
@@ -144,7 +171,8 @@ class RunnerGateTests(unittest.TestCase):
 
     def test_explicit_opt_in_on_other_linux_runners(self):
         self.assertEqual(
-            self.active_steps(runner("github-hosted", cachew="true")), ["session", "cachew", "checkout", "configure"]
+            self.active_steps(runner("github-hosted", cachew="true\n")),
+            ["mode", "session", "cachew", "checkout", "configure"],
         )
 
     def test_official_checkout_is_unmodified(self):

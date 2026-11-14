@@ -95,17 +95,32 @@ outputs:
 runs:
   using: composite
   steps:
-    # The gate is evaluated by the runner, before any process starts. On
-    # GitHub-hosted runners (no access to the CI VLAN) every cachew step is
-    # skipped and only the official checkout below runs, exactly as before.
+    # Expressions cannot trim, so the cachew input and CACHEW_CHECKOUT are read
+    # here, trimmed and lowercased as actions/checkout reads its inputs:
+    # `cachew: "false\n"` opts out like `false`. Prints false, true or auto.
+    - name: Read the cachew setting
+      id: mode
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        CACHEW_INPUT: ${{ inputs.cachew }}
+      run: |
+        normalize() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "${v,,}"; }
+        mode="$(normalize "$CACHEW_INPUT")"
+        [ "$(normalize "${CACHEW_CHECKOUT:-}")" = false ] && mode=false
+        case "$mode" in false | true) ;; *) mode=auto ;; esac
+        echo "cachew=$mode" >>"$GITHUB_OUTPUT"
+    # The rest of the gate is evaluated by the runner. On GitHub-hosted runners
+    # (no access to the CI VLAN) every cachew step is skipped and only the
+    # official checkout below runs, exactly as before.
     # Once an earlier checkout activated a session, this step also runs with
     # cachew disabled: the job-wide rewrite and Git wrapper are already in place,
     # and only prepare takes them out of this checkout's way.
     - name: Prepare isolated upstream Git configuration
       id: session
       if: >-
-        runner.os == 'Linux' && (env.CACHEW_SESSION_DIR != '' || (env.CACHEW_CHECKOUT != 'false' &&
-        inputs.cachew != 'false' && (inputs.cachew == 'true' || runner.environment == 'self-hosted')))
+        runner.os == 'Linux' && (env.CACHEW_SESSION_DIR != '' || steps.mode.outputs.cachew == 'true' ||
+        (steps.mode.outputs.cachew == 'auto' && runner.environment == 'self-hosted'))
       shell: bash
       env:
         CACHEW_CACHEW_URL: ${{ inputs.cachew-url }}
@@ -120,7 +135,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/session/prepare.sh"
     - name: Checkout from cachew
       id: cachew
-      if: steps.session.outputs.ready == 'true' && env.CACHEW_CHECKOUT != 'false' && inputs.cachew != 'false'
+      if: steps.session.outputs.ready == 'true' && steps.mode.outputs.cachew != 'false'
       continue-on-error: true
       shell: bash
       env:
@@ -210,6 +225,6 @@ runs:
         CACHEW_REPOSITORY: ${{ inputs.repository }}
         CACHEW_PATH: ${{ inputs.path }}
         # Not for an opted-out checkout: its token must not reach the cache.
-        CACHEW_TOKEN: ${{ (inputs.cachew != 'false' && env.CACHEW_CHECKOUT != 'false') && inputs.token || '' }}
+        CACHEW_TOKEN: ${{ steps.mode.outputs.cachew != 'false' && inputs.token || '' }}
         CACHEW_PERSIST_CREDENTIALS: ${{ inputs.persist-credentials }}
       run: '"$CACHEW_NODE" "$CACHEW_CONFIG_HELPER" activate'

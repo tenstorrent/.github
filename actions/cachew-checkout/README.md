@@ -33,9 +33,11 @@ Cachew is only reachable from runners on the CI VLAN. With the default
 `cachew: auto`, the runner skips every cachew step unless
 `runner.environment == 'self-hosted'` and `runner.os == 'Linux'`. On GitHub-hosted
 runners (`ubuntu-latest`, `ubuntu-slim`, larger runners) the action is exactly the
-pinned `actions/checkout`: no probe, no token, no Git wrapper and no configuration
-change. A job or workflow `env: CACHEW_CHECKOUT: 'false'` disables cachew for every
-checkout in its scope without editing each step. After an earlier checkout in the
+pinned `actions/checkout` plus, on Linux, one step that reads the `cachew`
+setting: no probe, no token, no Git wrapper and no configuration change. A job or
+workflow `env: CACHEW_CHECKOUT: 'false'` disables cachew for every checkout in its
+scope without editing each step. Both are trimmed and read in any case, as
+actions/checkout reads its inputs, so `cachew: "false\n"` opts out too. After an earlier checkout in the
 job activated cachew, a `cachew: false` checkout still runs the session's prepare
 step, so the official checkout runs upstream with its own throwaway global file;
 the job-wide rewrite stays in place for later steps.
