@@ -194,6 +194,9 @@ def verify_pins(root, action_sha, exclude=()):
     problems = []
     pins = {}
     for path in tracked_consumers(root, exclude):
+        # Files --write leaves alone (gh-aw lock files) are not held to its pin.
+        if excluded(path, exclude):
+            continue
         for match in ANY_PIN.finditer((root / path).read_text()):
             if match["repo"] == LEGACY_REPO:
                 problems.append(f"{path} references {match[0]}; the action moved to {ACTION_REPO} (run --write)")

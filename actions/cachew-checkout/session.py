@@ -304,6 +304,15 @@ def include_target(value, source, environ):
     return os.path.join(os.path.dirname(os.path.abspath(source)), value)
 
 
+def anchored_condition(key, source, environ):
+    """An includeIf key whose `gitdir:./` or `gitdir:~/` pattern no longer depends
+    on which file holds it: `./` means the directory of that file."""
+    relative = {"./": os.path.dirname(os.path.abspath(source)), "~/": home_directory(environ)}
+    return re.sub(
+        r"^(includeif\.gitdir(?:/i)?:)(\./|~/)", lambda m: f"{m[1]}{relative[m[2]]}/", key, flags=re.IGNORECASE
+    )
+
+
 def home_directory(environ):
     return environ.get("HOME") or os.path.expanduser("~")
 
@@ -343,14 +352,7 @@ def copy_globals(session, real_git, environ, caches):
             if key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower()):
                 if not (copied := copy(include_target(value, source, environ))):
                     continue
-                value = str(copied)
-                relative = {"./": os.path.dirname(source), "~/": home}
-                key = re.sub(
-                    r"^(includeif\.gitdir(?:/i)?:)(\./|~/)",
-                    lambda m: f"{m[1]}{relative[m[2]]}/",
-                    key,
-                    flags=re.IGNORECASE,
-                )
+                key, value = anchored_condition(key, source, environ), str(copied)
             entries.append((key, value))
         write_private(destination, render(entries))
         return destination
@@ -361,12 +363,15 @@ def copy_globals(session, real_git, environ, caches):
 def flatten(real_git, environ, file, skip):
     """Entries of a config file with unconditional includes inlined, except keys
     named in skip. Conditional includes stay directives, evaluated when Git reads
-    the result; inlining them would apply one repository's settings everywhere."""
+    the result; inlining them would apply one repository's settings everywhere.
+    Their paths are made absolute, since the result lives in another directory."""
     entries = []
     for key, value in config_entries(real_git, environ, "--file", str(file), "--no-includes"):
         if key.lower() == "include.path":
             included = include_target(value, file, environ)
             entries += flatten(real_git, environ, included, skip) if os.path.exists(included) else []
+        elif re.fullmatch(r"includeif\..*\.path", key.lower()):
+            entries.append((anchored_condition(key, file, environ), include_target(value, file, environ)))
         elif key.lower() not in skip:
             entries.append((key, value))
     return entries

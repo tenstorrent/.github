@@ -201,6 +201,14 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(code, 1, ref)
             self.assertIn(ref, out)
 
+    def test_files_write_leaves_alone_are_not_held_to_its_pin(self):
+        lock = self.root / ".github/workflows/agent.lock.yml"
+        lock.write_text(lock.read_text().replace(PLAIN, f"tenstorrent/.github/actions/cachew-checkout@{'d' * 40}"))
+        self.assertEqual(self.run_main("--write", "--action-sha", "b" * 40)[0], 0)
+        self.assertIn("@" + "d" * 40, lock.read_text())
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 0, out)
+
     def test_bad_config_is_reported(self):
         for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of path prefixes")):
             self.write_config(data)

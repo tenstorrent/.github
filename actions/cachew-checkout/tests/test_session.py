@@ -522,6 +522,26 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(self.activate("true"))
         self.finish()
 
+    def test_conditional_includes_inside_a_job_include_keep_their_paths(self):
+        # Relative paths in an included file's includeIf (the path and a gitdir:./
+        # pattern) mean that file's directory, not the flattened copy's.
+        self.assertEqual(self.flow(), (True, True))
+        included = self.fixture.root / "job-includes"
+        nested = included / "nested"
+        subprocess.run(["git", "init", "-q", str(nested)], check=True)
+        (included / "by-path.config").write_text("[fixture]\n\tbypath = matched\n")
+        (included / "by-gitdir.config").write_text("[fixture]\n\tbygitdir = matched\n")
+        (included / "conditions.config").write_text(
+            f'[includeIf "gitdir:{nested.resolve()}/"]\n\tpath = by-path.config\n'
+            '[includeIf "gitdir:./nested/"]\n\tpath = by-gitdir.config\n'
+        )
+        self.real_git("config", "--global", "--add", "include.path", str(included / "conditions.config"))
+        self.prepare()
+        for key in ("fixture.bypath", "fixture.bygitdir"):
+            self.assertEqual(self.real_git("-C", str(nested), "config", "--global", "--includes", "--get", key), "matched", key)
+        self.assertTrue(self.activate("true"))
+        self.finish()
+
     def test_activation_never_writes_past_another_writers_lock(self):
         # Activation writes the job's file under Git's lock: while another writer
         # holds it, caching stays off rather than racing that writer.
