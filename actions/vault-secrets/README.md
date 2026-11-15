@@ -12,6 +12,9 @@ The action does these steps:
 The Vault grant for your repository must exist first. OSPO keeps the grants in
 `github-vault-iac` (`grants/repos/<org>/<repo>.yaml`).
 
+To change an existing workflow, read [RETROFIT.md](RETROFIT.md). To build a new
+one, use the skill [vault-secrets-workflow](../../skills/vault-secrets-workflow/SKILL.md).
+
 ## Usage
 
 The job needs this permission:
