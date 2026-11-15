@@ -378,20 +378,28 @@ def run(arguments, environ):
     except (OSError, ValueError):
         # A missing session must not prevent Git from running after the runner empties RUNNER_TEMP.
         return subprocess.call([real_git, *arguments], env=environ)
-    if (session / "cache-disabled").exists():
-        with UpstreamView(real_git, environ, session, state) as upstream:
-            return subprocess.call([real_git, *arguments], env=upstream)
-    if not state.get("active"):
-        return subprocess.call([real_git, *arguments], env=environ)
     command = arguments[index]
     target = CloneTarget(arguments, index)
 
     def done(result):
         # However the clone or fetch went, later lazy fetches would use the rewrite.
+        # Pins only remotes the rewrite still reaches, so it is a no-op without one.
         location = ["-C", str(target.path)] if command == "clone" and target.path else arguments[:index]
         if result == 0 and command in ("clone", "fetch"):
             pin_promisor_remotes(real_git, location, environ, state.get("cache"))
         return result
+
+    if (session / "cache-disabled").exists():
+        if state.get("managed"):
+            # The disable could not remove every key (the file was locked, or a
+            # concurrent disable is midway). Try again: Git's own lazy fetches
+            # read the job file, not the upstream view, and would follow a
+            # leftover rewrite to the failed cache with no retry.
+            state = remove_cache_keys(real_git, session, state, environ)
+        with UpstreamView(real_git, environ, session, state) as upstream:
+            return done(subprocess.call([real_git, *arguments], env=upstream))
+    if not state.get("active"):
+        return subprocess.call([real_git, *arguments], env=environ)
 
     if command in ("clone", "fetch", "ls-remote", "push", "pull", "submodule", "remote") and direct_network_operation(
         real_git, arguments, index, environ

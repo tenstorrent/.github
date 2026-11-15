@@ -317,6 +317,34 @@ class DownstreamGitTests(unittest.TestCase):
         self.run_git("ls-remote", self.upstream.url + "/org/cmake-dependency")
         self.assertEqual(self.cache.requests, [])
 
+    def test_disabled_session_retries_removing_a_leftover_rewrite(self):
+        # The disable could not remove the rewrite (locked file); the next read
+        # removes it, so Git's own lazy fetches stop following it too.
+        self.dependency("cmake-dependency")
+        (self.session / "cache-disabled").touch()
+        self.run_git("ls-remote", self.upstream.url + "/org/cmake-dependency")
+        self.assertEqual(self.cache.requests, [])
+        self.assert_disabled()
+        self.assertEqual(json.loads((self.session / "state.json").read_text())["managed"], [])
+
+    def test_disabled_partial_clone_with_a_stuck_rewrite_lazy_fetches_upstream(self):
+        # The rewrite stays in the job file (still locked), so the partial clone
+        # made upstream must be pinned there, or its lazy fetches go to the cache.
+        self.dependency("cmake-dependency")
+        (self.session / "cache-disabled").touch()
+        lock = self.session / "global.config.lock"
+        lock.touch()
+        self.addCleanup(lock.unlink, missing_ok=True)
+        self.cache.fail_repo = "cmake-dependency"
+        target = self.root / "partial"
+        url = self.upstream.url + "/org/cmake-dependency"
+        self.run_git("clone", "--filter=blob:none", "--no-checkout", url, str(target))
+        self.assertEqual(self.cache.requests, [])
+        self.assertIn(self.cache.url.encode(), (self.session / "global.config").read_bytes())
+        self.assertEqual(self.run_git("-C", str(target), "config", "--get-all", f"url.{url}.insteadOf"), url)
+        self.assertIn("cmake_minimum_required", self.run_git("-C", str(target), "show", "HEAD:CMakeLists.txt"))
+        self.assertEqual(self.cache.requests, [])
+
     def test_disable_keeps_keys_it_could_not_remove(self):
         wrapper = load_wrapper()
         lock = self.session / "global.config.lock"
