@@ -597,6 +597,38 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(self.activate())
         self.finish()
 
+    def test_rewrite_kept_by_a_locked_file_never_takes_lazy_fetches(self):
+        # A later filtered checkout cannot remove the rewrite from the locked job
+        # file: its promisor origin is pinned upstream anyway, and the next
+        # wrapped command removes the rewrite once the lock is gone.
+        self.assertEqual(self.flow(), (True, True))
+        global_config = Path(self.env["CACHEW_SESSION_DIR"]) / "global.config"
+        self.fixture.update_main()
+        old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")
+        self.env.update(CACHEW_FILTER="blob:none", CACHEW_SUBMODULES="false", CACHEW_PATH="filtered")
+        lock = global_config.with_name("global.config.lock")
+        lock.touch()
+        try:
+            self.prepare()
+            self.assertFalse(self.fixture.attempt())
+            self.checkout()
+            self.assertFalse(self.activate())
+            self.assertIn(self.fixture.cache.url, global_config.read_text())
+            target = str(self.fixture.workspace / "filtered")
+            cache_before = list(self.fixture.cache.requests)
+            self.fixture.upstream.requests.clear()
+            self.assertEqual(self.real_git("-C", target, "cat-file", "-p", old_blob), "main")
+            self.assertEqual(self.fixture.cache.requests, cache_before)
+            self.assertIn("POST", [method for method, _, _ in self.fixture.upstream.requests])
+        finally:
+            lock.unlink()
+        wrapped = subprocess.run(
+            ["git", "ls-remote", f"{self.fixture.upstream.url}/org/main"], env=self.env, capture_output=True, text=True
+        )
+        self.assertEqual(wrapped.returncode, 0, wrapped.stderr)
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        self.finish()
+
     def assert_lazy_fetches_stay_upstream(self, cached):
         self.fixture.update_main()
         old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")

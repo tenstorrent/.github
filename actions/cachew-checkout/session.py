@@ -497,6 +497,11 @@ def activate(environ):
     state = read_state(session)
     real_git = state["real_git"]
     global_config = session / "global.config"
+    checkout = Path(environ.get("GITHUB_WORKSPACE", "."), checkout_input(environ, "CACHEW_PATH"))
+    view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
+    # First, whatever fails below: a rewrite an earlier activation left in a
+    # locked file still redirects this checkout's lazy fetches.
+    pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"))
     settings = Settings(environ)
     token = checkout_input(environ, "CACHEW_TOKEN")
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -548,8 +553,6 @@ def activate(environ):
         write_state(session, state)
         append_locked(global_config, render(entries))
         state["active"] = True
-        checkout = Path(environ.get("GITHUB_WORKSPACE", "."), checkout_input(environ, "CACHEW_PATH"))
-        view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
         pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache)
         write_state(session, state)
         wrapper = session / "bin"
