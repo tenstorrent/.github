@@ -335,13 +335,14 @@ class Checkout:
         self.cache_config = config
         apply_git_config(self.env, config)
 
-    def run_git(self, command, env, message, upstream=False, input=None):
+    def run_git(self, command, env, message, upstream=False, input=None, cwd=None):
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise Bypass("cache checkout time budget exhausted", transport=not upstream)
         with subprocess.Popen(
             command,
             env=env,
+            cwd=cwd,
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -390,10 +391,16 @@ class Checkout:
         return self.run_git(command, env, "sparse checkout")
 
     def ls_remote(self, *arguments):
-        """The only upstream contact: names resolve there, objects come from the cache."""
-        output = self.run_git(
-            [self.git_executable, "ls-remote", *arguments], self.upstream_env, "upstream ref lookup", upstream=True
-        )
+        """The only upstream contact: names resolve there, objects come from the cache.
+
+        Runs outside any repository. From the step's working directory, a checkout
+        at the workspace root would add its persisted credentials (a second
+        Authorization header, which GitHub rejects) and its own URL rewrites."""
+        with tempfile.TemporaryDirectory(prefix="cachew-lookup-") as empty:
+            env = dict(self.upstream_env, GIT_CEILING_DIRECTORIES=os.path.dirname(empty))
+            output = self.run_git(
+                [self.git_executable, "ls-remote", *arguments], env, "upstream ref lookup", upstream=True, cwd=empty
+            )
         refs, symrefs = {}, {}
         for line in output.decode().splitlines():
             value, _, name = line.partition("\t")

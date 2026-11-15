@@ -856,6 +856,20 @@ class CheckoutTests(unittest.TestCase):
             git(self.target, "rev-parse", "refs/tags/v1.0.0^{commit}"), git(self.target, "rev-parse", "HEAD~1")
         )
 
+    def test_named_ref_after_a_workspace_root_checkout_sends_one_authorization(self):
+        # Composite steps run in the workspace. A checkout at its root persists
+        # credentials there; the upstream name lookup must not add them to its own.
+        self.env["CACHEW_PATH"] = ""
+        self.target = self.workspace
+        self.assertTrue(self.attempt())
+        directory = os.getcwd()
+        self.addCleanup(os.chdir, directory)
+        os.chdir(self.workspace)
+        self.env.update(CACHEW_PATH="second", CACHEW_REF="main")
+        self.target = self.workspace / "second"
+        self.assertTrue(self.attempt())
+        self.assertEqual(self.upstream.duplicate_auth, [])
+
     def test_upstream_name_lookup_uses_the_token_and_failure_falls_back(self):
         expected = "basic " + base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode()
         self.upstream.required_auth["main"] = expected
