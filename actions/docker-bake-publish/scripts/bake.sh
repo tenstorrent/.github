@@ -83,8 +83,9 @@ mapfile -t TARGETS < <(printf '%s' "$RESOLVED" | jq -r '.target | keys[]')
 # and the last value of a key wins.
 # push_on mirrors BuildKit's image exporter: an empty push= means true, and any
 # other value goes through Go's strconv.ParseBool (1, t, T, TRUE, true, True).
-# An absent push attribute is false for type=image and true for type=registry;
-# an explicit push=false is honored for both. Anything that pushes must be gated.
+# An absent push attribute is false. type=registry always pushes: current buildx
+# (build/opt.go) sets push=true on it even over an explicit push=false, so it is
+# never treated as local. Anything that pushes must be gated.
 # shellcheck disable=SC2016
 OUTPUT_DEFS='
   def key: ascii_downcase | gsub("^\\s+|\\s+$"; "");
@@ -101,7 +102,7 @@ OUTPUT_DEFS='
 CLASSIFY_JQ="${OUTPUT_DEFS}"'
   .target | to_entries | map(
     (.value.output // [] | map(kv)) as $outs
-    | ($outs | map(select((.type == "registry" and (.push == null or (.push | push_on))) or (.type == "image" and (.push | push_on))))) as $push
+    | ($outs | map(select(.type == "registry" or (.type == "image" and (.push | push_on))))) as $push
     | {
         name: .key,
         pushed: ($push | length > 0),
