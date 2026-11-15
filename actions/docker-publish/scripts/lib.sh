@@ -95,9 +95,12 @@ require_publishable_tag() {
 }
 
 # Fail unless an image reference is pinned by digest (name[:tag]@sha256:<64 hex>).
+# The whole reference is checked, not just its suffix: callers interpolate it
+# into CSV attributes (attest=type=sbom,generator=<ref>), where a comma, quote,
+# `=` or whitespace would split off the digest and leave a mutable tag behind.
 # Usage: require_digest_pinned <ref> <what-it-is>
 require_digest_pinned() {
-  [[ "$1" =~ @sha256:[0-9a-f]{64}$ ]] \
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9._/:-]*[a-z0-9])?(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?@sha256:[0-9a-f]{64}$ ]] \
     || die "$2 must be pinned by digest (name@sha256:...), got '$1'. Tags are mutable and are not accepted."
 }
 

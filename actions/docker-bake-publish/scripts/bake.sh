@@ -79,18 +79,21 @@ mapfile -t TARGETS < <(printf '%s' "$RESOLVED" | jq -r '.target | keys[]')
 # Normalizes each output to an object. buildx 0.20 prints objects; older
 # versions (0.16 and earlier, at least) print the CSV string as written, so kv
 # decodes it the way buildx does: a field is either quoted whole ("" escapes a
-# quote) or unquoted, keys are lowercased, and the last value of a key wins.
+# quote) or unquoted, keys are trimmed and lowercased (`push =true` is push),
+# and the last value of a key wins.
 # push_on mirrors BuildKit's image exporter: an empty push= means true, and any
 # other value goes through Go's strconv.ParseBool (1, t, T, TRUE, true, True).
-# An absent push attribute is false. Anything that pushes must be gated.
+# An absent push attribute is false for type=image and true for type=registry;
+# an explicit push=false is honored for both. Anything that pushes must be gated.
 # shellcheck disable=SC2016
 OUTPUT_DEFS='
+  def key: ascii_downcase | gsub("^\\s+|\\s+$"; "");
   def kv: if type == "string" then
       reduce ([scan("(?:^|,)(\"(?:[^\"]|\"\")*\"|[^,]*)") | .[0]
                | if startswith("\"") then .[1:-1] | gsub("\"\""; "\"") else . end
                | select(. != "")] | .[]) as $f
         ({}; ($f | index("=")) as $i
-             | if $i == null then .[$f | ascii_downcase] = "" else .[$f[:$i] | ascii_downcase] = $f[$i + 1:] end)
+             | if $i == null then .[$f | key] = "" else .[$f[:$i] | key] = $f[$i + 1:] end)
     else . end;
   def push_on: if . == null then false else (tostring | IN("", "1", "t", "T", "TRUE", "true", "True")) end;
   def csv_field: if test("[,\"\n\r]") then "\"" + gsub("\""; "\"\"") + "\"" else . end;'
@@ -98,7 +101,7 @@ OUTPUT_DEFS='
 CLASSIFY_JQ="${OUTPUT_DEFS}"'
   .target | to_entries | map(
     (.value.output // [] | map(kv)) as $outs
-    | ($outs | map(select(.type == "registry" or (.type == "image" and (.push | push_on))))) as $push
+    | ($outs | map(select((.type == "registry" and (.push == null or (.push | push_on))) or (.type == "image" and (.push | push_on))))) as $push
     | {
         name: .key,
         pushed: ($push | length > 0),
@@ -185,6 +188,14 @@ PIN_JQ="${OUTPUT_DEFS}"'
 
 layout_of() { printf '%s/%s' "$LAYOUT_ROOT" "$1"; }
 
+# Buildx rejects attestations on a docker exporter that writes an archive
+# (type=docker,dest=...), so such a local target builds without them. It is
+# never pushed, so nothing published loses its provenance or SBOM.
+is_docker_archive() {  # <target>
+  [ "$(printf '%s' "$RESOLVED" | jq --arg t "$1" "${OUTPUT_DEFS}"'
+    [.target[$t].output[]? | kv | .type == "docker" and (.dest // "") != ""] | any')" = true ]
+}
+
 # NUL-delimited: an exporter annotation may hold a newline.
 overrides() {  # <generator-image>
   local t info
@@ -197,7 +208,7 @@ overrides() {  # <generator-image>
   done
   for t in "${LOCAL[@]}"; do
     printf '%s' "$RESOLVED" | jq -j --arg t "$t" "$PIN_JQ"' | . + "\u0000"'
-    if [ "${INPUT_ENABLE_ATTESTATIONS:-true}" = true ]; then
+    if [ "${INPUT_ENABLE_ATTESTATIONS:-true}" = true ] && ! is_docker_archive "$t"; then
       printf '%s\0' "${t}.attest=type=provenance,mode=max" "${t}.attest=type=sbom,generator=$1"
     else
       printf '%s\0' "${t}.attest=type=provenance,disabled=true" "${t}.attest=type=sbom,disabled=true"

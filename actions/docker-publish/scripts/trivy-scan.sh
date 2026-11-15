@@ -40,9 +40,12 @@ scanner_on() { [[ ",${SCANNERS}," == *",$1,"* ]]; }
 # Everything but crypto goes into the gating JSON scan.
 GATE_SCANNERS="$(printf '%s' "$SCANNERS" | tr ',' '\n' | { grep -vx 'crypto' || true; } | paste -sd, -)"
 
-# No --exit-code: Trivy then exits non-zero only on an error, and which findings
-# fail the gate is decided from the JSON report below.
+# --exit-code 0: Trivy then exits non-zero only on an error, and which findings
+# fail the gate is decided from the JSON report below. It is passed explicitly,
+# not left at its default, because a caller's TRIVY_EXIT_CODE or trivy.yaml
+# `exit-code` would otherwise turn findings into a scan error.
 TRIVY_ARGS=(
+  --exit-code 0
   --severity "$SEVERITY"
   --scanners "$GATE_SCANNERS"
   --format json
@@ -157,7 +160,7 @@ layer_private_keys() {  # <view-dir>
     jq -c --argjson i "$i" --argjson c "$cdesc" '.layers |= [.[$i]] | .config = $c' <<< "$manifest" > "${dir}/blob"
     jq -n --argjson m "$(put_blob "$dir" "$(jq -c '.mediaType // "application/vnd.oci.image.manifest.v1+json"' <<< "$manifest")")" \
       '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [$m]}' > "${dir}/index.json"
-    trivy image --quiet --scanners crypto --format cyclonedx --output "${dir}/cbom.json" --input "$dir" >&2 \
+    trivy image --quiet --exit-code 0 --scanners crypto --format cyclonedx --output "${dir}/cbom.json" --input "$dir" >&2 \
       || die "Trivy's crypto scan errored on layer ${digest}; the private key check cannot run. See log above."
     jq -r '.components[]? | select(.cryptoProperties.relatedCryptoMaterialProperties.type? == "private-key")
       | .name as $n | (.cryptoProperties.relatedCryptoMaterialProperties.fingerprint.content // "unknown") as $fp
@@ -180,7 +183,7 @@ put_blob() {  # <layout-dir> <media-type-json>
 crypto_inventory() {  # <view-dir> <platform>
   local cbom="${REPORT_DIR}/cbom-${2//\//-}.cdx.json" certs weak fp path name layer keys=0 allowed=0
   CRYPTO_BLOCKING=0
-  trivy image --scanners crypto --format cyclonedx --output "$cbom" --input "$1" >&2 \
+  trivy image --exit-code 0 --scanners crypto --format cyclonedx --output "$cbom" --input "$1" >&2 \
     || die "Trivy's crypto scan errored on ${2}; the private key check cannot run. See log above."
   certs="$(jq '[.components[]? | select(.cryptoProperties.assetType? == "certificate")] | length' "$cbom")"
   # One line per file holding a key, per layer.
@@ -235,7 +238,7 @@ for ((p = 0; p < ${#PLATFORMS[@]}; p++)); do
       trivy image "${TRIVY_ARGS[@]}" --output "$report" --input "${VIEWS}/${p}" || status=$?
     fi
     [ "$status" -eq 0 ] || die "Trivy errored scanning ${platform} (exit ${status}); see log above."
-    trivy convert --format table "$report"
+    trivy convert --exit-code 0 --format table "$report"
 
     vulns="$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' "$report")"
     # Misconfigurations lists only failures unless --include-non-failures is set;

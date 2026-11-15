@@ -198,7 +198,9 @@ or users pull) MUST keep the SBOM.
 Targets whose output pushes to a registry are rewritten to export a local OCI
 layout (keeping exporter options such as compression) and go through the
 pipeline; their `tags` are applied at the end. Targets that do
-not push (`type=docker`, local exports) are built unchanged and are not gated.
+not push (`type=docker`, local exports, `type=registry,push=false`) are built
+unchanged and are not gated. A `type=docker,dest=...` archive target is built
+without attestations, which buildx does not support for that exporter.
 
 Output: `images`, a JSON array with one `{name, repo, digest, build_digest,
 tags}` entry per published target (`[]` when no target pushes).

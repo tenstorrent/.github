@@ -15,7 +15,7 @@
 # Usage: publish-tags.sh <primary-repo>@<index-digest>
 # Env:   INPUT_TAGS (newline separated fully-qualified name:tag; validated by
 #        prepare.sh or bake.sh), ATTEST_SBOM (default true: copies to other
-#        repositories must include at least one signed SBOM bundle),
+#        repositories must include a signed SBOM bundle for every platform),
 #        PUBLISH_PHASE (stage, tag or all; default all)
 
 set -euo pipefail
@@ -40,23 +40,39 @@ esac
 # Registry output is captured into variables before looping: a failing command
 # substitution in a `for` word list would not trip `set -e`.
 SBOM_BUNDLES=()  # "<subject> <bundle-digest>"
+# attest-sbom.sh signs one bundle per platform image, so with ATTEST_SBOM every
+# platform must have one: a missing platform would publish copies that lack its
+# signed SBOM. A referrer can take a moment to become discoverable after
+# actions/attest pushes it, so discovery is retried before failing.
+SBOM_DISCOVERY_ATTEMPTS=5
+SBOM_DISCOVERY_DELAY_SECONDS=10
+discover_bundles() {  # <subject> -> bundle digests, one per line
+  local referrers
+  referrers="$(oras discover --format json --artifact-type "$SIGSTORE_BUNDLE_TYPE" "${PRIMARY_REPO}@$1")"
+  printf '%s' "$referrers" | jq -r '.referrers[]?.digest'
+}
 find_sbom_bundles() {
-  local index platforms subjects subject referrers refs ref
+  local index platforms subject refs ref attempt missing
   index="$(oras manifest fetch "$SRC")"
   platforms="$(printf '%s' "$index" | jq -r '.manifests[] | select(.platform.os != "unknown") | .digest')"
-  subjects="${DIGEST}"$'\n'"${platforms}"
-  while IFS= read -r subject; do
-    [ -n "$subject" ] || continue
-    referrers="$(oras discover --format json --artifact-type "$SIGSTORE_BUNDLE_TYPE" "${PRIMARY_REPO}@${subject}")"
-    refs="$(printf '%s' "$referrers" | jq -r '.referrers[]?.digest')"
-    while IFS= read -r ref; do
-      [ -n "$ref" ] || continue
-      SBOM_BUNDLES+=("${subject} ${ref}")
-    done <<< "$refs"
-  done <<< "$subjects"
-  if [ "${ATTEST_SBOM:-true}" = true ] && [ "${#SBOM_BUNDLES[@]}" -eq 0 ]; then
-    die "No signed SBOM bundle found as a referrer of ${SRC} or its platform images; refusing to publish copies without it."
-  fi
+  [ -n "$platforms" ] || die "No platform images found in ${SRC}."
+  for ((attempt = 1; ; attempt++)); do
+    SBOM_BUNDLES=()
+    missing=()
+    while IFS= read -r subject; do
+      [ -n "$subject" ] || continue
+      refs="$(discover_bundles "$subject")"
+      [ -n "$refs" ] || { [ "$subject" = "$DIGEST" ] || missing+=("$subject"); continue; }
+      while IFS= read -r ref; do
+        [ -n "$ref" ] && SBOM_BUNDLES+=("${subject} ${ref}")
+      done <<< "$refs"
+    done <<< "${DIGEST}"$'\n'"${platforms}"
+    [ "${ATTEST_SBOM:-true}" = true ] && [ "${#missing[@]}" -gt 0 ] || return 0
+    [ "$attempt" -lt "$SBOM_DISCOVERY_ATTEMPTS" ] \
+      || die "No signed SBOM bundle found as a referrer of platform image(s) ${missing[*]} of ${SRC}; refusing to publish copies without them."
+    log "signed SBOM bundle not yet discoverable for ${missing[*]}; retrying in ${SBOM_DISCOVERY_DELAY_SECONDS}s (attempt ${attempt}/${SBOM_DISCOVERY_ATTEMPTS})"
+    sleep "$SBOM_DISCOVERY_DELAY_SECONDS"
+  done
 }
 
 copy_sbom_bundles() {  # <dest-repo>
