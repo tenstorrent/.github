@@ -132,6 +132,7 @@ one job.
 |---|---|---|
 | `job needs permissions: id-token: write (not available on fork pull requests)` | The job has no OIDC token. | Add `id-token: write` to the job permissions. Fork pull requests never get it. |
 | `refused on pull_request_target` | The workflow runs on `pull_request_target`. | Use another event. Vault never accepts this event. |
+| `Vault gave an empty value for <NAME>` | The field does not exist at that path, or the stored value is empty. Vault does not refuse a wrong field name. | Check the field name on your OSPO ticket. |
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role is empty` / `... characters ...` | `role` is missing or not valid. | Set the role name from your grant. |
 | `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the token name only, without `token` or `\|`. |

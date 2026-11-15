@@ -51,13 +51,13 @@ inputs:
 outputs:
   token:
     description: The GitHub token from `github-token`. Empty when `github-token` is not set or the action failed. Masked in logs.
-    value: ${{ steps.vault.outputs.VAULT_SECRETS_GITHUB_TOKEN }}
+    value: ${{ steps.check.outcome == 'success' && steps.vault.outputs.VAULT_SECRETS_GITHUB_TOKEN || '' }}
   secrets:
     description: >-
       JSON object with one key per name in `secrets`. When `github-token` is set,
       it also has the key VAULT_SECRETS_GITHUB_TOKEN. `{}` when the action failed.
       Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Values are masked in logs.
-    value: ${{ toJSON(steps.vault.outputs) }}
+    value: ${{ steps.check.outcome == 'success' && toJSON(steps.vault.outputs) || '{}' }}
 
 runs:
   using: composite
@@ -104,3 +104,12 @@ runs:
         jwtGithubAudience: ${{ steps.prepare.outputs.url }}
         exportEnv: false
         secrets: ${{ steps.prepare.outputs.spec }}
+
+    # vault-action gives an empty string for a field that does not exist, and
+    # does not fail. An empty value is always an error here. Names only in the log.
+    - name: Check that no value is empty
+      id: check
+      shell: bash
+      env:
+        VAULT_OUTPUTS: ${{ toJSON(steps.vault.outputs) }}
+      run: bash "$GITHUB_ACTION_PATH/check-values.sh"
