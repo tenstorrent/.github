@@ -184,6 +184,12 @@ repository-local `insteadOf` as the checkout's `origin`.
 Native recursive clones, submodule and `remote` commands, initialized-submodule
 fetches, pushes and pulls use upstream directly.
 
+Commands sent upstream directly, and every network command once caching is off,
+run with a private copy of the job's global file without the cache rewrite. A
+`git config --global` write made by their child processes (a `git submodule
+foreach` script, a hook) lands in that copy and is lost. Write global settings
+from the step itself, or use `--local` inside such commands.
+
 ## Tests
 
 ```sh
