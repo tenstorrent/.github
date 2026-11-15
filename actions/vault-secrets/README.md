@@ -81,6 +81,14 @@ When `github-token` is set, `secrets` also has the key
 in `secrets`; the action refuses it.
 
 When the action fails, `token` is empty and `secrets` is `{}`.
+When the step is skipped (an `if:` that is false), both outputs are empty.
+`fromJSON('')` is an error. For a login that is optional, read a value with
+`fromJSON(steps.<id>.outputs.secrets || '{}').<NAME>`.
+
+`github-token` gets one token. To get more than one token in one call, put
+one line for each token in `secrets`, for example
+`github/token/<name> token | TOKEN_A ;`.
+In `secrets`, end each line except the last with `;`.
 
 All values are masked in the log. hashicorp/vault-action registers a mask for
 each value (and for each line of a multi-line value). The runner masks a value
