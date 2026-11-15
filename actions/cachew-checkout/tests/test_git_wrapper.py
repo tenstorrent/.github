@@ -461,6 +461,33 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(self.run_git("-C", str(self.root / "stalled"), "rev-parse", "--is-inside-work-tree"), "true")
         self.assert_disabled()
 
+    def test_killed_clone_cleanup_covers_the_second_directory(self):
+        # Git removes both directories itself on an ordinary failure; after a
+        # SIGKILL only this cleanup stands between the leftovers and the retry.
+        wrapper = load_wrapper()
+        url = self.upstream.url + "/org/main"
+        cases = [
+            (["clone", "--separate-git-dir", str(self.root / "sep-a"), url, str(self.root / "dest-a")], {}, "sep-a"),
+            (["clone", f"--separate-git-dir={self.root / 'sep-b'}", url, str(self.root / "dest-b")], {}, "sep-b"),
+            ([f"--work-tree={self.root / 'wt-c'}", "clone", url, str(self.root / "dest-c")], {}, "wt-c"),
+            (["clone", url, str(self.root / "dest-d")], {"GIT_WORK_TREE": str(self.root / "wt-d")}, "wt-d"),
+        ]
+        kept = self.root / "existing"
+        kept.mkdir()
+        (kept / "mine").write_text("keep")
+        for arguments, environ, second in cases:
+            with self.subTest(arguments=arguments):
+                target = wrapper.CloneTarget(arguments, wrapper.command_index(arguments), environ)
+                for leftover in (target.path, self.root / second):
+                    leftover.mkdir()
+                    (leftover / "partial").write_text("left by a killed clone")
+                target.reset()
+                self.assertFalse(target.path.exists())
+                self.assertFalse((self.root / second).exists())
+        arguments = ["clone", f"--separate-git-dir={kept}", url, str(self.root / "dest-e")]
+        wrapper.CloneTarget(arguments, 0, {}).reset()
+        self.assertEqual((kept / "mine").read_text(), "keep")
+
     def test_clone_destination_parsing(self):
         wrapper = load_wrapper()
         cwd = Path.cwd()

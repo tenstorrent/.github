@@ -207,25 +207,50 @@ def clone_destination(arguments, index):
     return working_directory(arguments, index) / name
 
 
-class CloneTarget:
-    """Remove what a failed cache clone left behind before the upstream retry."""
+def option_value(arguments, name):
+    """The last value of `name <value>` or `name=<value>` in arguments, or None."""
+    value = None
+    for position, arg in enumerate(arguments):
+        if arg == "--":
+            break
+        if arg == name and position + 1 < len(arguments):
+            value = arguments[position + 1]
+        elif arg.startswith(name + "="):
+            value = arg[len(name) + 1 :]
+    return value
 
-    def __init__(self, arguments, index):
+
+class CloneTarget:
+    """Remove what a failed cache clone left behind before the upstream retry:
+    its destination and, with `--separate-git-dir` or a separate work tree
+    (`--work-tree`, GIT_WORK_TREE), the second directory Git creates."""
+
+    def __init__(self, arguments, index, environ):
         self.path = clone_destination(arguments, index) if arguments[index] == "clone" else None
-        self.existed = bool(self.path) and self.path.exists()
-        self.was_empty = self.existed and self.path.is_dir() and not any(self.path.iterdir())
+        self.created = {}
+        if not self.path:
+            return
+        directory = working_directory(arguments, index)
+        extra = (
+            option_value(arguments[index + 1 :], "--separate-git-dir"),
+            option_value(arguments[:index], "--work-tree") or environ.get("GIT_WORK_TREE"),
+        )
+        for path in (self.path, *(directory / value for value in extra if value)):
+            existed = path.exists()
+            self.created[path] = (existed, existed and path.is_dir() and not any(path.iterdir()))
 
     def reset(self):
-        if not self.path or not self.path.exists() or self.path.is_symlink():
-            return
-        if not self.existed:
-            shutil.rmtree(self.path, ignore_errors=True)
-        elif self.was_empty:
-            for child in self.path.iterdir():
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child, ignore_errors=True)
-                else:
-                    child.unlink(missing_ok=True)
+        for path, (existed, was_empty) in self.created.items():
+            if not path.exists() or path.is_symlink():
+                continue
+            if not existed:
+                shutil.rmtree(path, ignore_errors=True)
+            elif was_empty:
+                for child in path.iterdir():
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
 
 
 def seconds(environ, name, default, maximum):
@@ -379,7 +404,7 @@ def run(arguments, environ):
         # A missing session must not prevent Git from running after the runner empties RUNNER_TEMP.
         return subprocess.call([real_git, *arguments], env=environ)
     command = arguments[index]
-    target = CloneTarget(arguments, index)
+    target = CloneTarget(arguments, index, environ)
 
     def done(result):
         # However the clone or fetch went, later lazy fetches would use the rewrite.
