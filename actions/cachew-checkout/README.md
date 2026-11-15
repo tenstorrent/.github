@@ -139,8 +139,8 @@ The session steps (`session.py`), the cache checkout and the Git wrapper all
 run on Python 3.10 or newer from `PATH`. Without it the action falls back to the
 plain checkout without changing the job. Once a session exists, later steps use
 the same interpreter (`CACHEW_PYTHON`), which the Git wrapper already depends on.
-It is the interpreter's real file, so removing a virtual environment later in
-the job does not remove it.
+It is the base interpreter's real file, so removing a virtual environment later
+in the job, linked or copied, does not remove it.
 A later checkout in the job removes cachew's rewrite and headers from the job's
 global file, keeping the job's own settings, and gives the official checkout a
 flattened throwaway copy of it. If the file cannot be changed (for example it is

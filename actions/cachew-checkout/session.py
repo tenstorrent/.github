@@ -455,8 +455,12 @@ def auth_entries(url, header):
 
 
 def interpreter():
-    """This interpreter's real file: a virtual environment the job removes later
-    must not take the session's Python with it."""
+    """The base interpreter's real file: a virtual environment the job removes
+    later, whether its python is a link or a copy (`venv --copies`), must not
+    take the session's Python with it. Only the standard library is used."""
+    base = Path(sys.base_prefix, "bin", f"python{sys.version_info.major}.{sys.version_info.minor}")
+    if sys.prefix != sys.base_prefix and os.access(base, os.X_OK):
+        return os.path.realpath(base)
     return os.path.realpath(sys.executable)
 
 

@@ -540,17 +540,22 @@ class SessionTests(unittest.TestCase):
         self.real_git("ls-remote", f"{self.fixture.upstream.url}/org/main")
         self.finish()
 
-    def test_session_python_outlives_the_environment_it_was_started_from(self):
-        # A virtual environment's python is a link; removing the environment later
-        # in the job must not break the Git wrapper or a later checkout.
-        environment = self.fixture.root / "venv" / "bin"
-        environment.mkdir(parents=True)
-        real = Path(shutil.which("python3", path=self.env["PATH"])).resolve()
-        (environment / "python3").symlink_to(real)
-        self.env["PATH"] = f"{environment}{os.pathsep}{self.env['PATH']}"
+    def test_session_python_outlives_a_linked_virtual_environment(self):
+        self.assert_session_outlives_virtual_environment("--symlinks")
+
+    def test_session_python_outlives_a_copied_virtual_environment(self):
+        self.assert_session_outlives_virtual_environment("--copies")
+
+    def assert_session_outlives_virtual_environment(self, layout):
+        # Removing the environment the session started from, later in the job,
+        # must not break the Git wrapper or a later checkout.
+        python = shutil.which("python3", path=self.env["PATH"])
+        environment = self.fixture.root / "venv"
+        subprocess.run([python, "-m", "venv", layout, "--without-pip", str(environment)], check=True)
+        self.env["PATH"] = f"{environment / 'bin'}{os.pathsep}{self.env['PATH']}"
         self.assertEqual(self.flow(), (True, True))
-        self.assertEqual(self.env["CACHEW_PYTHON"], str(real))
-        shutil.rmtree(self.fixture.root / "venv")
+        self.assertFalse(Path(self.env["CACHEW_PYTHON"]).is_relative_to(environment))
+        shutil.rmtree(environment)
         result = subprocess.run(
             ["git", "ls-remote", f"{self.fixture.upstream.url}/org/main"], env=self.env, capture_output=True, text=True
         )
