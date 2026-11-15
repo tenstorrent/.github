@@ -34,7 +34,7 @@ Stop and go to section 5 if the job is on the list there.
 | Token on another mount, for example `github-members/token/<name> token \| NAME` | One token: `github-token: github-members/token/<name>` (a value with `/` is the full path). More than one token: keep each as a line in `secrets:`. |
 | `steps.<id>.outputs.<NAME>` | `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Use `steps.<id>.outputs.token` for the `github-token` value. |
 
-Remove the trailing `;` from the `secrets` lines. The action does not need it.
+Keep the `;` at the end of each `secrets` line except the last. A `;` after the last line is optional.
 
 ### Before
 
