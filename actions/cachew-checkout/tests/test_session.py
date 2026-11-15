@@ -597,6 +597,40 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(self.activate())
         self.finish()
 
+    def test_partial_clone_while_a_locked_file_keeps_the_rewrite_is_pinned(self):
+        # After activation turned caching off without being able to remove the
+        # rewrite, the session still knows where it points, so a partial clone
+        # made meanwhile is pinned and its lazy fetches stay upstream.
+        self.assertEqual(self.flow(), (True, True))
+        global_config = Path(self.env["CACHEW_SESSION_DIR"]) / "global.config"
+        self.fixture.update_main()
+        old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")
+        # Nothing for activation to copy back, so it gets past safe.directory under the lock.
+        self.env.update(CACHEW_PATH="second", CACHEW_SET_SAFE_DIRECTORY="false")
+        lock = global_config.with_name("global.config.lock")
+        lock.touch()
+        try:
+            self.prepare()
+            self.assertFalse(self.fixture.attempt())
+            self.checkout()
+            self.assertFalse(self.activate())
+            self.assertIn(self.fixture.cache.url, global_config.read_text())
+            partial = self.fixture.root / "partial"
+            url = f"{self.fixture.upstream.url}/org/main"
+            cloned = subprocess.run(
+                ["git", "clone", "-q", "--filter=blob:none", "--no-checkout", url, str(partial)],
+                env=self.env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(cloned.returncode, 0, cloned.stderr)
+            cache_before = list(self.fixture.cache.requests)
+            self.assertEqual(self.real_git("-C", str(partial), "cat-file", "-p", old_blob), "main")
+            self.assertEqual(self.fixture.cache.requests, cache_before)
+        finally:
+            lock.unlink()
+        self.finish()
+
     def test_rewrite_kept_by_a_locked_file_never_takes_lazy_fetches(self):
         # A later filtered checkout cannot remove the rewrite from the locked job
         # file: its promisor origin is pinned upstream anyway, and the next

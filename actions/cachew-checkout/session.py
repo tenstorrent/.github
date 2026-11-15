@@ -536,7 +536,12 @@ def activate(environ):
         )
         available = "true" if cache else "false"
     cache = cache if available == "true" else None
-    state = remove_cache_keys(real_git, session, dict(state, cache=cache), environ, disable=not cache)
+    state = remove_cache_keys(real_git, session, state, environ, disable=not cache)
+    # While a locked file keeps the old rewrite, the session keeps recording the
+    # cache it points to, so partial clones are still pinned against it.
+    if not state["managed"]:
+        state["cache"] = cache
+        write_state(session, state)
     if not disabled.exists():
         host = urllib.parse.urlsplit(settings.upstream).netloc
         entries = [(f"url.{cache}/git/{host}/.insteadOf", settings.upstream + "/")]
