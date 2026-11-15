@@ -203,11 +203,11 @@ that check stays in the consumer repository (tt-metal's
 ## Pins and releases
 
 Everything runs from this action's own directory, so a consumer's pin to this
-action is the only pin. Pin a full commit SHA of this repository. Only the
-runtime files (`action.yml`, `checkout.py`, `git_wrapper.py`, `session/`,
-`trusted_caches.json`) change behavior; README, test and `migrate.py` changes
-need no re-pin. To release a change, merge it here, then re-pin consumers to
-a commit that contains it.
+action is the only pin. Pin a full commit SHA of this repository. Everything
+except `README.md` and `tests/` reaches consumers only through their pin: the
+action's files run from the pinned commit, and consumers fetch `migrate.py` at
+that commit too. To release a change, merge it here, then re-pin consumers to a
+commit that contains it.
 
 ## Migrating a repository
 
