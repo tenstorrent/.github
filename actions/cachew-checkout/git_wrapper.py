@@ -259,10 +259,39 @@ def repository_argument(arguments, index):
     return None if command == "clone" else ""
 
 
-def reaches_cache(real_git, arguments, index, environ, cache):
+def fetch_remotes(real_git, arguments, index, environ):
+    """The remotes a fetch of several reads (--all, --multiple, or a
+    remotes.<group> name with more than one member; Git fetches a one-member
+    group's name as a remote), or None for a fetch of one repository."""
+    tail = arguments[index + 1 :]
+
+    def words(*args):
+        result = subprocess.run(
+            [real_git, *arguments[:index], *args], env=environ, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        return result.stdout.decode(errors="replace").split() if result.returncode == 0 else []
+
+    if "--all" in tail:
+        return words("remote")
+    names, position = [], 0
+    while position < len(tail):
+        if tail[position] in READ_OPTIONS_WITH_VALUE["fetch"]:
+            position += 2
+            continue
+        if not tail[position].startswith("-"):
+            names.append(tail[position])
+        position += 1
+    if "--multiple" not in tail:
+        if not names or len(words("config", "--get-all", f"remotes.{names[0]}")) < 2:
+            return None
+        names = names[:1]
+    return [remote for name in names for remote in words("config", "--get-all", f"remotes.{name}") or [name]]
+
+
+def reaches_cache(real_git, arguments, index, environ, cache, repository=""):
     """Whether the read's effective URL is the cache. Unknown counts as the cache,
     so only reads that provably go elsewhere skip the cache attempt."""
-    repository = repository_argument(arguments, index)
+    repository = repository or repository_argument(arguments, index)
     if repository is None or not cache:
         return True
     result = subprocess.run(
@@ -369,10 +398,18 @@ def run(arguments, environ):
     ):
         with UpstreamView(real_git, environ, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
-    if command not in ("clone", "fetch", "ls-remote") or not reaches_cache(
-        real_git, arguments, index, environ, state.get("cache")
-    ):
+    if command not in ("clone", "fetch", "ls-remote"):
         return subprocess.call([real_git, *arguments], env=environ)
+    remotes = fetch_remotes(real_git, arguments, index, environ) if command == "fetch" else None
+    if remotes is None and not reaches_cache(real_git, arguments, index, environ, state.get("cache")):
+        return subprocess.call([real_git, *arguments], env=environ)
+    if remotes is not None and not all(
+        reaches_cache(real_git, arguments, index, environ, state.get("cache"), remote) for remote in remotes
+    ):
+        # One remote's failure could not be told from the cache's, so a fetch that
+        # also reads elsewhere goes upstream once, without the cache rewrite.
+        with UpstreamView(real_git, environ, session, state) as upstream:
+            return done(subprocess.call([real_git, *arguments], env=upstream))
     result, errors = cache_attempt(real_git, arguments, environ, index)
     if result == 0 or result < 0:
         return done(result)

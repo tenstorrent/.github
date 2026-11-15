@@ -172,6 +172,36 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(len(self.cache.requests), requests)
         self.assertFalse((self.session / "cache-disabled").exists())
 
+    def cloned_dependency(self):
+        self.dependency("cmake-dependency")
+        target = self.root / "cloned"
+        self.run_git("clone", self.upstream.url + "/org/cmake-dependency", str(target))
+        return target
+
+    def test_fetch_all_with_a_failing_other_remote_leaves_caching_on(self):
+        # Git reports every remote's errors together: a failure elsewhere must not
+        # read as the cache failing, so this fetch goes upstream once.
+        target = self.cloned_dependency()
+        self.run_git("-C", str(target), "remote", "add", "elsewhere", "http://127.0.0.1:1/org/missing")
+        requests = len(self.cache.requests)
+        subprocess.run(["git", "-C", str(target), "fetch", "--all"], env=self.env, capture_output=True, timeout=30)
+        self.assertEqual(len(self.cache.requests), requests)
+        self.assertFalse((self.session / "cache-disabled").exists())
+
+    def test_fetch_all_of_cached_remotes_uses_the_cache(self):
+        target = self.cloned_dependency()
+        requests = len(self.cache.requests)
+        self.run_git("-C", str(target), "fetch", "--all")
+        self.assertGreater(len(self.cache.requests), requests)
+
+    def test_fetch_of_a_remote_group_falls_back_like_its_remotes(self):
+        target = self.cloned_dependency()
+        self.run_git("-C", str(target), "remote", "add", "mirror", self.upstream.url + "/org/cmake-dependency")
+        self.run_git("-C", str(target), "config", "remotes.everything", "origin mirror")
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("-C", str(target), "fetch", "everything")
+        self.assertTrue(self.upstream.requests)
+
     def test_network_remote_subcommands_go_upstream(self):
         self.dependency("cmake-dependency")
         target = self.root / "cloned"
