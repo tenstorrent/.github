@@ -105,8 +105,8 @@ runs:
         exportEnv: false
         secrets: ${{ steps.prepare.outputs.spec }}
 
-    # vault-action gives an empty string for a field that does not exist, and
-    # does not fail. An empty value is always an error here. Names only in the log.
+    # Vault can hold an empty string, and vault-action passes it on without an
+    # error. An empty value is always an error here. Names only in the log.
     - name: Check that no value is empty
       id: check
       shell: bash
