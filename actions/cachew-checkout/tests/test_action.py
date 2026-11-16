@@ -177,7 +177,7 @@ class RunnerGateTests(unittest.TestCase):
     def test_official_checkout_is_unmodified(self):
         self.assertEqual(self.checkout["if"], "steps.cachew.outputs.checked-out != 'true'")
         self.assertNotIn("\n      env:", self.checkout["raw"])
-        self.assertIn("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", self.checkout["uses"])
+        self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", self.checkout["uses"])
 
     def test_outputs_default_to_false_when_cachew_is_skipped(self):
         self.assertEqual(output("cachew-configured"), "${{ steps.configure.outputs.configured || 'false' }}")

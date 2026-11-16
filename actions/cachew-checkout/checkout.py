@@ -92,14 +92,74 @@ def origin(value, environ):
     return f"{url.scheme}://{url.netloc}"
 
 
+# The whitespace JavaScript's String.prototype.trim strips, as core.getInput does.
+# Python's str.strip differs: it keeps U+FEFF and strips U+001C-U+001F and U+0085.
+JS_WHITESPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+JS_TRIM = re.compile(f"^[{JS_WHITESPACE}]+|[{JS_WHITESPACE}]+$")
+# actions/checkout classifies a SHA `ref` after trimming only ASCII whitespace, so a
+# branch named U+FEFF followed by 40 hex digits stays a branch.
+ASCII_TRIM = re.compile(r"^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$")
+ANY_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
+PULL_REQUEST_REF = re.compile(r"refs/pull/[0-9]+/(?:head|merge)")
+
+
 def checkout_input(environ, name, default=""):
     """An input as actions/checkout reads it (core.getInput): trimmed, the default when empty."""
-    return environ.get(name, "").strip() or default
+    return JS_TRIM.sub("", environ.get(name, "")) or default
 
 
 def checkout_flag(environ, name, default):
     """A boolean input as actions/checkout reads it: true only for TRUE in any case."""
     return checkout_input(environ, name, default).upper() == "TRUE"
+
+
+def unsafe_pr_checkout(environ, repository, ref, commit):
+    """Whether actions/checkout (v7.0.1 unsafe-pr-checkout-helper) refuses this
+    checkout: fork pull request code fetched into a pull_request_target or
+    workflow_run workflow without allow-unsafe-pr-checkout."""
+    event = environ.get("GITHUB_EVENT_NAME", "")
+    allowed = checkout_flag(environ, "CACHEW_ALLOW_UNSAFE_PR_CHECKOUT", "false")
+    if allowed or event not in ("pull_request_target", "workflow_run"):
+        return False
+    try:
+        with open(environ["GITHUB_EVENT_PATH"]) as stream:
+            payload = json.load(stream)
+    except (KeyError, OSError, ValueError):
+        payload = {}
+
+    def select(path):
+        value = payload
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        return value
+
+    def number(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    base = select("repository.id")
+    if not number(base):
+        return False
+    if event == "pull_request_target":
+        head = "pull_request.head.repo"
+        shas = [select("pull_request.head.sha"), select("pull_request.merge_commit_sha")]
+    else:
+        trigger = select("workflow_run.event")
+        if not isinstance(trigger, str) or not trigger.startswith("pull_request"):
+            return False
+        head = "workflow_run.head_repository"
+        shas = [select("workflow_run.head_commit.id")]
+        # For a pull_request_target run, head_sha is the base branch's commit.
+        if trigger != "pull_request_target":
+            shas.append(select("workflow_run.head_sha"))
+    head_id, head_name = select(f"{head}.id"), select(f"{head}.full_name")
+    if not number(head_id) or head_id == base:
+        return False
+    shas = [sha.lower() for sha in shas if isinstance(sha, str) and sha]
+    return (
+        (isinstance(head_name, str) and repository.lower() == head_name.lower())
+        or bool(PULL_REQUEST_REF.fullmatch(ref))
+        or bool(commit and commit.lower() in shas)
+    )
 
 
 def relative_path(value):
@@ -230,14 +290,21 @@ class Checkout:
         # The same ref and commit as actions/checkout's input helper.
         self.ref = checkout_input(environ, "CACHEW_REF")
         self.commit = ""
+        workflow_repository = repository.lower() == environ["GITHUB_REPOSITORY"].lower()
+        exact = ASCII_TRIM.sub("", environ.get("CACHEW_REF", ""))
         if not self.ref:
-            if repository.lower() == environ["GITHUB_REPOSITORY"].lower():
+            if workflow_repository:
                 self.ref = environ.get("GITHUB_REF", "")
                 self.commit = environ.get("GITHUB_SHA", "")
                 if self.commit and self.ref and not self.ref.startswith("refs/"):
                     self.ref = f"refs/heads/{self.ref}"
-        elif SHA.fullmatch(self.ref):
-            self.commit, self.ref = self.ref, ""
+        elif ANY_SHA.fullmatch(exact):
+            self.commit, self.ref = exact, ""
+        # The default self-checkout always resolves to the event's trusted ref.
+        defaulted = workflow_repository and not checkout_input(environ, "CACHEW_REF")
+        if not defaulted and unsafe_pr_checkout(environ, repository, self.ref, self.commit):
+            raise Bypass("fork pull request code needs allow-unsafe-pr-checkout")
+        # SHA-256 repositories, like everything else unsupported, use the standard checkout.
         if self.commit and not SHA.fullmatch(self.commit):
             raise Bypass("unsupported checkout commit")
         self.commit = self.commit.lower()

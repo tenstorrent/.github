@@ -856,6 +856,63 @@ class CheckoutTests(unittest.TestCase):
             git(self.target, "rev-parse", "refs/tags/v1.0.0^{commit}"), git(self.target, "rev-parse", "HEAD~1")
         )
 
+    @unittest.skipUnless(CHECKOUT_JS, "set CHECKOUT_ACTION_JS to the pinned checkout dist/index.js")
+    def test_fork_pull_request_guard_matches_the_pinned_checkout(self):
+        # actions/checkout refuses fork pull request code in pull_request_target and
+        # workflow_run workflows unless allow-unsafe-pr-checkout is set; cachew must
+        # never check out what it refuses, so the official checkout reports it.
+        fork, base = 222, 111
+        target = {"repository": {"id": base, "owner": {"id": 1234}}}
+        pull = {**target, "pull_request": {"head": {"repo": {"id": fork, "full_name": "Fork/Main"}, "sha": self.sha}}}
+        same = {**target, "pull_request": {"head": {"repo": {"id": base, "full_name": "org/main"}, "sha": self.sha}}}
+
+        def run(trigger, head_sha):
+            head = {"id": fork, "full_name": "fork/main"}
+            return {**target, "workflow_run": {"event": trigger, "head_repository": head, "head_sha": head_sha}}
+
+        cases = [
+            ("pull_request_target", pull, {"CACHEW_REF": "refs/pull/1/merge"}, True),
+            ("pull_request_target", pull, {"CACHEW_REF": self.sha.upper()}, True),
+            ("pull_request_target", pull, {"CACHEW_REPOSITORY": "fork/main", "CACHEW_REF": "main"}, True),
+            ("pull_request_target", pull, {"CACHEW_REF": "refs/pull/1/merge", "CACHEW_ALLOW_UNSAFE_PR_CHECKOUT": " TRUE\n"}, False),
+            ("pull_request_target", pull, {"CACHEW_REF": "main"}, False),
+            ("pull_request_target", pull, {"CACHEW_REF": ""}, False),
+            ("pull_request_target", same, {"CACHEW_REF": "refs/pull/1/merge"}, False),
+            ("workflow_run", run("pull_request", self.sha), {"CACHEW_REF": self.sha}, True),
+            ("workflow_run", run("pull_request_target", self.sha), {"CACHEW_REF": self.sha}, False),
+            ("push", pull, {"CACHEW_REF": "refs/pull/1/merge"}, False),
+        ]
+        event = self.root / "guard-event.json"
+        for name, payload, inputs, refused in cases:
+            with self.subTest(event=name, inputs=inputs):
+                event.write_text(json.dumps(payload))
+                env = dict(self.env, GITHUB_EVENT_NAME=name, GITHUB_EVENT_PATH=str(event), **inputs)
+                try:
+                    cachew_checkout.Checkout(env)
+                    reason = ""
+                except cachew_checkout.Bypass as error:
+                    reason = str(error)
+                self.assertEqual("allow-unsafe-pr-checkout" in reason, refused, reason)
+                official = dict(env)
+                for key, value in {
+                    "repository": env.get("CACHEW_REPOSITORY", "org/main"),
+                    "ref": env["CACHEW_REF"],
+                    "token": TOKEN,
+                    "path": "official-guard",
+                    "allow-unsafe-pr-checkout": env.get("CACHEW_ALLOW_UNSAFE_PR_CHECKOUT", "false"),
+                }.items():
+                    official["INPUT_" + key.upper()] = value
+                # The refusal comes while reading inputs; an allowed checkout is
+                # stopped once it is past that point (its fetch may retry for long).
+                try:
+                    output = subprocess.run(
+                        ["node", CHECKOUT_JS], cwd=self.workspace, env=official, capture_output=True, text=True, timeout=10
+                    ).stdout
+                except subprocess.TimeoutExpired as stopped:
+                    output = stopped.stdout.decode() if isinstance(stopped.stdout, bytes) else stopped.stdout or ""
+                self.assertEqual("Refusing to check out fork pull request code" in output, refused, output)
+                shutil.rmtree(self.workspace / "official-guard", ignore_errors=True)
+
     def test_named_ref_after_a_workspace_root_checkout_sends_one_authorization(self):
         # Composite steps run in the workspace. A checkout at its root persists
         # credentials there; the upstream name lookup must not add them to its own.
@@ -1066,9 +1123,14 @@ class CheckoutTests(unittest.TestCase):
             },
         )
 
+    @unittest.skipUnless(CHECKOUT_JS, "set CHECKOUT_ACTION_JS to the pinned checkout dist/index.js")
     def test_composite_forwards_every_pinned_checkout_input(self):
-        names = "repository ref token ssh-key ssh-known-hosts ssh-strict ssh-user persist-credentials path clean filter sparse-checkout sparse-checkout-cone-mode fetch-depth fetch-tags show-progress lfs submodules set-safe-directory github-server-url".split()
+        # The pinned checkout's own action.yml, beside its dist/ directory.
+        pinned = (Path(CHECKOUT_JS).resolve().parents[1] / "action.yml").read_text()
+        names = re.findall(r"^  ([a-z-]+):", pinned.split("\ninputs:\n", 1)[1].split("\noutputs:\n", 1)[0], re.M)
         action = (ACTION / "action.yml").read_text()
+        declared = re.findall(r"^  ([a-z-]+):", action.split("\ninputs:\n", 1)[1].split("\noutputs:\n", 1)[0], re.M)
+        self.assertEqual([name for name in declared if not name.startswith("cachew")], names)
         forwarding = action.split("      with:\n", 1)[1]
         self.assertEqual(set(re.findall(r"^        ([a-z-]+):", forwarding, re.M)), set(names))
         for name in names:
@@ -1080,7 +1142,7 @@ class CheckoutTests(unittest.TestCase):
                 f"|| steps.checkout.outputs.{name} }}}}",
                 action,
             )
-        self.assertIn("actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd", action)
+        self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", action)
 
 
 if __name__ == "__main__":

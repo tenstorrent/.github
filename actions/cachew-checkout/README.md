@@ -16,9 +16,14 @@ Use this action in place of `actions/checkout`, retaining existing checkout inpu
 
 The remote reference works before the workspace exists. A local reference
 (`./actions/cachew-checkout`, only in this repository) requires a bootstrap
-checkout. All 20 inputs
-and the `ref` and `commit` outputs from pinned `actions/checkout` v6.0.2 are
-forwarded. Existing checkout conditions, IDs, paths, and timeouts still apply.
+checkout. Every input and the `ref` and `commit` outputs of the pinned
+`actions/checkout` v7.0.1 are forwarded, and the cachew path reads its inputs
+the same way. Existing checkout conditions, IDs, paths, and timeouts still apply.
+
+Like `actions/checkout` v7, a `pull_request_target` or `workflow_run` workflow
+must set `allow-unsafe-pr-checkout: true` to check out fork pull request code.
+Without it, cachew does not check that code out and the standard checkout
+refuses it.
 
 | Additional input | Default | Meaning |
 | --- | --- | --- |
@@ -236,7 +241,7 @@ python3 migrate.py --check                     # exit 1 if anything needs --writ
 python3 migrate.py --verify-pins               # exit 1 unless every reference pins action_sha
 ```
 
-`--write` replaces `actions/checkout` v6.0.2 steps (the version this action
+`--write` replaces `actions/checkout` v7.0.1 steps (the version this action
 forwards to), pins to any other commit of this action, and pins to its old
 `tenstorrent/tt-metal/.github/actions/cachew-checkout` location. It leaves
 plain `actions/checkout` where cachew can never serve the checkout:

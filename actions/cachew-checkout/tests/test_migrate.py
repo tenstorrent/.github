@@ -20,7 +20,7 @@ migrate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(migrate)
 
 SHA = "a" * 40
-PLAIN = "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2"
+PLAIN = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 PINNED = f"tenstorrent/.github/actions/cachew-checkout@{SHA} # cachew checkout"
 STALE = "tenstorrent/.github/actions/cachew-checkout@" + "0" * 40 + " # cachew checkout"
 LEGACY = "tenstorrent/tt-metal/.github/actions/cachew-checkout@" + "1" * 40 + " # cachew checkout"
@@ -109,8 +109,8 @@ jobs:
         self.assertEqual(migrate.rewrite(before, SHA), expected)
 
     def test_other_checkout_versions_are_left_alone(self):
-        # Floating tags too: v6 may point past the v6.0.2 the action forwards to.
-        text = "steps:\n  - uses: actions/checkout@v4\n  - uses: actions/checkout@main\n  - uses: actions/checkout@v6\n"
+        # Floating tags too: v7 may point past the v7.0.1 the action forwards to.
+        text = "steps:\n  - uses: actions/checkout@v4\n  - uses: actions/checkout@main\n  - uses: actions/checkout@v7\n"
         self.assertEqual(migrate.rewrite(text, SHA), text)
 
     def test_rewrite_refuses_a_short_sha(self):

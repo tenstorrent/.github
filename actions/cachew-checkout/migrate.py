@@ -10,7 +10,7 @@ excluded paths come from that repository's .github/cachew-checkout.json:
      "exclude": ["vendored/tree/"]}
 
 Modes:
-  --write        migrate: actions/checkout v6.0.2 steps and pins to any other
+  --write        migrate: actions/checkout v7.0.1 steps and pins to any other
                  commit (or to the action's old tt-metal location) become
                  tenstorrent/.github/actions/cachew-checkout@<action_sha>.
                  With --action-sha, the new pin is saved to the config first.
@@ -21,7 +21,7 @@ With no paths, every tracked .yml/.yaml under a .github/actions or
 .github/workflows directory is inspected.
 
 Only checkouts of the exact version the action forwards to (actions/checkout
-v6.0.2, by commit or tag) are migrated, so no step changes checkout version. Left
+v7.0.1, by commit or tag) are migrated, so no step changes checkout version. Left
 as plain actions/checkout on purpose:
   * steps with a trailing `# cachew: keep` comment;
   * jobs whose runs-on is a literal GitHub-hosted label (ubuntu-*, windows-*,
@@ -46,8 +46,8 @@ ACTION_REPO = "tenstorrent/.github/actions/cachew-checkout"
 # these; --verify-pins rejects them.
 LEGACY_REPO = "tenstorrent/tt-metal/.github/actions/cachew-checkout"
 # The actions/checkout commit action.yml forwards to (checked by the tests).
-FORWARDED_CHECKOUT = "de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-MIGRATABLE_REFS = (FORWARDED_CHECKOUT, "v6.0.2")
+FORWARDED_CHECKOUT = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+MIGRATABLE_REFS = (FORWARDED_CHECKOUT, "v7.0.1")
 CONFIG = Path(".github/cachew-checkout.json")
 SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -67,7 +67,7 @@ ANY_PIN = re.compile(
     r"(?P<repo>" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")"
     r"(?P<subpath>/[\w./-]+)?@(?P<ref>[^\s'\"#]+)"
 )
-PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v6.0.2"
+PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
 HOSTED_LABEL = re.compile(r"(?:ubuntu|windows|macos)-[\w.-]+")
 TOP_LEVEL = re.compile(r"^(?P<key>[\w-]+):")
 JOB = re.compile(r"^  [\w-]+:[ \t]*(?:#.*)?$")
