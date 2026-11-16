@@ -1,6 +1,12 @@
 # Cachew checkout
 
-Use this action in place of `actions/checkout`, retaining existing checkout inputs:
+**Parity target:** [`actions/checkout` v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1)
+(commit `3d3c42e5aac5ba805825da76410c181273ba90b1`). The action accepts that
+version's inputs, produces its outputs and repository layout, and forwards to
+exactly that commit whenever cachew does not serve the checkout. Wherever this
+document says the pinned, standard or official checkout, it means that version.
+
+Use this action in place of `actions/checkout` v7.0.1, retaining existing checkout inputs:
 
 ```yaml
 - name: Checkout
@@ -247,6 +253,14 @@ that check stays in the consumer repository (tt-metal's
 `test-cachew-checkout` workflow).
 
 ## Pins and releases
+
+The parity target is fixed in three places, which the tests keep in step: the
+`uses:` of the upstream step in `action.yml`, `FORWARDED_CHECKOUT` in
+`migrate.py`, and the reference bundle the `Test cachew-checkout` workflow
+checks out. Moving to a newer `actions/checkout` means changing all three,
+re-checking the cachew path against the new version's inputs, outputs and
+refusals (such as `allow-unsafe-pr-checkout`), and updating the version named
+at the top of this document.
 
 Everything runs from this action's own directory, so a consumer's pin to this
 action is the only pin. Pin a full commit SHA of this repository. Everything

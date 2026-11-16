@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 name: Cachew checkout
-description: Cache Git checkout and later dependency fetches, with immediate upstream fallback.
+description: >-
+  Drop-in for actions/checkout v7.0.1 that caches the Git checkout and later dependency
+  fetches, with immediate fallback to that exact upstream checkout.
 inputs:
   repository:
     description: Repository in owner/name form.
