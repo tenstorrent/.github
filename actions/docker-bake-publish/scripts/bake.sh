@@ -83,9 +83,11 @@ mapfile -t TARGETS < <(printf '%s' "$RESOLVED" | jq -r '.target | keys[]')
 # and the last value of a key wins.
 # push_on mirrors BuildKit's image exporter: an empty push= means true, and any
 # other value goes through Go's strconv.ParseBool (1, t, T, TRUE, true, True).
-# An absent push attribute is false. type=registry always pushes: current buildx
-# (build/opt.go) sets push=true on it even over an explicit push=false, so it is
-# never treated as local. Anything that pushes must be gated.
+# An absent push attribute is false. type=registry pushes; with an explicit
+# false push= it is rejected, since buildx disagrees with itself: 0.16 honors it
+# and keeps the image local, current buildx (build/opt.go) overrides it and
+# pushes. type=image,push=false says the same thing on every version.
+# Anything that pushes must be gated.
 # shellcheck disable=SC2016
 OUTPUT_DEFS='
   def key: ascii_downcase | gsub("^\\s+|\\s+$"; "");
@@ -105,6 +107,7 @@ CLASSIFY_JQ="${OUTPUT_DEFS}"'
     | ($outs | map(select(.type == "registry" or (.type == "image" and (.push | push_on))))) as $push
     | {
         name: .key,
+        ambiguous: ($outs | any(.type == "registry" and .push != null and (.push | push_on | not))),
         pushed: ($push | length > 0),
         outputs: ($outs | length),
         output: ($push[0] // null),
@@ -117,6 +120,8 @@ PUSHED=()
 LOCAL=()
 for t in "${TARGETS[@]}"; do
   info="$(jq -c --arg t "$t" '.[] | select(.name == $t)' "$WORKDIR/targets.json")"
+  [ "$(jq -r .ambiguous <<< "$info")" != true ] \
+    || die "Target '$t' has a type=registry output with push=false, which buildx 0.16 keeps local and newer buildx pushes. Use type=image,push=false to keep it local, or drop push=false to publish it."
   if [ "$(jq -r .pushed <<< "$info")" = true ]; then
     [ "$(jq -r .outputs <<< "$info")" -eq 1 ] || die "Target '$t' has multiple outputs including a registry push; use a single output."
     [ "$(jq '.tags | length' <<< "$info")" -gt 0 ] || die "Target '$t' pushes to a registry but has no tags."
