@@ -194,12 +194,14 @@ PIN_JQ="${OUTPUT_DEFS}"'
 
 layout_of() { printf '%s/%s' "$LAYOUT_ROOT" "$1"; }
 
-# Buildx rejects attestations on a docker exporter that writes an archive
-# (type=docker,dest=...), so such a local target builds without them. It is
+# Buildx accepts attestations on a docker exporter only when it can hand the
+# daemon an OCI index: never for an archive (type=docker,dest=...), and for a
+# load only with the containerd image store, which GitHub-hosted runners do
+# not use by default. So every type=docker target builds without them. It is
 # never pushed, so nothing published loses its provenance or SBOM.
-is_docker_archive() {  # <target>
+is_docker_export() {  # <target>
   [ "$(printf '%s' "$RESOLVED" | jq --arg t "$1" "${OUTPUT_DEFS}"'
-    [.target[$t].output[]? | kv | .type == "docker" and (.dest // "") != ""] | any')" = true ]
+    [.target[$t].output[]? | kv | .type == "docker"] | any')" = true ]
 }
 
 # NUL-delimited: an exporter annotation may hold a newline.
@@ -214,7 +216,7 @@ overrides() {  # <generator-image>
   done
   for t in "${LOCAL[@]}"; do
     printf '%s' "$RESOLVED" | jq -j --arg t "$t" "$PIN_JQ"' | . + "\u0000"'
-    if [ "${INPUT_ENABLE_ATTESTATIONS:-true}" = true ] && ! is_docker_archive "$t"; then
+    if [ "${INPUT_ENABLE_ATTESTATIONS:-true}" = true ] && ! is_docker_export "$t"; then
       printf '%s\0' "${t}.attest=type=provenance,mode=max" "${t}.attest=type=sbom,generator=$1"
     else
       printf '%s\0' "${t}.attest=type=provenance,disabled=true" "${t}.attest=type=sbom,disabled=true"

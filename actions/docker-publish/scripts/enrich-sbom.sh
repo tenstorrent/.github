@@ -46,7 +46,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 REF="${1:?Usage: $0 <repo>@<index-digest>}"
 SUPPLIER="${SBOM_SUPPLIER:-Organization: Tenstorrent}"
-SPDX_PREDICATE="https://spdx.dev/Document"
+SPDX_PREDICATE="$SPDX_PREDICATE_TYPE"
 
 parse_ref "$REF"
 REPO="$REF_REPO"

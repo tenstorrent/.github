@@ -45,7 +45,7 @@ attest() {  # <subject-digest> <sbom> <label>
   env \
     "INPUT_SUBJECT-NAME=${REPO}" \
     "INPUT_SUBJECT-DIGEST=$1" \
-    "INPUT_PREDICATE-TYPE=https://spdx.dev/Document" \
+    "INPUT_PREDICATE-TYPE=${SPDX_PREDICATE_TYPE}" \
     "INPUT_PREDICATE-PATH=$2" \
     "INPUT_PUSH-TO-REGISTRY=true" \
     "INPUT_CREATE-STORAGE-RECORD=${ATTEST_CREATE_STORAGE_RECORD:-true}" \

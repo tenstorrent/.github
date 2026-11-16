@@ -60,6 +60,10 @@ ATTEST_MAX_SBOM_BYTES=$((16 * 1024 * 1024))
 
 SIGSTORE_BUNDLE_TYPE="application/vnd.dev.sigstore.bundle.v0.3+json"
 
+# The SBOM predicate type for BuildKit's attestations and the signed bundles:
+# unversioned, the only form Trivy recognises (see attest-sbom.sh).
+SPDX_PREDICATE_TYPE="https://spdx.dev/Document"
+
 # Split an image reference into REF_REPO / REF_TAG / REF_DIGEST.
 # Handles registry ports (localhost:5000/img:tag) and name:tag@digest forms.
 parse_ref() {

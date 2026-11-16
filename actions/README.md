@@ -200,9 +200,9 @@ layout (keeping exporter options such as compression) and go through the
 pipeline; their `tags` are applied at the end. Targets that do
 not push (`type=docker`, local exports, `type=image,push=false`) are built
 unchanged and are not gated. `type=registry,push=false` is rejected, because
-buildx 0.16 keeps it local and newer buildx pushes it. A `type=docker,dest=...`
-archive target is built without attestations, which buildx does not support for
-that exporter.
+buildx 0.16 keeps it local and newer buildx pushes it. A `type=docker` target
+(load or archive) is built without attestations: buildx rejects them for that
+exporter unless the daemon uses the containerd image store.
 
 Output: `images`, a JSON array with one `{name, repo, digest, build_digest,
 tags}` entry per published target (`[]` when no target pushes).

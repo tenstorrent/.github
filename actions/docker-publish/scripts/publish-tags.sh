@@ -42,7 +42,10 @@ esac
 SBOM_BUNDLES=()  # "<subject> <bundle-digest>"
 # attest-sbom.sh signs one bundle per platform image, so with ATTEST_SBOM every
 # platform must have one: a missing platform would publish copies that lack its
-# signed SBOM. A referrer can take a moment to become discoverable after
+# signed SBOM. Any Sigstore bundle is copied, but only one whose signed DSSE
+# payload has the SPDX predicate type counts as the SBOM: a provenance or other
+# bundle on the same digest (a reproducible build attested elsewhere) must not
+# stand in for it. A referrer can take a moment to become discoverable after
 # actions/attest pushes it, so discovery is retried before failing.
 SBOM_DISCOVERY_ATTEMPTS=5
 SBOM_DISCOVERY_DELAY_SECONDS=10
@@ -51,8 +54,20 @@ discover_bundles() {  # <subject> -> bundle digests, one per line
   referrers="$(oras discover --format json --artifact-type "$SIGSTORE_BUNDLE_TYPE" "${PRIMARY_REPO}@$1")"
   printf '%s' "$referrers" | jq -r '.referrers[]?.digest'
 }
+# Reads the predicate type from the signed payload, not the unsigned
+# dev.sigstore.bundle.predicateType annotation. An unreadable bundle is not an
+# SBOM; the missing-platform check then retries and fails.
+is_sbom_bundle() {  # <bundle-digest>
+  local manifest layer payload
+  manifest="$(oras manifest fetch "${PRIMARY_REPO}@$1")" || return 1
+  layer="$(printf '%s' "$manifest" | jq -r '.layers[0].digest // empty')"
+  [ -n "$layer" ] || return 1
+  payload="$(oras blob fetch --output - "${PRIMARY_REPO}@${layer}")" || return 1
+  [ "$(printf '%s' "$payload" | jq -r '.dsseEnvelope.payload // empty | @base64d | fromjson | .predicateType // empty' 2>/dev/null)" \
+    = "$SPDX_PREDICATE_TYPE" ]
+}
 find_sbom_bundles() {
-  local index platforms subject refs ref attempt missing
+  local index platforms subject refs ref attempt missing sbom
   index="$(oras manifest fetch "$SRC")"
   platforms="$(printf '%s' "$index" | jq -r '.manifests[] | select(.platform.os != "unknown") | .digest')"
   [ -n "$platforms" ] || die "No platform images found in ${SRC}."
@@ -62,14 +77,17 @@ find_sbom_bundles() {
     while IFS= read -r subject; do
       [ -n "$subject" ] || continue
       refs="$(discover_bundles "$subject")"
-      [ -n "$refs" ] || { [ "$subject" = "$DIGEST" ] || missing+=("$subject"); continue; }
+      sbom=false
       while IFS= read -r ref; do
-        [ -n "$ref" ] && SBOM_BUNDLES+=("${subject} ${ref}")
+        [ -n "$ref" ] || continue
+        SBOM_BUNDLES+=("${subject} ${ref}")
+        [ "$sbom" = true ] || ! is_sbom_bundle "$ref" || sbom=true
       done <<< "$refs"
+      [ "$sbom" = true ] || [ "$subject" = "$DIGEST" ] || missing+=("$subject")
     done <<< "${DIGEST}"$'\n'"${platforms}"
     [ "${ATTEST_SBOM:-true}" = true ] && [ "${#missing[@]}" -gt 0 ] || return 0
     [ "$attempt" -lt "$SBOM_DISCOVERY_ATTEMPTS" ] \
-      || die "No signed SBOM bundle found as a referrer of platform image(s) ${missing[*]} of ${SRC}; refusing to publish copies without them."
+      || die "No signed SBOM bundle (predicate ${SPDX_PREDICATE_TYPE}) found as a referrer of platform image(s) ${missing[*]} of ${SRC}; refusing to publish copies without them."
     log "signed SBOM bundle not yet discoverable for ${missing[*]}; retrying in ${SBOM_DISCOVERY_DELAY_SECONDS}s (attempt ${attempt}/${SBOM_DISCOVERY_ATTEMPTS})"
     sleep "$SBOM_DISCOVERY_DELAY_SECONDS"
   done
@@ -81,7 +99,7 @@ copy_sbom_bundles() {  # <dest-repo>
     subject="${entry%% *}"
     ref="${entry#* }"
     oras cp "${PRIMARY_REPO}@${ref}" "${dest}@${ref}" >&2
-    log "copied signed SBOM ${ref} (subject ${subject}) to ${dest}"
+    log "copied signed bundle ${ref} (subject ${subject}) to ${dest}"
   done
 }
 

@@ -61,8 +61,9 @@ inputs:
     description: >-
       Attestations for targets that do NOT push to a registry. Pushed targets
       always get max-mode provenance and an SBOM; "false" is ignored for them
-      with a warning. Docker archive targets (type=docker,dest=...) never get
-      attestations: buildx rejects them for that exporter.
+      with a warning. type=docker targets (load or archive) never get
+      attestations: buildx rejects them for that exporter unless the daemon
+      uses the containerd image store.
     required: false
     default: "true"
   enrich-sbom:
