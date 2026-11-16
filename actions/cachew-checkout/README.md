@@ -58,9 +58,10 @@ resolve. Only these origins ever receive a token, and only after they answered
 the probe. Plain HTTP is never accepted for the cache or upstream, not even to
 `127.0.0.1`. Only the test suite enables loopback HTTP fixtures, through
 `CACHEW_TEST_ALLOW_LOOPBACK_HTTP=1`, which `action.yml` clears on every cachew
-step. An untrusted or non-HTTPS `cachew-url` (including the in-cluster
-`cachew.cachew.svc.cluster.local`) leaves the plain checkout: no session, token,
-wrapper or configuration change.
+step. A non-HTTPS `cachew-url` (including the in-cluster
+`http://cachew.cachew.svc.cluster.local`) leaves the plain checkout: no session,
+token, wrapper or configuration change. An untrusted HTTPS one fails the action
+(see [Refused inputs](#refused-inputs)).
 
 `cachew-checked-out` reports whether cachew produced the complete checkout, in
 which case `actions/checkout` did not run. `cachew-configured` reports whether
@@ -127,13 +128,22 @@ Afterward the action adds:
 ```text
 url.<cachew>/git/github.com/.insteadOf = https://github.com/
 http.<cachew>/....extraHeader          = the checkout token (cache URLs only)
+http.<cachew>/.sslVerify               = true
+http.<cachew>/.followRedirects         = false
 checkout.workers = 0
 checkout.thresholdForParallelism = 50
 submodule.fetchJobs = 0
 gc.auto = 0
 ```
 
-Tokens are scoped to cache URLs. Upstream credentials stay exactly where
+Tokens are scoped to cache URLs, and requests that can carry one always use
+verified TLS and never follow a redirect: the two `http.<cachew>/` settings
+above, with `GIT_SSL_NO_VERIFY` dropped from the cache checkout and from the
+wrapper's cache attempt. The token is not in the environment of any process the
+action starts (Git, curl, hooks, `submodule foreach` shells). The upstream
+origin (`github-server-url`) must be `https://<host>[:port]` with a plain DNS
+name or IP literal, and a submodule URL exactly `<origin>/<owner>/<name>`;
+anything else uses the standard checkout. Upstream credentials stay exactly where
 `actions/checkout` puts them (repository-local), so later steps can use other
 credentials for other repositories. With `persist-credentials: false` the token
 is used only for the checkout itself. Steps may write the global
@@ -168,6 +178,31 @@ with this environment must set its own `GIT_CONFIG_GLOBAL`, or the job should us
 Dockerfile actions): the runner passes `GIT_CONFIG_GLOBAL` into them unchanged,
 but the host path it names does not exist inside the container, so Git there
 ignores the image's own global configuration and cannot write a global one.
+
+## Refused inputs
+
+Most unsupported inputs fall back to the standard checkout. A few only make
+sense as an attack and have no fallback: the action posts an error annotation
+titled `cachew-checkout: possible security compromise attempt` and fails before
+any checkout runs. They are:
+
+- a `github-server-url` whose host contains shell or Git configuration
+  metacharacters;
+- an HTTPS `cachew-url` that is not in `trusted_caches.json`, which would have
+  received the checkout token;
+- a `path` that leaves the workspace (also through a symlink), or a `repository`,
+  submodule name or submodule path with `..`, `.git`, a backslash or control
+  characters;
+- a `ref` that starts with `-` and would be read as a Git option;
+- a submodule URL on the upstream host that carries a query, an encoded segment
+  or anything else beyond `<owner>/<name>`;
+- a `CACHEW_SESSION_DIR` that points outside the action's own session in
+  `RUNNER_TEMP`.
+
+The annotation names the check, never the offending value. These checks run only
+where cachew runs (self-hosted Linux, or `cachew: true`); elsewhere the action is
+still exactly `actions/checkout`. After a refusal the cache stays off for
+anything that still runs in the job.
 
 ## Upstream fallback
 

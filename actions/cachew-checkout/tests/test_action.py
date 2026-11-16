@@ -126,6 +126,17 @@ class RunnerGateTests(unittest.TestCase):
             self.active_steps(runner("self-hosted")), ["mode", "session", "cachew", "checkout", "configure"]
         )
 
+    def test_a_security_violation_fails_the_job_before_any_checkout(self):
+        stop = next(step for step in self.steps if step.get("id") == "violation")
+        self.assertIn("exit 1", script(stop))
+        self.assertLess(self.steps.index(stop), self.steps.index(self.checkout))
+        for source in ("session", "cachew"):
+            with self.subTest(source=source):
+                context = dict(runner("self-hosted"), **{f"steps.{source}.outputs.security-violation": "true"})
+                self.assertTrue(evaluate(stop["if"], context))
+        self.assertFalse(evaluate(stop["if"], runner("self-hosted")))
+        self.assertFalse(evaluate(stop["if"], runner("github-hosted")))
+
     def test_official_checkout_runs_only_when_cachew_did_not_check_out(self):
         self.assertEqual(self.active_steps(runner("self-hosted"), cloned=True), ["mode", "session", "cachew", "configure"])
 

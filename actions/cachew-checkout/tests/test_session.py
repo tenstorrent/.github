@@ -334,6 +334,30 @@ class SessionTests(unittest.TestCase):
     def finish_without_credential_assertion(self):
         self.end_job()
 
+    def test_cache_requests_keep_verified_tls_and_no_redirects_and_are_removed_with_the_rewrite(self):
+        self.assertEqual(self.flow(), (True, True))
+        directory = Path(self.env["CACHEW_SESSION_DIR"])
+        cache = self.fixture.cache.url
+
+        def value(key):
+            result = subprocess.run(
+                ["git", "config", "--file", str(directory / "global.config"), "--get", key],
+                env=self.env,
+                text=True,
+                capture_output=True,
+            )
+            return result.stdout.strip()
+
+        self.assertEqual(value(f"http.{cache}/.sslVerify"), "true")
+        self.assertEqual(value(f"http.{cache}/.followRedirects"), "false")
+        # A later checkout takes every cachew key out again.
+        self.prepare()
+        self.assertEqual(value(f"http.{cache}/.sslVerify"), "")
+        self.assertEqual(value(f"http.{cache}/.followRedirects"), "")
+        self.assertTrue(self.activate())
+        self.assertEqual(value(f"http.{cache}/.sslVerify"), "true")
+        self.finish()
+
     def test_persist_false_does_not_leave_current_token_in_globals(self):
         self.env["CACHEW_PERSIST_CREDENTIALS"] = "false"
         self.assertEqual(self.flow(), (True, True))
@@ -767,6 +791,30 @@ class SessionTests(unittest.TestCase):
                 self.run_prepare_expecting_fallback(env)
         shutil.rmtree(self.fixture.target, ignore_errors=True)
         self.plain_checkout_without_cache(dict(self.env, CACHEW_CACHEW_URL="https://evil.example"))
+
+    def test_an_untrusted_https_cache_origin_is_reported_as_a_security_violation(self):
+        for url, violation in (("https://evil.example", "true"), ("http://10.43.0.100:8080", None)):
+            with self.subTest(url=url):
+                (self.fixture.root / "output").write_text("")
+                result = self.run_step("session", dict(self.env, CACHEW_CACHEW_URL=url))
+                outputs = fixtures.runner_file(self.fixture.root / "output")
+                self.assertEqual(outputs["ready"], "false")
+                self.assertEqual(outputs.get("security-violation"), violation)
+                self.assertEqual("::error title=cachew-checkout: possible security" in result.stdout, bool(violation))
+                self.assertEqual(list(self.fixture.runtime.glob("cachew-*")), [])
+
+    def test_a_redirected_session_directory_is_reported_as_a_security_violation(self):
+        self.assertEqual(self.flow(), (True, True))
+        elsewhere = self.fixture.root / "cachew-elsewhere"
+        elsewhere.mkdir()
+        (self.fixture.root / "output").write_text("")
+        result = self.run_step("session", dict(self.env, CACHEW_SESSION_DIR=str(elsewhere)))
+        outputs = fixtures.runner_file(self.fixture.root / "output")
+        self.assertEqual(outputs["security-violation"], "true")
+        self.assertEqual(outputs["ready"], "false")
+        self.assertIn("::error title=cachew-checkout: possible security", result.stdout)
+        self.assertEqual(list(elsewhere.iterdir()), [])
+        self.finish()
 
     def test_loopback_http_without_the_test_variable_leaves_plain_checkout(self):
         env = dict(self.env)

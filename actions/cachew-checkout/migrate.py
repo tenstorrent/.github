@@ -55,7 +55,7 @@ CHECKOUT = re.compile(
     r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?uses:[ \t]*)(?P<quote>['\"]?)"
     r"(?:actions/checkout@(?:"
     + "|".join(map(re.escape, MIGRATABLE_REFS))
-    + r")|(?:"
+    + r")|(?i:"
     + re.escape(ACTION_REPO)
     + "|"
     + re.escape(LEGACY_REPO)
@@ -63,8 +63,10 @@ CHECKOUT = re.compile(
     r"(?P=quote)(?:[ \t]*#[^\n]*)?[ \t]*$"
 )
 # The whole ref after @, so a branch, short SHA or padded SHA is compared as written.
+# GitHub resolves owner and repository names in any case, so a reference
+# spelled Tenstorrent/.GitHub/... is held to the pin as well.
 ANY_PIN = re.compile(
-    r"(?P<repo>" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")"
+    r"(?P<repo>(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r"))"
     r"(?P<subpath>/[\w./-]+)?@(?P<ref>[^\s'\"#]+)"
 )
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
@@ -149,7 +151,7 @@ def rewrite(text, action_sha):
         if "cachew: keep" in match[0]:
             return match[0]
         if any(start <= match.start() < end for start, end in hosted):
-            return f"{match['prefix']}{PLAIN_CHECKOUT}" if "cachew-checkout@" in match[0] else match[0]
+            return f"{match['prefix']}{PLAIN_CHECKOUT}" if "cachew-checkout@" in match[0].lower() else match[0]
         return f"{match['prefix']}{action} # cachew checkout"
 
     return CHECKOUT.sub(replace, text)
@@ -198,7 +200,7 @@ def verify_pins(root, action_sha, exclude=()):
         if excluded(path, exclude):
             continue
         for match in ANY_PIN.finditer((root / path).read_text()):
-            if match["repo"] == LEGACY_REPO:
+            if match["repo"].lower() == LEGACY_REPO.lower():
                 problems.append(f"{path} references {match[0]}; the action moved to {ACTION_REPO} (run --write)")
                 continue
             if match["subpath"]:

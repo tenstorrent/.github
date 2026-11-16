@@ -29,6 +29,7 @@ from checkout import (  # noqa: E402
     HARD_DEADLINE_SECONDS,
     MAX_DEADLINE_SECONDS,
     MAX_FETCH_TIMEOUT_SECONDS,
+    TLS_OVERRIDES,
     transport_error,
 )
 from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed  # noqa: E402
@@ -363,6 +364,8 @@ def cache_attempt(real_git, arguments, environ, index):
     ]
     # transport_error matches Git's English messages.
     cache_env = dict(environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/false", LC_ALL="C", LANGUAGE="")
+    for name in TLS_OVERRIDES:
+        cache_env.pop(name, None)
     tail = bytearray()
 
     def relay(stream):

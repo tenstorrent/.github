@@ -67,10 +67,38 @@ class Bypass(Exception):
         self.transport = transport
 
 
+class SecurityViolation(Bypass):
+    """An input no supported configuration produces and that only makes sense as
+    an attack: shell or option injection, path traversal, or sending the token
+    somewhere untrusted. Unlike a Bypass there is no fallback: the action fails."""
+
+
+def report_violation(error):
+    """A GitHub error annotation. The message is one of this module's fixed
+    strings, never the offending value, which could itself carry workflow commands."""
+    print(
+        "::error title=cachew-checkout: possible security compromise attempt::"
+        f"{error}. The checkout was stopped without falling back to the standard checkout. "
+        "If this input is intentional, it is not supported; otherwise treat the workflow run as hostile."
+    )
+
+
 def loopback_http_allowed(environ):
     """Plain HTTP is only for the loopback fixtures in tests/. action.yml clears
     this test-only variable, so no workflow input can select plain HTTP."""
     return environ.get("CACHEW_TEST_ALLOW_LOOPBACK_HTTP") == "1"
+
+
+# A server origin ends up in Git configuration keys, cache URL paths and the
+# shell command of `git submodule foreach`, so its host is limited to DNS names
+# and IP literals: no quotes, spaces or shell metacharacters.
+HOST = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])(?::[0-9]{1,5})?")
+# Never handed to child processes: Git, curl, hooks and `submodule foreach`
+# shells get credentials only through the configuration written for them.
+SECRET_ENVIRONMENT = ("CACHEW_TOKEN",)
+# Git lets this variable override http.sslVerify, so it is dropped wherever a
+# request can carry the token.
+TLS_OVERRIDES = ("GIT_SSL_NO_VERIFY",)
 
 
 def origin(value, environ):
@@ -88,6 +116,10 @@ def origin(value, environ):
         or url.query
         or url.fragment
     ):
+        raise Bypass("unsupported server URL")
+    if not re.fullmatch(r"[A-Za-z0-9.:\[\]-]+", url.netloc):
+        raise SecurityViolation("server URL host contains shell or configuration metacharacters")
+    if not HOST.fullmatch(url.netloc):
         raise Bypass("unsupported server URL")
     return f"{url.scheme}://{url.netloc}"
 
@@ -164,9 +196,10 @@ def unsafe_pr_checkout(environ, repository, ref, commit):
 
 def relative_path(value):
     path = PurePosixPath(value)
-    if not value or path.is_absolute() or any(p in ("", ".", "..", ".git") for p in value.split("/")):
-        raise Bypass("unsafe repository or submodule path")
-    if "\\" in value or any(ord(c) < 32 for c in value):
+    parts = value.split("/")
+    if path.is_absolute() or ".." in parts or ".git" in parts or "\\" in value or any(ord(c) < 32 for c in value):
+        raise SecurityViolation("repository or submodule path escapes its directory or contains control characters")
+    if not value or "" in parts or "." in parts:
         raise Bypass("unsafe repository or submodule path")
     return path
 
@@ -201,7 +234,7 @@ def cache_candidates(value, upstream, environ):
     cache = origin(value, environ)
     loopback_fixture = loopback_http_allowed(environ) and upstream.startswith("http://") and cache.startswith("http://")
     if cache not in TRUSTED_CACHES and not loopback_fixture:
-        raise Bypass("untrusted cache origin")
+        raise SecurityViolation("cachew-url is not a trusted cache origin and would have received the checkout token")
     return [cache]
 
 
@@ -219,9 +252,9 @@ def healthy(cache, timeout, env):
 
 
 def repository_name(value):
+    relative_path(value)
     if not re.fullmatch(r"[\w.-]+/[\w.-]+", value, re.ASCII):
         raise Bypass("unsupported repository name")
-    relative_path(value)
     return value
 
 
@@ -308,7 +341,9 @@ class Checkout:
         if self.commit and not SHA.fullmatch(self.commit):
             raise Bypass("unsupported checkout commit")
         self.commit = self.commit.lower()
-        if self.ref.startswith(("-", "+")) or any(c.isspace() or c in ":*?[^~\\" for c in self.ref):
+        if self.ref.startswith("-"):
+            raise SecurityViolation("ref starts with '-' and would be read as a Git option")
+        if self.ref.startswith("+") or any(c.isspace() or c in ":*?[^~\\" for c in self.ref):
             raise Bypass("unsupported checkout ref")
         self.depth = int(checkout_input(environ, "CACHEW_FETCH_DEPTH", "1"))
         if self.depth < 0:
@@ -339,25 +374,19 @@ class Checkout:
         # Resolve existing ancestors before creating anything, including symlinks.
         self.target = target.resolve()
         if not self.target.is_relative_to(workspace):
-            raise Bypass("checkout path is outside the workspace")
+            raise SecurityViolation("checkout path is outside the workspace")
         if self.target.is_dir() and not self.target.is_symlink():
             remove_stale_stages(self.target)
         if self.target.exists() and (not self.target.is_dir() or any(self.target.iterdir())):
             raise Bypass("existing checkout uses upstream directly")
         # Worktree commands see the caller's Git configuration, as actions/checkout's do,
         # but can never reach the network: a missing object fails the attempt instead.
-        self.local_env = {
-            key: value for key, value in environ.items() if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
-        }
+        dropped = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", *SECRET_ENVIRONMENT, *TLS_OVERRIDES)
+        self.local_env = {key: value for key, value in environ.items() if key not in dropped}
         self.local_env.update(GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never", GIT_LFS_SKIP_SMUDGE="1")
         self.env = dict(environ)
         for key in list(self.env):
-            if key.startswith(("GIT_CONFIG_", "GIT_TRACE")) or key in (
-                "GIT_DIR",
-                "GIT_WORK_TREE",
-                "GIT_INDEX_FILE",
-                "GIT_CURL_VERBOSE",
-            ):
+            if key.startswith(("GIT_CONFIG_", "GIT_TRACE")) or key in (*dropped, "GIT_CURL_VERBOSE"):
                 del self.env[key]
         self.env.update(
             GIT_CONFIG_NOSYSTEM="1",
@@ -392,6 +421,9 @@ class Checkout:
         attached before a trusted origin has answered the liveness probe."""
         config = [
             ("http.followRedirects", "false"),
+            # Also for lazy fetches, which read the caller's own configuration.
+            ("http.sslVerify", "true"),
+            (f"http.{self.cache}/.sslVerify", "true"),
             ("credential.helper", ""),
             ("fetch.recurseSubmodules", "false"),
             ("http.lowSpeedLimit", "1000"),
@@ -469,7 +501,8 @@ class Checkout:
                 [self.git_executable, "ls-remote", *arguments], env, "upstream ref lookup", upstream=True, cwd=empty
             )
         refs, symrefs = {}, {}
-        for line in output.decode().splitlines():
+        # LF only: str.splitlines also splits on U+2028 and others a ref name may contain.
+        for line in output.decode().split("\n"):
             value, _, name = line.partition("\t")
             if value.startswith("ref: "):
                 symrefs[name] = value[len("ref: ") :]
@@ -650,7 +683,11 @@ class Checkout:
                 child_url = "https://github.com/" + child_url[len("git@github.com:") :]
             if not child_url.startswith(self.upstream + "/"):
                 raise Bypass("submodule uses another upstream")
-            relative_path(child_url[len(self.upstream) + 1 :])
+            # Exactly owner/name: no query, fragment or encoded segments in the cache request path.
+            child_path = child_url[len(self.upstream) + 1 :]
+            if not re.fullmatch(r"[\w./-]*", child_path, re.ASCII):
+                raise SecurityViolation("submodule URL carries a query, encoded segment or other request smuggling")
+            repository_name(child_path)
             self.modules += 1
             if level >= MAX_SUBMODULE_DEPTH:
                 raise Bypass(f"submodule nesting deeper than {MAX_SUBMODULE_DEPTH}")
@@ -788,6 +825,7 @@ def main():
     # false: the cache endpoint itself failed, so later dependencies skip it.
     available = "unknown"
     selected = ""
+    violation = False
     try:
         session = os.environ.get("CACHEW_SESSION_DIR")
         if session and (Path(session) / "cache-disabled").exists():
@@ -803,6 +841,10 @@ def main():
         # The same outputs as actions/checkout, which does not run.
         outputs = {"ref": attempt.ref, "commit": commit}
         print(f"Checked out {commit} from cachew; upstream checkout is not needed.")
+    except SecurityViolation as error:
+        # action.yml fails the job on this output instead of running the upstream checkout.
+        violation = True
+        report_violation(error)
     except Bypass as error:
         if error.transport:
             available = "false"
@@ -812,12 +854,13 @@ def main():
         available = "unknown"
         print("Cachew checkout unavailable. Continuing immediately with upstream checkout.")
     if output := os.environ.get("GITHUB_OUTPUT"):
+        outputs.update({"checked-out": str(checked_out).lower(), "available": available, "cache-url": selected})
+        outputs["security-violation"] = str(violation).lower()
         with open(output, "a") as stream:
-            stream.write(f"checked-out={str(checked_out).lower()}\n")
-            stream.write(f"available={available}\n")
-            stream.write(f"cache-url={selected}\n")
             for key, value in outputs.items():
-                stream.write(f"{key}={value}\n")
+                # A random delimiter: a value can never end its own entry or start another.
+                delimiter = f"cachew_{uuid.uuid4().hex}"
+                stream.write(f"{key}<<{delimiter}\n{value}\n{delimiter}\n")
 
 
 if __name__ == "__main__":

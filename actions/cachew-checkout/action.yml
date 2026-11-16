@@ -176,6 +176,16 @@ runs:
         CACHEW_CACHEW_HEALTH_TIMEOUT: ${{ inputs.cachew-health-timeout }}
         CACHEW_CACHEW_FETCH_TIMEOUT: ${{ inputs.cachew-fetch-timeout }}
       run: '"$CACHEW_PYTHON" "$CACHEW_ACTION_PATH/checkout.py" || echo "Cachew checkout unavailable; continuing with upstream checkout."'
+    # An input that only makes sense as an attack (injection, path traversal, an
+    # untrusted token destination) has no fallback: the scripts above already
+    # posted the error annotation, and the job stops before any checkout.
+    - name: Stop on a possible security compromise attempt
+      id: violation
+      if: steps.session.outputs.security-violation == 'true' || steps.cachew.outputs.security-violation == 'true'
+      shell: bash
+      run: |
+        echo "cachew-checkout refused an input that looks like a security compromise attempt; see the error annotation."
+        exit 1
     # Only when cachew did not produce the complete checkout: skipped session,
     # unsupported mode, existing checkout, or any cache or local failure.
     - name: Checkout from upstream
@@ -211,7 +221,8 @@ runs:
       if: always() && steps.session.outputs.ready == 'true'
       shell: bash
       env:
-        CACHEW_AVAILABLE: ${{ steps.cachew.outputs.available || 'unknown' }}
+        # After a refused input the cache stays off for whatever still runs in the job.
+        CACHEW_AVAILABLE: ${{ steps.cachew.outputs.security-violation == 'true' && 'false' || steps.cachew.outputs.available || 'unknown' }}
         CACHEW_SELECTED_URL: ${{ steps.cachew.outputs.cache-url }}
         CACHEW_CACHEW_URL: ${{ inputs.cachew-url }}
         CACHEW_TEST_ALLOW_LOOPBACK_HTTP: ''

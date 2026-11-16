@@ -48,7 +48,10 @@ from checkout import (  # noqa: E402
     DEFAULT_FETCH_TIMEOUT_SECONDS,
     MAX_FETCH_TIMEOUT_SECONDS,
     MAX_HEALTH_TIMEOUT_SECONDS,
+    SECRET_ENVIRONMENT,
+    TLS_OVERRIDES,
     Bypass,
+    SecurityViolation,
     cache_candidates,
     checkout_flag,
     checkout_input,
@@ -56,6 +59,7 @@ from checkout import (  # noqa: E402
     git_version_at_least,
     healthy,
     origin,
+    report_violation,
     repository_name,
 )
 
@@ -73,11 +77,17 @@ PERFORMANCE = [
 FALLBACK_LOW_SPEED_LIMIT = "524288"
 FALLBACK_LOW_SPEED_SECONDS = "60"
 MAX_INCLUDED_FILES = 30
+# Git's own limit on nested includes; also ends an include cycle.
+MAX_INCLUDE_DEPTH = 10
 
 
 def config_environment(environ):
     """The environment for Git commands that must see only the named file."""
-    return {key: value for key, value in environ.items() if not key.startswith(("GIT_CONFIG_", "GIT_TRACE"))}
+    return {
+        key: value
+        for key, value in environ.items()
+        if not key.startswith(("GIT_CONFIG_", "GIT_TRACE")) and key not in SECRET_ENVIRONMENT
+    }
 
 
 def git(real_git, environ, *arguments, allowed=(0,)):
@@ -188,6 +198,8 @@ class Settings:
         def parse(read):
             try:
                 return read()
+            except SecurityViolation:
+                raise
             except (Bypass, KeyError, ValueError):
                 return None
 
@@ -210,7 +222,7 @@ class Settings:
 def owned_session(environ):
     directory = Path(environ["CACHEW_SESSION_DIR"]).resolve()
     if directory.parent != Path(environ["RUNNER_TEMP"]).resolve() or not directory.name.startswith("cachew-"):
-        raise RuntimeError("Invalid cachew session directory")
+        raise SecurityViolation("CACHEW_SESSION_DIR was redirected outside the action's own RUNNER_TEMP session")
     return directory
 
 
@@ -360,16 +372,18 @@ def copy_globals(session, real_git, environ, caches):
     return render(("include.path", str(copied)) for copied in map(copy, originals) if copied)
 
 
-def flatten(real_git, environ, file, skip):
+def flatten(real_git, environ, file, skip, depth=0):
     """Entries of a config file with unconditional includes inlined, except keys
     named in skip. Conditional includes stay directives, evaluated when Git reads
     the result; inlining them would apply one repository's settings everywhere.
     Their paths are made absolute, since the result lives in another directory."""
+    if depth > MAX_INCLUDE_DEPTH:
+        raise RuntimeError("Git configuration includes nest too deeply")
     entries = []
     for key, value in config_entries(real_git, environ, "--file", str(file), "--no-includes"):
         if key.lower() == "include.path":
             included = include_target(value, file, environ)
-            entries += flatten(real_git, environ, included, skip) if os.path.exists(included) else []
+            entries += flatten(real_git, environ, included, skip, depth + 1) if os.path.exists(included) else []
         elif re.fullmatch(r"includeif\..*\.path", key.lower()):
             entries.append((anchored_condition(key, file, environ), include_target(value, file, environ)))
         elif key.lower() not in skip:
@@ -493,6 +507,9 @@ exec "$CACHEW_REAL_GIT" "$@"
 
 
 def activate(environ):
+    token = checkout_input(environ, "CACHEW_TOKEN")
+    # No child process (Git, curl) inherits the token; it travels only in configuration files.
+    environ = {key: value for key, value in environ.items() if key not in SECRET_ENVIRONMENT}
     session = owned_session(environ)
     state = read_state(session)
     real_git = state["real_git"]
@@ -503,7 +520,6 @@ def activate(environ):
     # locked file still redirects this checkout's lazy fetches.
     pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"))
     settings = Settings(environ)
-    token = checkout_input(environ, "CACHEW_TOKEN")
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
     mask(encoded)
@@ -544,7 +560,13 @@ def activate(environ):
         write_state(session, state)
     if not disabled.exists():
         host = urllib.parse.urlsplit(settings.upstream).netloc
-        entries = [(f"url.{cache}/git/{host}/.insteadOf", settings.upstream + "/")]
+        entries = [
+            (f"url.{cache}/git/{host}/.insteadOf", settings.upstream + "/"),
+            # Every request to the cache may carry a token: always verified TLS, and
+            # never a redirect, which would repeat the header to another host.
+            (f"http.{cache}/.sslVerify", "true"),
+            (f"http.{cache}/.followRedirects", "false"),
+        ]
         if default := state["defaults"].get(settings.upstream):
             entries += auth_entries(cache, default)
         for repository, header in state["tokens"].items():
@@ -575,7 +597,11 @@ def main(phase):
     environ = dict(os.environ)
     try:
         {"prepare": prepare, "activate": activate}[phase](environ)
-    except Exception:
+    except Exception as error:
+        if isinstance(error, SecurityViolation):
+            # action.yml fails the job on this output; there is no fallback checkout.
+            report_violation(error)
+            output("security-violation", "true")
         # A session an earlier checkout activated must not rewrite later reads to
         # the cache once this step cannot keep it consistent.
         try:

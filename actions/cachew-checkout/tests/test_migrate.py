@@ -201,6 +201,19 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(code, 1, ref)
             self.assertIn(ref, out)
 
+    def test_verify_pins_sees_references_in_any_owner_and_repository_case(self):
+        # GitHub resolves owner/repo case-insensitively, so this is the same action on a branch.
+        self.run_main("--write")
+        workflow = self.root / ".github/workflows/ci.yml"
+        workflow.write_text(
+            workflow.read_text().replace(
+                f"tenstorrent/.github/actions/cachew-checkout@{SHA}", "Tenstorrent/.GitHub/actions/cachew-checkout@main"
+            )
+        )
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("main", out)
+
     def test_files_write_leaves_alone_are_not_held_to_its_pin(self):
         lock = self.root / ".github/workflows/agent.lock.yml"
         lock.write_text(lock.read_text().replace(PLAIN, f"tenstorrent/.github/actions/cachew-checkout@{'d' * 40}"))

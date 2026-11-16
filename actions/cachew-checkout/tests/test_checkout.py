@@ -659,6 +659,124 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(self.cache.requests, [])
         self.assertFalse(self.target.exists())
 
+    def violation(self):
+        """Run the cache checkout; return whether it reported a security violation."""
+        (self.root / "output").write_text("")
+        capture = io.StringIO()
+        with patch.dict(os.environ, self.env, clear=True), redirect_stdout(capture):
+            cachew_checkout.main()
+        outputs = runner_file(self.root / "output")
+        reported = outputs["security-violation"] == "true"
+        annotated = "::error title=cachew-checkout: possible security compromise attempt::" in capture.getvalue()
+        self.assertEqual(reported, annotated)
+        if reported:
+            self.assertEqual(outputs["checked-out"], "false")
+            # One annotation line: no input text that could add workflow commands.
+            self.assertEqual(capture.getvalue().count("::"), 2, capture.getvalue())
+            self.assertNotIn(TOKEN, capture.getvalue())
+        return reported
+
+    def test_attack_shaped_inputs_fail_with_an_error_annotation(self):
+        ordinary = dict(self.env)
+        self.assertFalse(self.violation())
+        shutil.rmtree(self.target)
+        self.cache.requests.clear()
+        self.upstream.requests.clear()
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.workspace / "link").symlink_to(outside)
+        for change in (
+            {"CACHEW_GITHUB_SERVER_URL": "https://github.com';touch pwned;'"},
+            {"CACHEW_GITHUB_SERVER_URL": "https://a`id`.example\n::add-mask::x"},
+            {"CACHEW_CACHEW_URL": "https://evil.example"},
+            {"CACHEW_CACHEW_URL": "https://cachew.dev.tenstorrent.net.evil.test"},
+            {"CACHEW_PATH": "../escape"},
+            {"CACHEW_PATH": "link/escape"},
+            {"CACHEW_REF": "--upload-pack=touch pwned"},
+            {"CACHEW_REPOSITORY": "org/.."},
+        ):
+            with self.subTest(change=change):
+                self.env = dict(ordinary, **change)
+                self.assertTrue(self.violation())
+                self.assertEqual(self.cache.requests, [])
+                self.assertEqual(self.upstream.requests, [])
+                self.assertFalse(self.target.exists())
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_unsupported_but_harmless_inputs_still_fall_back_quietly(self):
+        ordinary = dict(self.env)
+        for change in (
+            {"CACHEW_GITHUB_SERVER_URL": "http://github.com"},
+            {"CACHEW_GITHUB_SERVER_URL": "https://github.com:port"},
+            {"CACHEW_CACHEW_URL": "http://cachew.cachew.svc.cluster.local"},
+            {"CACHEW_REF": "bad ref"},
+            {"CACHEW_FILTER": "bad filter"},
+            {"CACHEW_LFS": "true"},
+        ):
+            with self.subTest(change=change):
+                self.env = dict(ordinary, **change)
+                self.assertFalse(self.violation())
+
+    def test_server_origins_with_shell_or_config_metacharacters_are_rejected(self):
+        # The origin reaches `git submodule foreach` shell commands and Git configuration keys.
+        for url in (
+            "https://x';touch pwned;'",
+            "https://git hub.com",
+            "https://a`id`.example",
+            "https://exa$(id)mple.com",
+            'https://a"b.example',
+            "https://-leading.example",
+            "https://github.com:port",
+        ):
+            with self.assertRaises(cachew_checkout.Bypass, msg=url):
+                cachew_checkout.origin(url, {})
+        for url in ("https://github.com", "https://ghe.example.com:8443/", "https://[::1]:8443"):
+            cachew_checkout.origin(url, {})
+        self.env["CACHEW_GITHUB_SERVER_URL"] = "https://github.com';touch pwned;'"
+        self.assertFalse(self.attempt())
+        self.assertEqual(self.cache.requests, [])
+
+    def test_child_processes_inherit_neither_the_token_nor_a_tls_override(self):
+        self.env["GIT_SSL_NO_VERIFY"] = "1"
+        attempt = cachew_checkout.Checkout(self.env)
+        attempt.cache = self.cache.url
+        attempt.configure_transport()
+        for environment in (attempt.env, attempt.local_env, attempt.upstream_env):
+            self.assertNotIn("CACHEW_TOKEN", environment)
+            self.assertNotIn("GIT_SSL_NO_VERIFY", environment)
+            self.assertNotIn(TOKEN, environment.values())
+        self.assertIn(("http.sslVerify", "true"), attempt.cache_config)
+        self.assertIn((f"http.{self.cache.url}/.sslVerify", "true"), attempt.cache_config)
+
+    def test_submodule_url_must_be_exactly_owner_and_name(self):
+        child = git(self.project_root / "org" / "child", "rev-parse", "HEAD", env=self.env)
+        for index, url in enumerate(("../child?ref=1", "../child%2f..%2f..%2fadmin", "../child@x")):
+            name = f"odd{index}"
+            sha = self.repository(name, [("child-name", "deps/child", url, child)])
+            self.env.update(CACHEW_REPOSITORY=f"org/{name}", CACHEW_REF=sha)
+            self.assertTrue(self.violation(), url)
+            self.assertFalse(any("child" in path for _, path, _ in self.cache.requests), url)
+            self.assertEqual(list(self.target.iterdir()), [], url)
+
+    def test_ref_listing_is_split_on_line_feeds_only(self):
+        attempt = cachew_checkout.Checkout(self.env)
+        listing = f"{'a' * 40}\trefs/heads/x\u2028{'b' * 40}\trefs/heads/main\n".encode()
+        with patch.object(cachew_checkout.Checkout, "run_git", lambda *_, **__: listing):
+            refs, _ = attempt.ls_remote("--refs", attempt.url)
+        self.assertNotIn("refs/heads/main", refs)
+
+    def test_outputs_cannot_inject_another_output(self):
+        self.env["CACHEW_SUBMODULES"] = "false"
+        resolve = cachew_checkout.Checkout.resolve
+
+        def renamed(attempt):
+            resolve(attempt)
+            attempt.ref = "x\nchecked-out=false"
+
+        with patch.object(cachew_checkout.Checkout, "resolve", renamed):
+            self.assertTrue(self.attempt())
+        self.assertEqual(runner_file(self.root / "output")["ref"], "x\nchecked-out=false")
+
     def test_health_timeout_is_not_retried(self):
         self.cache.health_delay = 0.4
         started = time.monotonic()
