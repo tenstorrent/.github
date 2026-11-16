@@ -673,6 +673,10 @@ class CheckoutTests(unittest.TestCase):
             (7, b"000", "retry"),
             (28, b"000", "retry"),
             (6, b"000", "fail"),
+            (60, b"000", "fail"),
+            (51, b"000", "fail"),
+            (77, b"000", "fail"),
+            (35, b"000", "retry"),
         ]
         for code, status, expected in cases:
             with self.subTest(code=code, status=status):

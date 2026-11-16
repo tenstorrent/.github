@@ -265,11 +265,18 @@ def cache_candidates(value, upstream, environ):
     return [cache]
 
 
+# curl exits that a retry cannot change, although curl reports HTTP status 000 for
+# them like any unanswered request: 6 is a name that does not resolve; 51, 60 and
+# 77 are a server certificate that does not verify (60; 51 before curl 7.62) or CA
+# certificates that cannot be read.
+PERMANENT_CURL_EXITS = frozenset({6, 51, 60, 77})
+
+
 def liveness(cache, timeout, env):
     """Classify a trusted cache origin's unauthenticated liveness probe: "ok" for a
     200, "retry" for a failure that may pass (no answer, a timeout or a 5xx), and
     "fail" for one that will not: a name that does not resolve (every runner off the
-    CI VLAN), a redirect, a 4xx or any other answer."""
+    CI VLAN), a certificate that does not verify, a redirect, a 4xx or any other answer."""
     # --disable ignores ~/.curlrc, which could otherwise add auth or retries.
     # The process deadline also bounds DNS resolution, unlike a socket timeout.
     command = ["curl", "--disable", "--silent", "--fail", "--retry", "0", "--max-time", str(timeout)]
@@ -280,7 +287,7 @@ def liveness(cache, timeout, env):
         return "retry"
     if health.returncode == 0 and health.stdout == b"200":
         return "ok"
-    if health.returncode == 6:  # CURLE_COULDNT_RESOLVE_HOST
+    if health.returncode in PERMANENT_CURL_EXITS:
         return "fail"
     if health.stdout == b"000" or health.stdout[:1] == b"5":
         return "retry"
