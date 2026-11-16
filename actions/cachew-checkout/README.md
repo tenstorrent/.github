@@ -106,7 +106,7 @@ fails the attempt rather than reaching upstream.
 
 The whole cache phase has a 300-second budget (`CACHEW_CHECKOUT_BUDGET`) on top
 of the per-fetch stall timeout, so a slow but moving cache falls back to the
-official checkout well within the step's `timeout-minutes`.
+official checkout well within the step's `timeout-minutes`. Retries share this budget.
 
 With `filter`, the main repository needs two cache fetches: the complete tip
 commit, then the filtered history at the requested depth. The worktree
@@ -123,6 +123,14 @@ repository is fetched once, filtered, and only `sparse-checkout set` and
 `checkout` may fetch, from the selected cache only (a per-command `insteadOf`
 plus the cache transport); `origin` stays upstream in the persisted
 configuration. Sparse checkouts with submodules use the standard checkout.
+
+A transient cache failure is retried up to twice before falling back: no answer
+or a timeout from the liveness probe, a 5xx, or a connection that breaks
+mid-fetch. Each retry starts again from an empty target and probes the cache
+again, after about 3 seconds and then about 6 seconds, each lengthened by up to
+half at random so that runners failing together do not return together. A name
+that does not resolve (every runner off the CI VLAN), a redirect, a 4xx or a
+certificate error is not retried, and attempts share the 300-second budget.
 
 The pinned official checkout runs only when cachew did not produce the checkout:
 cachew skipped (hosted runner, `cachew: false`, no session), an unsupported mode

@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path, PurePosixPath
 import posixpath
+import random
 import re
 import shutil
 import signal
@@ -35,10 +36,21 @@ TRANSPORT_ERRORS = re.compile(
 # A 4xx on the pack request also prints "RPC failed" and "remote end hung up",
 # but it is the cache answering about one repository.
 CLIENT_ANSWER = re.compile(rb"(?:HTTP |returned error: )4\d\d", re.IGNORECASE)
+# Transport failures that a retry cannot change: a name that does not resolve (off
+# the CI VLAN), a redirect (never followed) and a certificate that does not verify.
+PERMANENT_ERRORS = re.compile(
+    rb"could not resolve|returned error: 3\d\d|ssl certificate|server certificate|certificate verif",
+    re.IGNORECASE,
+)
 
 
 def transport_error(errors):
     return bool(TRANSPORT_ERRORS.search(errors)) and not CLIENT_ANSWER.search(errors)
+
+
+def transient_error(errors):
+    """A transport failure that a retry may get past."""
+    return transport_error(errors) and not PERMANENT_ERRORS.search(errors)
 
 
 # Input limits for cachew-health-timeout and cachew-fetch-timeout.
@@ -48,8 +60,15 @@ DEFAULT_FETCH_TIMEOUT_SECONDS = 120
 # The whole cache checkout (every fetch, the lazy blob fetches of a sparse
 # checkout, and the local steps) must leave the upstream fallback room inside
 # consumers' `timeout-minutes: 20`: a degraded cache that still moves above the
-# low-speed limit is abandoned after this budget.
+# low-speed limit is abandoned after this budget. Retries share this budget.
 CHECKOUT_BUDGET_SECONDS = 300
+# Waits before each retry of a transient cache failure (no answer, a timeout, a
+# 5xx or a transport error mid-fetch). Each wait is lengthened by up to
+# RETRY_JITTER of itself at random, so runners that failed together do not return
+# together. Tests replace `pause` to skip the waits.
+RETRY_DELAYS_SECONDS = (3, 6)
+RETRY_JITTER = 0.5
+pause = time.sleep
 # Downstream reads through the wrapper have no step-level budget; this cap only
 # guards against a transfer that trickles forever just above the low-speed limit.
 HARD_DEADLINE_SECONDS = 3600
@@ -60,11 +79,13 @@ SHA = re.compile(r"[0-9a-fA-F]{40}")
 
 
 class Bypass(Exception):
-    """Stop the cache attempt and proceed directly to upstream checkout."""
+    """Stop the cache attempt and proceed directly to upstream checkout. transport
+    marks a failure of the cache endpoint; transient marks one a retry may get past."""
 
-    def __init__(self, message, transport=False):
+    def __init__(self, message, transport=False, transient=False):
         super().__init__(message)
         self.transport = transport
+        self.transient = transient
 
 
 class SecurityViolation(Bypass):
@@ -225,6 +246,12 @@ def duration(value, maximum):
     return seconds
 
 
+def checkout_deadline(environ):
+    """The monotonic time at which the cache checkout, retries included, must end."""
+    budget = duration(environ.get("CACHEW_CHECKOUT_BUDGET", str(CHECKOUT_BUDGET_SECONDS)), MAX_DEADLINE_SECONDS)
+    return time.monotonic() + budget
+
+
 def cache_candidates(value, upstream, environ):
     """Return the trusted cache origins to probe, in order. 'auto' tries every
     trusted origin; only the runner's own cluster answers with a valid
@@ -238,8 +265,11 @@ def cache_candidates(value, upstream, environ):
     return [cache]
 
 
-def healthy(cache, timeout, env):
-    """Whether a trusted cache origin answers its unauthenticated liveness probe."""
+def liveness(cache, timeout, env):
+    """Classify a trusted cache origin's unauthenticated liveness probe: "ok" for a
+    200, "retry" for a failure that may pass (no answer, a timeout or a 5xx), and
+    "fail" for one that will not: a name that does not resolve (every runner off the
+    CI VLAN), a redirect, a 4xx or any other answer."""
     # --disable ignores ~/.curlrc, which could otherwise add auth or retries.
     # The process deadline also bounds DNS resolution, unlike a socket timeout.
     command = ["curl", "--disable", "--silent", "--fail", "--retry", "0", "--max-time", str(timeout)]
@@ -247,8 +277,19 @@ def healthy(cache, timeout, env):
     try:
         health = subprocess.run(command, env=env, capture_output=True, timeout=timeout + 0.5)
     except subprocess.TimeoutExpired:
-        return False
-    return health.returncode == 0 and health.stdout == b"200"
+        return "retry"
+    if health.returncode == 0 and health.stdout == b"200":
+        return "ok"
+    if health.returncode == 6:  # CURLE_COULDNT_RESOLVE_HOST
+        return "fail"
+    if health.stdout == b"000" or health.stdout[:1] == b"5":
+        return "retry"
+    return "fail"
+
+
+def healthy(cache, timeout, env):
+    """Whether a trusted cache origin answers its unauthenticated liveness probe."""
+    return liveness(cache, timeout, env) == "ok"
 
 
 def repository_name(value):
@@ -286,7 +327,7 @@ def remove_stale_stages(target):
 
 
 class Checkout:
-    def __init__(self, environ):
+    def __init__(self, environ, deadline=None):
         self.git_executable = environ.get("CACHEW_REAL_GIT", "git")
         for key in ("SSH_KEY", "SSH_KEY_SET", "LFS"):
             value = checkout_input(environ, f"CACHEW_{key}")
@@ -315,9 +356,8 @@ class Checkout:
         self.health_timeout = duration(environ["CACHEW_CACHEW_HEALTH_TIMEOUT"], MAX_HEALTH_TIMEOUT_SECONDS)
         # Seconds without progress before a cache transfer is abandoned.
         self.fetch_timeout = duration(environ["CACHEW_CACHEW_FETCH_TIMEOUT"], MAX_FETCH_TIMEOUT_SECONDS)
-        budget = duration(environ.get("CACHEW_CHECKOUT_BUDGET", str(CHECKOUT_BUDGET_SECONDS)), MAX_DEADLINE_SECONDS)
-        self.deadline = time.monotonic() + budget
-        repository = checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]
+        self.deadline = deadline if deadline is not None else checkout_deadline(environ)
+        repository =checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]
         repository_name(repository)
         self.url = f"{self.upstream}/{repository}"
         # The same ref and commit as actions/checkout's input helper.
@@ -457,7 +497,8 @@ class Checkout:
             # Git's diagnostics may contain credentials or untrusted server text,
             # so they are only classified, never printed.
             transport = not upstream and transport_error(errors or b"")
-            raise Bypass(f"{message} failed", transport=transport)
+            transient = not upstream and transient_error(errors or b"")
+            raise Bypass(f"{message} failed", transport=transport, transient=transient)
         return output
 
     def git(self, gitdir, *arguments, input=None):
@@ -704,12 +745,15 @@ class Checkout:
             self.seed_children(child_dir, child_url, child_commit, level + 1)
 
     def probe(self):
+        transient = False
         for cache in self.caches:
-            if healthy(cache, self.health_timeout, self.env):
+            state = liveness(cache, self.health_timeout, self.env)
+            if state == "ok":
                 self.cache = cache
                 self.configure_transport()
                 return
-        raise Bypass("cache liveness failed")
+            transient = transient or state == "retry"
+        raise Bypass("cache liveness failed", transport=transient, transient=transient)
 
     def persist_credentials(self):
         """actions/checkout's persisted token layout: a RUNNER_TEMP credentials file
@@ -817,26 +861,49 @@ class Checkout:
             raise
 
 
+def cache_checkout(environ, status):
+    """One cache checkout, retried while its failure is transient and the checkout
+    budget, shared by every attempt, has room for the wait. `status` records what
+    the attempts learned for the outputs: the availability and the selected cache."""
+    deadline = checkout_deadline(environ)
+    retries = 0
+    while True:
+        attempt = Checkout(environ, deadline)
+        status["available"] = "false"
+        status["selected"] = ""
+        try:
+            attempt.probe()
+            status["available"] = "true"
+            status["selected"] = attempt.cache
+            return attempt, attempt.run()
+        except Bypass as error:
+            if not error.transient or retries == len(RETRY_DELAYS_SECONDS):
+                raise
+            delay = RETRY_DELAYS_SECONDS[retries] * (1 + random.uniform(0, RETRY_JITTER))
+            if time.monotonic() + delay >= deadline:
+                raise
+            retries += 1
+            print(
+                f"Cachew checkout failed ({error}); retry {retries} of {len(RETRY_DELAYS_SECONDS)} "
+                f"in {delay:.1f} seconds."
+            )
+            pause(delay)
+
+
 def main():
     checked_out = False
     outputs = {}
     # unknown: no probe happened, so activation probes for itself.
     # true: a trusted cache answered; later per-command failures fall back individually.
     # false: the cache endpoint itself failed, so later dependencies skip it.
-    available = "unknown"
-    selected = ""
+    status = {"available": "unknown", "selected": ""}
     violation = False
     try:
         session = os.environ.get("CACHEW_SESSION_DIR")
         if session and (Path(session) / "cache-disabled").exists():
-            available = "false"
+            status["available"] = "false"
             raise Bypass("cache disabled after an earlier failure")
-        attempt = Checkout(os.environ)
-        available = "false"
-        attempt.probe()
-        available = "true"
-        selected = attempt.cache
-        commit = attempt.run()
+        attempt, commit = cache_checkout(os.environ, status)
         checked_out = True
         # The same outputs as actions/checkout, which does not run.
         outputs = {"ref": attempt.ref, "commit": commit}
@@ -847,14 +914,20 @@ def main():
         report_violation(error)
     except Bypass as error:
         if error.transport:
-            available = "false"
+            status["available"] = "false"
         print(f"Cachew checkout bypassed: {error}. Continuing with upstream checkout.")
     except Exception:
         # A local error, not the cache endpoint: leave the verdict to activation's probe.
-        available = "unknown"
+        status["available"] = "unknown"
         print("Cachew checkout unavailable. Continuing immediately with upstream checkout.")
     if output := os.environ.get("GITHUB_OUTPUT"):
-        outputs.update({"checked-out": str(checked_out).lower(), "available": available, "cache-url": selected})
+        outputs.update(
+            {
+                "checked-out": str(checked_out).lower(),
+                "available": status["available"],
+                "cache-url": status["selected"],
+            }
+        )
         outputs["security-violation"] = str(violation).lower()
         with open(output, "a") as stream:
             for key, value in outputs.items():

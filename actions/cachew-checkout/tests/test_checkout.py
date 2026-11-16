@@ -263,6 +263,11 @@ class CheckoutTests(unittest.TestCase):
         self.sha = self.repository("main", [("child-name", "deps/child", "../child", child)])
         self.env["GITHUB_SHA"] = self.sha
         self.target = self.workspace / "checkout"
+        # Record the retry waits instead of sleeping through them.
+        self.pauses = []
+        pausing = patch.object(cachew_checkout, "pause", self.pauses.append)
+        pausing.start()
+        self.addCleanup(pausing.stop)
 
     def repository(self, name, children=()):
         path = self.project_root / "org" / name
@@ -290,10 +295,10 @@ class CheckoutTests(unittest.TestCase):
         self.assertNotIn(base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode(), capture.getvalue())
         return runner_file(self.root / "output")["checked-out"] == "true"
 
-    def assert_single_cache_attempts(self, repositories):
+    def assert_cache_attempts(self, repositories, attempts=1):
         paths = self.cache.discoveries()
-        self.assertEqual([path.split("/")[-3] for path in paths], repositories)
-        self.assertEqual(sum(path == "/_liveness" for _, path, _ in self.cache.requests), 1)
+        self.assertEqual([path.split("/")[-3] for path in paths], repositories * attempts)
+        self.assertEqual(sum(path == "/_liveness" for _, path, _ in self.cache.requests), attempts)
         for _, path, auth in self.cache.requests:
             if path == "/_liveness":
                 self.assertIsNone(auth)
@@ -521,7 +526,7 @@ class CheckoutTests(unittest.TestCase):
 
     def test_success_checks_out_recursively_from_the_cache_only(self):
         self.assertTrue(self.attempt())
-        self.assert_single_cache_attempts(["main", "child", "grand"])
+        self.assert_cache_attempts(["main", "child", "grand"])
         self.assertEqual(self.upstream.requests, [])
         self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
         self.assertEqual(git(self.target, "symbolic-ref", "HEAD"), "refs/heads/main")
@@ -555,7 +560,7 @@ class CheckoutTests(unittest.TestCase):
                 self.assertTrue(self.attempt())
                 self.assertEqual(git(self.target, "--git-dir=.git/modules/child-name", "tag", "--list"), "v1.0.0")
                 self.assertEqual(git(self.target, "tag", "--list"), "v1.0.0" if setting == "true" else "")
-                self.assert_single_cache_attempts(["main", "child", "grand"])
+                self.assert_cache_attempts(["main", "child", "grand"])
                 shutil.rmtree(self.target)
                 self.cache.requests.clear()
 
@@ -573,7 +578,7 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
         self.assertEqual(git(self.target, "rev-parse", "refs/remotes/origin/another-branch"), other)
         self.assertEqual(git(self.target, "rev-parse", "refs/tags/other-tag"), other)
-        self.assert_single_cache_attempts(["main", "child", "grand"])
+        self.assert_cache_attempts(["main", "child", "grand"])
 
     def test_branches_and_tags_come_from_upstream_names_not_the_cache_advertisement(self):
         # The cache serves its own (possibly stale) copy; upstream has a newer tag and
@@ -607,10 +612,11 @@ class CheckoutTests(unittest.TestCase):
                 shutil.rmtree(self.target)
 
     @unittest.skipUnless(CHECKOUT_JS, "set CHECKOUT_ACTION_JS to the pinned checkout dist/index.js")
-    def test_health_failure_immediately_uses_upstream(self):
+    def test_health_failure_retries_then_uses_upstream(self):
         self.cache.health = 503
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts([])
+        self.assert_cache_attempts([], attempts=3)
+        self.assertEqual(len(self.pauses), 2)
         self.assertFalse(self.target.exists())
         self.official_checkout()
 
@@ -619,11 +625,69 @@ class CheckoutTests(unittest.TestCase):
         self.assertFalse(self.attempt())
         self.assertEqual([p for _, p, _ in self.cache.requests], ["/_liveness"])
 
+    def test_retry_waits_grow_and_stay_within_jitter(self):
+        self.cache.health = 503
+        self.assertFalse(self.attempt())
+        self.assertEqual(len(self.pauses), 2)
+        self.assertTrue(3 <= self.pauses[0] <= 4.5, self.pauses)
+        self.assertTrue(6 <= self.pauses[1] <= 9, self.pauses)
+        self.assertEqual(self.output()["available"], "false")
+
+    def test_retry_uses_the_cache_once_it_recovers(self):
+        self.cache.health = 503
+
+        def recover(delay):
+            self.pauses.append(delay)
+            self.cache.health = 200
+
+        with patch.object(cachew_checkout, "pause", recover):
+            self.assertTrue(self.attempt())
+        self.assertEqual(len(self.pauses), 1)
+        self.assertEqual([path.split("/")[-3] for path in self.cache.discoveries()], ["main", "child", "grand"])
+        self.assertEqual(sum(path == "/_liveness" for _, path, _ in self.cache.requests), 2)
+        self.assertEqual(self.upstream.requests, [])
+        self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
+        self.assertEqual(self.output()["available"], "true")
+
+    def test_permanent_probe_failure_is_not_retried(self):
+        with patch.object(cachew_checkout, "liveness", return_value="fail") as probe:
+            self.assertFalse(self.attempt())
+        self.assertEqual(probe.call_count, 1)
+        self.assertEqual(self.pauses, [])
+        self.assertEqual(self.output()["available"], "false")
+
+    def test_retries_stop_when_the_shared_budget_has_no_room(self):
+        # The first wait (at most 4.5 seconds) fits in 6 seconds; the second (at least 6) does not.
+        self.cache.health = 503
+        self.env["CACHEW_CHECKOUT_BUDGET"] = "6"
+        self.assertFalse(self.attempt())
+        self.assertEqual(len(self.pauses), 1)
+
+    def test_liveness_classifies_probe_outcomes(self):
+        cases = [
+            (0, b"200", "ok"),
+            (0, b"204", "fail"),
+            (0, b"302", "fail"),
+            (22, b"404", "fail"),
+            (22, b"503", "retry"),
+            (7, b"000", "retry"),
+            (28, b"000", "retry"),
+            (6, b"000", "fail"),
+        ]
+        for code, status, expected in cases:
+            with self.subTest(code=code, status=status):
+                result = subprocess.CompletedProcess([], code, stdout=status, stderr=b"")
+                with patch.object(cachew_checkout.subprocess, "run", return_value=result):
+                    self.assertEqual(cachew_checkout.liveness("https://cachew.example", 1, {}), expected)
+        with patch.object(cachew_checkout.subprocess, "run", side_effect=subprocess.TimeoutExpired("curl", 1)):
+            self.assertEqual(cachew_checkout.liveness("https://cachew.example", 1, {}), "retry")
+
     def test_curl_configuration_cannot_add_health_auth_or_retry(self):
         (self.home / ".curlrc").write_text('header = "Authorization: unsafe-header"\nretry = 3\nlocation\n')
         self.cache.health = 503
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts([])
+        # Exactly one probe per attempt: curl's own retry stays off.
+        self.assert_cache_attempts([], attempts=3)
 
     def test_git_auth_failure_and_redirect_are_not_retried(self):
         self.cache.fail_repo = "main"
@@ -632,18 +696,20 @@ class CheckoutTests(unittest.TestCase):
                 self.cache.requests.clear()
                 self.cache.fail_status = status
                 self.assertFalse(self.attempt())
-                self.assert_single_cache_attempts(["main"])
+                self.assert_cache_attempts(["main"])
                 self.assertEqual(len(self.cache.requests), 2)
+                self.assertEqual(self.pauses, [])
                 self.assertEqual(self.upstream.requests, [])
 
     def test_only_http_200_is_live(self):
         self.cache.health = 204
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts([])
+        self.assert_cache_attempts([])
 
-    def test_connection_refusal_is_not_retried(self):
+    def test_connection_refusal_is_retried_then_uses_upstream(self):
         self.env["CACHEW_CACHEW_URL"] = "http://127.0.0.1:1"
         self.assertFalse(self.attempt())
+        self.assertEqual(len(self.pauses), 2)
         self.assertFalse(self.target.exists())
 
     def test_untrusted_cache_origins_cannot_receive_checkout_token(self):
@@ -777,18 +843,19 @@ class CheckoutTests(unittest.TestCase):
             self.assertTrue(self.attempt())
         self.assertEqual(runner_file(self.root / "output")["ref"], "x\nchecked-out=false")
 
-    def test_health_timeout_is_not_retried(self):
+    def test_health_timeout_is_retried_then_uses_upstream(self):
         self.cache.health_delay = 0.4
         started = time.monotonic()
         self.assertFalse(self.attempt())
-        self.assertLess(time.monotonic() - started, 0.35)
-        self.assert_single_cache_attempts([])
+        # Each probe is abandoned after the 0.1-second health timeout; the waits are skipped.
+        self.assertLess(time.monotonic() - started, 2)
+        self.assert_cache_attempts([], attempts=3)
 
     @unittest.skipUnless(CHECKOUT_JS, "set CHECKOUT_ACTION_JS to the pinned checkout dist/index.js")
-    def test_main_failure_immediately_uses_upstream(self):
+    def test_main_failure_retries_then_uses_upstream(self):
         self.cache.fail_repo = "main"
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts(["main"])
+        self.assert_cache_attempts(["main"], attempts=3)
         self.assertEqual(list(self.target.iterdir()), [])
         self.official_checkout()
 
@@ -805,27 +872,28 @@ class CheckoutTests(unittest.TestCase):
         self.env["GITHUB_SHA"] = self.sha
         self.cache.fail_repo = "grand"
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts(["main", "child", "grand"])
+        self.assert_cache_attempts(["main", "child", "grand"], attempts=3)
         self.assertEqual(list(self.target.iterdir()), [])
         self.official_checkout()
         self.assertEqual((self.target / "deps/sibling/content.txt").read_text(), "grand")
 
-    def test_mid_fetch_disconnect_is_not_retried(self):
+    def test_mid_fetch_disconnect_is_retried_then_uses_upstream(self):
         self.cache.fail_repo = "child"
         self.cache.fail_post = True
         self.cache.disconnect = True
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts(["main", "child"])
+        self.assert_cache_attempts(["main", "child"], attempts=3)
         posts = [p for method, p, _ in self.cache.requests if method == "POST" and "/child/" in p]
-        self.assertEqual(len(posts), 1)
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(len(self.pauses), 2)
         self.assertEqual(list(self.target.iterdir()), [])
 
-    def test_fetch_timeout_kills_transport_and_is_not_retried(self):
+    def test_fetch_timeout_kills_transport_and_is_retried(self):
         self.env["CACHEW_CACHEW_FETCH_TIMEOUT"] = "0.3"
         self.cache.fail_repo = "main"
         self.cache.fetch_delay = 0.6
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts(["main"])
+        self.assert_cache_attempts(["main"], attempts=3)
         self.assertEqual(list(self.target.iterdir()), [])
 
     def test_slow_but_moving_cache_is_abandoned_after_the_checkout_budget(self):
@@ -871,7 +939,7 @@ class CheckoutTests(unittest.TestCase):
     def test_explicit_sha_and_direct_submodules_at_depth_500(self):
         self.env.update(CACHEW_REF=self.sha, CACHEW_SUBMODULES="true", CACHEW_FETCH_DEPTH="500")
         self.assertTrue(self.attempt())
-        self.assert_single_cache_attempts(["main", "child"])
+        self.assert_cache_attempts(["main", "child"])
         self.assertEqual(self.upstream.requests, [])
         self.assertEqual((self.target / "deps/child/content.txt").read_text(), "child")
         self.assertFalse((self.target / "deps/child/deep/grand/content.txt").exists())
@@ -911,7 +979,7 @@ class CheckoutTests(unittest.TestCase):
             with self.subTest(filter=spec):
                 self.env["CACHEW_FILTER"] = spec
                 self.assertTrue(self.attempt())
-                self.assert_single_cache_attempts(["main", "main", "child", "grand"])
+                self.assert_cache_attempts(["main", "main", "child", "grand"])
                 self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
                 self.assertEqual(self.missing("-n1", "HEAD"), [])
                 self.assertIn(missing[0], self.missing("HEAD"))
@@ -1117,7 +1185,7 @@ class CheckoutTests(unittest.TestCase):
     def test_default_event_sha_without_submodules(self):
         self.env.update(CACHEW_REF="", CACHEW_SUBMODULES="false", CACHEW_FETCH_TAGS="false")
         self.assertTrue(self.attempt())
-        self.assert_single_cache_attempts(["main"])
+        self.assert_cache_attempts(["main"])
         self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
         self.assertFalse((self.target / ".git/modules").exists())
 
@@ -1128,7 +1196,7 @@ class CheckoutTests(unittest.TestCase):
         git(repository, "commit", "-m", "unsafe path", env=self.env)
         self.env["CACHEW_REF"] = "main"
         self.assertFalse(self.attempt())
-        self.assert_single_cache_attempts(["main"])
+        self.assert_cache_attempts(["main"])
         self.assertEqual(list(self.target.iterdir()), [])
         self.assertFalse((self.workspace / "escape").exists())
 

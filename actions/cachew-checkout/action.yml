@@ -3,7 +3,7 @@
 name: Cachew checkout
 description: >-
   Drop-in for actions/checkout v7.0.1 that caches the Git checkout and later dependency
-  fetches, with immediate fallback to that exact upstream checkout.
+  fetches. A transient cache failure is retried twice; then the checkout falls back to that exact upstream checkout.
 inputs:
   repository:
     description: Repository in owner/name form.

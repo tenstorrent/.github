@@ -326,7 +326,8 @@ class SessionTests(unittest.TestCase):
         self.original_global = (self.fixture.home / ".gitconfig").read_bytes()
         self.fixture.cache.health = 503
         self.assertEqual(self.flow(), (False, False))
-        self.fixture.assert_single_cache_attempts([])
+        # Three probes: the checkout's attempts, each retried after a 503; activation adds none.
+        self.fixture.assert_cache_attempts([], attempts=3)
         self.assertTrue(self.fixture.upstream.requests)
         # The caller's inherited rewrite survives unchanged, outside this job's configuration.
         self.finish_without_credential_assertion()
@@ -720,7 +721,7 @@ class SessionTests(unittest.TestCase):
         self.env["CACHEW_LFS"] = "true"
         self.assertFalse(self.fixture.attempt())
         self.assertTrue(self.activate())
-        self.fixture.assert_single_cache_attempts([])
+        self.fixture.assert_cache_attempts([])
         self.finish()
 
     def test_existing_checkout_still_configures_later_dependencies(self):
