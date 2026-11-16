@@ -365,6 +365,71 @@ class DownstreamGitTests(unittest.TestCase):
         remote = self.git_fixture.project_root / "org/cmake-dependency"
         self.assertEqual(fixture.git(remote, "rev-parse", "proof"), fixture.git(remote, "rev-parse", "main"))
 
+    def cloned_dependency(self):
+        self.dependency("cmake-dependency")
+        target = self.root / "cloned"
+        self.run_git("clone", self.upstream.url + "/org/cmake-dependency", str(target))
+        return target
+
+    def test_aliased_push_goes_upstream(self):
+        target = self.cloned_dependency()
+        self.config(self.session / "global.config", "alias.pu", "push")
+        self.config(self.session / "global.config", "alias.force", "-c push.default=current pu")
+        cache_requests = list(self.cache.requests)
+        self.run_git("-C", str(target), "pu", "origin", "HEAD:refs/heads/aliased")
+        self.run_git("-C", str(target), "force", "origin", "HEAD:refs/heads/nested")
+        self.run_git("-C", str(target), "-c", "alias.send=push origin", "send", "HEAD:refs/heads/inline")
+        self.assertEqual(self.cache.requests, cache_requests)
+        remote = self.git_fixture.project_root / "org/cmake-dependency"
+        for branch in ("aliased", "nested", "inline"):
+            self.assertEqual(fixture.git(remote, "rev-parse", branch), fixture.git(remote, "rev-parse", "main"))
+
+    def test_push_past_the_wrapper_goes_upstream(self):
+        """The pushInsteadOf that session.py writes keeps a push off the cache even
+        when Git is run directly, as a tool that knows its full path does."""
+        target = self.cloned_dependency()
+        key = f"url.{self.upstream.url}/.pushInsteadOf"
+        self.config(self.session / "global.config", key, self.upstream.url + "/")
+        cache_requests = list(self.cache.requests)
+        result = subprocess.run(
+            [self.real_git, "-C", str(target), "push", "origin", "HEAD:refs/heads/direct"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.cache.requests, cache_requests)
+        remote = self.git_fixture.project_root / "org/cmake-dependency"
+        self.assertEqual(fixture.git(remote, "rev-parse", "direct"), fixture.git(remote, "rev-parse", "main"))
+
+    def test_aliased_fetch_is_retried_upstream_like_a_fetch(self):
+        target = self.cloned_dependency()
+        self.config(self.session / "global.config", "alias.up", "fetch --tags")
+        self.run_git("-C", str(target), "up", "origin")
+        self.assertEqual(len(self.cache.discoveries()), 2)
+        self.assertEqual(self.upstream.discoveries(), [])
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("-C", str(target), "up", "origin")
+        self.assertEqual(len(self.cache.discoveries()), 3)
+        self.assertEqual(len(self.upstream.discoveries()), 1)
+        self.assert_disabled()
+
+    def test_shell_alias_reads_go_upstream(self):
+        target = self.cloned_dependency()
+        self.config(self.session / "global.config", "alias.sync", "!git fetch origin")
+        cache_requests = list(self.cache.requests)
+        self.run_git("-C", str(target), "sync")
+        self.assertEqual(self.cache.requests, cache_requests)
+        self.assertEqual(len(self.upstream.discoveries()), 1)
+        self.assert_enabled()
+
+    def test_alias_named_like_a_git_command_is_ignored(self):
+        target = self.cloned_dependency()
+        self.config(self.session / "global.config", "alias.status", "push origin HEAD:refs/heads/shadow")
+        requests = (list(self.cache.requests), list(self.upstream.requests))
+        self.run_git("-C", str(target), "status")
+        self.assertEqual((self.cache.requests, self.upstream.requests), requests)
+
     def test_disabled_session_respects_explicit_step_global_configuration(self):
         (self.session / "cache-disabled").touch()
         explicit = self.root / "explicit.config"

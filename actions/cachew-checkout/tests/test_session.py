@@ -253,6 +253,40 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(all(auth.lower() == expected.lower() for _, _, auth in requests))
         self.finish()
 
+    def path_git(self, *args):
+        """Git as a later step runs it: the shim on PATH."""
+        result = subprocess.run(
+            ["git", *args], cwd=self.fixture.workspace, env=self.env, text=True, capture_output=True, timeout=30
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result.stdout.strip()
+
+    def test_aliases_are_routed_like_the_commands_they_expand_to(self):
+        self.fixture.repository("dependency")
+        self.assertEqual(self.flow(), (True, True))
+        upstream = self.fixture.upstream.url
+        self.assertEqual(self.real_git("config", "--global", "--get", f"url.{upstream}/.pushInsteadOf"), upstream + "/")
+        self.path_git("config", "--global", "alias.get", "clone")
+        self.path_git("config", "--global", "alias.pu", "push")
+        self.path_git("get", upstream + "/org/dependency", "dependency")
+        cached = [request for request in self.fixture.cache.requests if "/dependency/" in request[1]]
+        self.assertTrue(cached)
+        requests = list(self.fixture.cache.requests)
+        self.path_git("-C", "dependency", "pu", "origin", "HEAD:refs/heads/aliased")
+        # An alias given only on the command line, and a push that never passes the shim.
+        self.path_git("-C", "dependency", "-c", "alias.send=push", "send", "origin", "HEAD:refs/heads/inline")
+        self.real_git("-C", "dependency", "push", "origin", "HEAD:refs/heads/direct")
+        self.assertEqual(self.fixture.cache.requests, requests)
+        remote = self.fixture.project_root / "org/dependency"
+        for branch in ("aliased", "inline", "direct"):
+            self.assertEqual(fixtures.git(remote, "rev-parse", branch), fixtures.git(remote, "rev-parse", "main"))
+        # A failing cache read through an alias falls back and turns caching off.
+        self.fixture.cache.fail_repo = "dependency"
+        self.path_git("config", "--global", "alias.up", "fetch")
+        self.path_git("-C", "dependency", "up", "origin")
+        self.assertTrue((Path(self.env["CACHEW_SESSION_DIR"]) / "cache-disabled").exists())
+        self.finish()
+
     @unittest.skipUnless(shutil.which("cmake"), "CMake is required for the downstream FetchContent regression")
     def test_real_cmake_fetchcontent_uses_the_post_checkout_global_configuration(self):
         self.fixture.repository("cmake-dependency")

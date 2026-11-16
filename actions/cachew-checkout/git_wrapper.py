@@ -16,6 +16,7 @@ since Git's lazy fetches do not pass through this wrapper.
 import math
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import subprocess
@@ -79,6 +80,10 @@ READ_OPTIONS_WITH_VALUE = {
     },
     "ls-remote": {"--upload-pack", "--sort", "-o", "--server-option"},
 }
+NETWORK_COMMANDS = ("clone", "fetch", "ls-remote", "push", "pull", "submodule", "remote")
+# Git itself gives up on an alias loop; this only bounds the lookups.
+MAX_ALIAS_DEPTH = 10
+SHELL_ALIAS = object()
 TERMINATE_GRACE_SECONDS = 10
 STDERR_TAIL_BYTES = 65536
 
@@ -94,6 +99,50 @@ def command_index(arguments):
         else:
             return index
     return None
+
+
+def resolve_alias(real_git, arguments, index, environ):
+    """Expand Git aliases as Git will, so routing sees the command that really runs
+    (`alias.up = fetch`, `alias.pu = push`). Returns the expanded arguments and the
+    command's index, or SHELL_ALIAS for a `!` alias, whose commands cannot be known."""
+
+    def output(*args):
+        result = subprocess.run(
+            [real_git, *arguments[:index], *args], env=environ, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        return result.stdout.decode(errors="replace") if result.returncode == 0 else None
+
+    commands = None
+    for _ in range(MAX_ALIAS_DEPTH):
+        word = arguments[index]
+        if word in NETWORK_COMMANDS:
+            break
+        expansion = output("config", "--get", f"alias.{word}")
+        if not expansion or not expansion.strip():
+            break
+        if commands is None:
+            # Git ignores an alias that has the name of one of its commands.
+            listed = output("--list-cmds=builtins,main,others")
+            if listed is None:
+                break
+            commands = set(listed.split())
+        if word in commands:
+            break
+        expansion = expansion.strip()
+        if expansion.startswith("!"):
+            return SHELL_ALIAS
+        try:
+            words = shlex.split(expansion)
+        except ValueError:
+            break
+        if not words:
+            break
+        arguments = [*arguments[:index], *words, *arguments[index + 1 :]]
+        # An alias may itself start with options (`-c key=value fetch`).
+        index = command_index(arguments)
+        if index is None:
+            break
+    return arguments, index
 
 
 class UpstreamView:
@@ -429,7 +478,22 @@ def run(arguments, environ):
     if not state.get("active"):
         return subprocess.call([real_git, *arguments], env=environ)
 
-    if command in ("clone", "fetch", "ls-remote", "push", "pull", "submodule", "remote") and direct_network_operation(
+    resolved = resolve_alias(real_git, arguments, index, environ)
+    if resolved is SHELL_ALIAS:
+        # Git runs a shell alias's commands itself, past this wrapper, so they get
+        # no cache attempt and no retry: its reads and pushes all go upstream.
+        with UpstreamView(real_git, environ, session, state) as upstream:
+            return subprocess.call([real_git, *arguments], env=upstream)
+    if resolved[1] is None:
+        return subprocess.call([real_git, *arguments], env=environ)
+    if resolved[0] != arguments:
+        # Run the expansion, which is what Git would run: every check below then
+        # reads the same command line that executes.
+        arguments, index = resolved
+        command = arguments[index]
+        target = CloneTarget(arguments, index, environ)
+
+    if command in NETWORK_COMMANDS and direct_network_operation(
         real_git, arguments, index, environ
     ):
         with UpstreamView(real_git, environ, session, state) as upstream:

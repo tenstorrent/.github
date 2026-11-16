@@ -487,20 +487,49 @@ def shell_quote(value):
     return "'" + value.replace("'", "'\\''") + "'"
 
 
+# Frequent Git commands that never reach a remote. Git ignores an alias with the
+# name of one of its commands, so the shim skips the alias lookup for these.
+LOCAL_COMMANDS = (
+    "add|am|apply|branch|cat-file|checkout|cherry-pick|commit|config|describe|diff|for-each-ref|hash-object|init|"
+    "log|ls-files|ls-tree|merge|merge-base|rebase|reset|restore|rev-list|rev-parse|rm|show|show-ref|stash|status|"
+    "switch|symbolic-ref|tag|update-index|update-ref|version|worktree|write-tree"
+)
+
+
 def shim(real_git, session):
-    """Only commands that can reach a remote pay for the Python wrapper."""
+    """Only commands that can reach a remote pay for the Python wrapper: the
+    network commands, and aliases, which may expand to one."""
+    wrapper = f'exec {shell_quote(interpreter())} {shell_quote(str(ACTION / "git_wrapper.py"))} "$@"'
     return f"""#!/bin/sh
 export CACHEW_REAL_GIT={shell_quote(real_git)}
 export CACHEW_SESSION_DIR={shell_quote(str(session))}
+# Whether Git has an alias named $2, read with the first $1 of the arguments that
+# follow (the options before the command, which can select or define the alias).
+aliased() (
+  keep=$1 word=$2
+  shift 2
+  position=0 total=$#
+  while [ "$position" -lt "$total" ]; do
+    argument=$1
+    shift
+    [ "$position" -lt "$keep" ] && set -- "$@" "$argument"
+    position=$((position + 1))
+  done
+  [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ]
+)
 skip=0
+options=0
 for argument in "$@"; do
-  if [ "$skip" = 1 ]; then skip=0; continue; fi
+  if [ "$skip" = 1 ]; then skip=0; options=$((options + 1)); continue; fi
   case "$argument" in
     -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) skip=1 ;;
     -*) ;;
-    clone|fetch|ls-remote|push|pull|submodule|remote) exec {shell_quote(interpreter())} {shell_quote(str(ACTION / "git_wrapper.py"))} "$@" ;;
-    *) break ;;
+    clone|fetch|ls-remote|push|pull|submodule|remote) {wrapper} ;;
+    {LOCAL_COMMANDS}) break ;;
+    *[!A-Za-z0-9_-]*) break ;;
+    *) if aliased "$options" "$argument" "$@"; then {wrapper}; fi; break ;;
   esac
+  options=$((options + 1))
 done
 exec "$CACHEW_REAL_GIT" "$@"
 """
@@ -562,6 +591,10 @@ def activate(environ):
         host = urllib.parse.urlsplit(settings.upstream).netloc
         entries = [
             (f"url.{cache}/git/{host}/.insteadOf", settings.upstream + "/"),
+            # Pushes never go to the cache, whichever way Git is reached (an alias,
+            # a tool that runs Git by its full path): with a matching pushInsteadOf,
+            # Git does not apply insteadOf to a push URL.
+            (f"url.{settings.upstream}/.pushInsteadOf", settings.upstream + "/"),
             # Every request to the cache may carry a token: always verified TLS, and
             # never a redirect, which would repeat the header to another host.
             (f"http.{cache}/.sslVerify", "true"),

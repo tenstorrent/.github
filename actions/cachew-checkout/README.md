@@ -223,8 +223,9 @@ anything that still runs in the job.
 For later Git reads, a small `git` wrapper on `PATH` sends `clone`, `fetch` and
 `ls-remote` through cachew once when their effective URL is the cache. Python
 starts only for commands that can reach a remote (`clone`, `fetch`, `ls-remote`,
-`push`, `pull`, `submodule`, `remote`); the rest go straight to Git. If the
-cache attempt fails, the same operation is retried once upstream. Reads of other
+`push`, `pull`, `submodule`, `remote`) and for Git aliases, which are expanded
+first and then handled as the command they run; the rest go straight to Git. If
+the cache attempt fails, the same operation is retried once upstream. Reads of other
 remotes (other hosts, token-in-URL or SSH URLs) run unchanged and never affect
 the cache. Only failures of the cache endpoint itself (connection, TLS, 3xx/5xx,
 a stall longer than `cachew-fetch-timeout`, or the one-hour hard deadline) remove
@@ -236,7 +237,11 @@ each promisor remote the cache rewrite reaches is pinned upstream with the same
 repository-local `insteadOf` as the checkout's `origin`.
 
 Native recursive clones, submodule and `remote` commands, initialized-submodule
-fetches, pushes and pulls use upstream directly.
+fetches, pushes and pulls use upstream directly. So does a shell alias (`!...`):
+Git runs its commands itself, past the wrapper. Pushes never go to cachew, even
+from a tool that runs Git by its full path: a `pushInsteadOf` for the upstream
+server, written with the cache rewrite, stops Git applying the rewrite to push
+URLs.
 
 Commands sent upstream directly, and every network command once caching is off,
 run with a private copy of the job's global file without the cache rewrite. A
