@@ -20,6 +20,8 @@ case "$CASE" in
   bad-join-value) join=maybe ;;
   http-url) url="http://${VAULT_URL#https://}" ;;
   reserved-output-name) secrets="$VAULT_KV_PATH $VAULT_KV_FIELD | VAULT_SECRETS_GITHUB_TOKEN" ;;
+  # No '| NAME': vault-action takes the output name from the selector.
+  reserved-default-name) secrets="$VAULT_KV_PATH VAULT_SECRETS_GITHUB_TOKEN" ;;
   # Network: fail before Vault login.
   unreachable-url) url="https://vault-ospo.invalid" ;;
   no-tailnet) join=false ;;

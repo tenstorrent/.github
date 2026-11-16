@@ -78,7 +78,10 @@ holds a copy. If an org variable changes, pass the new value:
 
 When `github-token` is set, `secrets` also has the key
 `VAULT_SECRETS_GITHUB_TOKEN` (the same value as `token`). Do not use that name
-in `secrets`; the action refuses it.
+as an output name in `secrets`; the action refuses it. This applies to the
+name after `|` (in any case), and to the name that hashicorp/vault-action makes
+from the field when a line has no `| <NAME>`. A path that only contains the
+text is accepted.
 
 When the action fails, `token` is empty and `secrets` is `{}`.
 When the step is skipped (an `if:` that is false), both outputs are empty.
@@ -151,3 +154,35 @@ one job.
 - Third-party actions are pinned by commit SHA.
 - Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
   Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
+
+## Security of the test workflow
+
+The workflow `.github/workflows/vault-secrets-test.yml` tests this action from
+the pull request checkout. Its Vault jobs log in with the test role
+`tenstorrent--.github--vault-action-test`. They run only when the repository
+variable `VAULT_SECRETS_TEST_ENABLED` is `true`.
+
+What a pull request can reach:
+
+- A pull request from a branch in this repository can change the action, the
+  test scripts and the workflow. Its Vault jobs then run that changed code with
+  `id-token: write`, so the code can read what the test role can read.
+- A check in the workflow cannot stop this. The pull request can change the
+  check too.
+- A pull request from a fork gets no OIDC token. It cannot log in to Vault.
+
+Why the risk is low:
+
+- The test role can get one token with read access to contents and metadata
+  of this public repository, and one dummy KV value. These give no more access
+  than the public repository already gives.
+- The test role must never get a token with write access, a token for another
+  repository, or a real secret. Add new test values to the test role only.
+
+Required protection (a repository setting, applied by a maintainer):
+
+- The environment `vault-action-test` has required reviewers, with "Prevent
+  self-review" on. A person reads the diff of the pull request and approves the
+  deployment before a Vault job starts.
+- The Vault role accepts only the environment `vault-action-test`. A job
+  without the environment cannot log in with the test role.
