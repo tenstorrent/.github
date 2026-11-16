@@ -455,6 +455,17 @@ def run(arguments, environ):
     except (OSError, ValueError):
         # A missing session must not prevent Git from running after the runner empties RUNNER_TEMP.
         return subprocess.call([real_git, *arguments], env=environ)
+    disabled = (session / "cache-disabled").exists()
+    if not disabled and not state.get("active"):
+        return subprocess.call([real_git, *arguments], env=environ)
+    # Before any route is chosen, so that each one, the disabled session's
+    # included, sees the command that really runs and a clone's destination.
+    resolved = resolve_alias(real_git, arguments, index, environ)
+    shell_alias = resolved is SHELL_ALIAS
+    if not shell_alias and resolved[1] is not None:
+        # Run the expansion, which is what Git would run: every check below then
+        # reads the same command line that executes.
+        arguments, index = resolved
     command = arguments[index]
     target = CloneTarget(arguments, index, environ)
 
@@ -466,7 +477,7 @@ def run(arguments, environ):
             pin_promisor_remotes(real_git, location, environ, state.get("cache"))
         return result
 
-    if (session / "cache-disabled").exists():
+    if disabled:
         if state.get("managed"):
             # The disable could not remove every key (the file was locked, or a
             # concurrent disable is midway). Try again: Git's own lazy fetches
@@ -475,23 +486,11 @@ def run(arguments, environ):
             state = remove_cache_keys(real_git, session, state, environ)
         with UpstreamView(real_git, environ, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
-    if not state.get("active"):
-        return subprocess.call([real_git, *arguments], env=environ)
-
-    resolved = resolve_alias(real_git, arguments, index, environ)
-    if resolved is SHELL_ALIAS:
+    if shell_alias:
         # Git runs a shell alias's commands itself, past this wrapper, so they get
         # no cache attempt and no retry: its reads and pushes all go upstream.
         with UpstreamView(real_git, environ, session, state) as upstream:
             return subprocess.call([real_git, *arguments], env=upstream)
-    if resolved[1] is None:
-        return subprocess.call([real_git, *arguments], env=environ)
-    if resolved[0] != arguments:
-        # Run the expansion, which is what Git would run: every check below then
-        # reads the same command line that executes.
-        arguments, index = resolved
-        command = arguments[index]
-        target = CloneTarget(arguments, index, environ)
 
     if command in NETWORK_COMMANDS and direct_network_operation(
         real_git, arguments, index, environ

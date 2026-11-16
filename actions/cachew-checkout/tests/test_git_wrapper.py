@@ -345,6 +345,22 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertIn("cmake_minimum_required", self.run_git("-C", str(target), "show", "HEAD:CMakeLists.txt"))
         self.assertEqual(self.cache.requests, [])
 
+    def test_disabled_aliased_partial_clone_with_a_stuck_rewrite_lazy_fetches_upstream(self):
+        self.dependency("cmake-dependency")
+        self.config(self.session / "global.config", "alias.partial", "clone --filter=blob:none --no-checkout")
+        (self.session / "cache-disabled").touch()
+        lock = self.session / "global.config.lock"
+        lock.touch()
+        self.addCleanup(lock.unlink, missing_ok=True)
+        self.cache.fail_repo = "cmake-dependency"
+        target = self.root / "partial"
+        url = self.upstream.url + "/org/cmake-dependency"
+        self.run_git("partial", url, str(target))
+        self.assertIn(self.cache.url.encode(), (self.session / "global.config").read_bytes())
+        self.assertEqual(self.run_git("-C", str(target), "config", "--get-all", f"url.{url}.insteadOf"), url)
+        self.assertIn("cmake_minimum_required", self.run_git("-C", str(target), "show", "HEAD:CMakeLists.txt"))
+        self.assertEqual(self.cache.requests, [])
+
     def test_disable_keeps_keys_it_could_not_remove(self):
         wrapper = load_wrapper()
         lock = self.session / "global.config.lock"
