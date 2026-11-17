@@ -60,6 +60,18 @@ outputs:
       it also has the key VAULT_SECRETS_GITHUB_TOKEN. `{}` when the action failed.
       Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Values are masked in logs.
     value: ${{ steps.check.outcome == 'success' && toJSON(steps.vault.outputs) || '{}' }}
+  failed-step:
+    description: >-
+      The step of the action that failed: `prepare`, `join`, `wait`, `vault` or `check`.
+      Empty when the action succeeds. The runner sets composite outputs also when a step fails.
+    value: >-
+      ${{
+        steps.prepare.outcome == 'failure' && 'prepare' ||
+        steps.join.outcome == 'failure' && 'join' ||
+        steps.wait.outcome == 'failure' && 'wait' ||
+        steps.vault.outcome == 'failure' && 'vault' ||
+        steps.check.outcome == 'failure' && 'check' || ''
+      }}
 
 runs:
   using: composite
@@ -81,6 +93,7 @@ runs:
 
     # Do not pass `args: --accept-routes`: the action sets it, and a second copy fails.
     - name: Join tailnet
+      id: join
       if: steps.prepare.outputs.join == 'true'
       uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
       with:
@@ -89,6 +102,7 @@ runs:
         tags: ${{ inputs.tailscale-tags }}
 
     - name: Wait for Vault
+      id: wait
       shell: bash
       env:
         VAULT_URL: ${{ steps.prepare.outputs.url }}

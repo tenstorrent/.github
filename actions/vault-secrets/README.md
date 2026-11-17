@@ -75,6 +75,7 @@ holds a copy. If an org variable changes, pass the new value:
 |---|---|
 | `token` | The GitHub token from `github-token`. Empty if `github-token` is not set. |
 | `secrets` | JSON object with one key per `<NAME>` in `secrets`. Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. |
+| `failed-step` | The step of the action that failed: `prepare` (input and job checks), `join` (Tailscale join), `wait` (Vault not reachable), `vault` (Vault login or read), `check` (empty value). Empty when the action succeeds. Use it with `continue-on-error: true`. |
 
 When `github-token` is set, `secrets` also has the key
 `VAULT_SECRETS_GITHUB_TOKEN` (the same value as `token`). Do not use that name

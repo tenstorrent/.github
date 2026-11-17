@@ -18,7 +18,7 @@ grep -rn "VAULT_URL" .github/
 ```
 
 Each file that matches is a candidate. Open each one and read the full job.
-Stop and go to section 5 if the job is on the list there.
+Stop and go to section 4 if the job is on the list there.
 
 ## 2. Map old to new
 
@@ -28,13 +28,39 @@ Stop and go to section 5 if the job is on the list there.
 | Step `Wait for Vault` (curl loop) | Removed. The action waits. |
 | Step with `hashicorp/vault-action` | One step with `uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>`. |
 | `role: <name>` | `role: <name>`. Do not change it. |
-| `url`, `method`, `path`, `jwtGithubAudience`, `exportEnv` | Removed. The action sets them. |
+| `url`, `method`, `path`, `jwtGithubAudience` | Removed. The action sets them. |
+| `exportEnv: false`, `exportToken: false`, `outputToken: false` | Removed. The action always sets these values. |
+| No `exportEnv`, or `exportEnv: true` | Removed, but do step 2a first. vault-action exports by default; the action does not. |
+| Any other `hashicorp/vault-action` input | Stop. See section 4. |
 | `github/token/<name> token \| GH_TOKEN` | `github-token: <name>`. Read it with `steps.<id>.outputs.token`. |
 | Other lines in `secrets` | Same lines in the `secrets:` input. Read them with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. |
 | Token on another mount, for example `github-members/token/<name> token \| NAME` | One token: `github-token: github-members/token/<name>` (a value with `/` is the full path). More than one token: keep each as a line in `secrets:`. |
 | `steps.<id>.outputs.<NAME>` | `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Use `steps.<id>.outputs.token` for the `github-token` value. |
 
 Keep the `;` at the end of each `secrets` line except the last. A `;` after the last line is optional.
+vault-action splits entries on `;`, not on lines. Without the `;`, two lines
+become one bad entry and the step fails.
+
+### 2a. Values in the job environment
+
+vault-action has `exportEnv: true` as its default. The action always sets
+`exportEnv: false`. If the old step has no `exportEnv`, or has
+`exportEnv: true`, later steps can read each value as a shell variable
+(`$NAME`) or as `${{ env.NAME }}`. After the retrofit these values are empty,
+and the step does not always fail.
+
+Do these steps before you remove the old step:
+
+1. Make a list of the output names in `secrets` (the text after `|`, or the
+   default name from the selector).
+2. In each later step of the same job, find each use of a name: `$NAME`,
+   `${NAME}`, `${{ env.NAME }}`, and use by a script or a tool that reads the
+   environment. Read the scripts that the steps call.
+3. For each step that uses a name, add it to the step-level `env:` of that
+   step: `NAME: ${{ fromJSON(steps.<id>.outputs.secrets).NAME }}`, or
+   `NAME: ${{ steps.<id>.outputs.token }}` for the `github-token` value.
+4. If you cannot find all uses (for example, a tool reads an unknown
+   variable), stop and ask a human.
 
 ### Before
 
@@ -112,7 +138,7 @@ steps:
     with:
       role: example-org--example-app--nightly
       secrets: |
-        github-members/token/example-org--example-app--read-a token | TOKEN_A
+        github-members/token/example-org--example-app--read-a token | TOKEN_A ;
         github-members/token/example-org--example-app--read-b token | TOKEN_B
 
   - name: Read both
@@ -129,7 +155,7 @@ steps:
    workflow-level block.
 2. Pin the action by full commit SHA. The commit must be on `main` of
    `tenstorrent/.github`. GitHub also resolves a SHA from a fork, so check it:
-   `rtk gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`.
+   `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`.
    The status must be `identical` or `behind`.
 3. Put values in step-level `env:` only. Do not put
    `${{ steps.<id>.outputs.* }}` in `run:` text. Do not use job-level or
@@ -187,6 +213,16 @@ Stop. Do not change the workflow. Tell the human why, and ask OSPO.
   network path to Vault.
 - The job sets its own tailnet tags (for example, it joins with a different
   tag for other access). A second join can break the first.
+- The old `hashicorp/vault-action` step uses an input that the action does not
+  support. The action supports only `role` and `secrets` from vault-action,
+  and sets `url`, `method`, `path`, `jwtGithubAudience`, `exportEnv`,
+  `exportToken` and `outputToken` itself. Examples of inputs to stop on:
+  `ignoreNotFound`, `outputToken: true`, `exportToken: true`, `namespace`,
+  `extraHeaders`, `tlsSkipVerify`, `caCertificate`, `clientCertificate`,
+  `clientKey`, `secretEncodingType`, `pki`, `jwtTtl`, `jwtPrivateKey`,
+  `jwtKeyPassword`, and other login methods (`method` other than `jwt`, or
+  `token`, `roleId`, `secretId`, `githubToken`, `kubernetesTokenPath`,
+  `username`, `password`, `authPayload`).
 
 ## 5. Check the result
 
@@ -196,6 +232,9 @@ Complete each item before you open the pull request.
 - [ ] Search for old references. Run
       `grep -n "steps\.<id>\.outputs\." <file>` for each Vault step `id`.
       Each result must be `outputs.token` or `outputs.secrets`.
+- [ ] If the old step exported values (section 2a): search for each output
+      name, for example `grep -n "NAME" <file>`. Each use must read the value
+      from step-level `env:`.
 - [ ] Search for the removed steps: `grep -n "tailscale/github-action\|hashicorp/vault-action\|VAULT_URL" <file>`.
       The result must be empty, unless a step is out of scope (section 4).
 - [ ] Run the workflow on a ref that the Vault role allows (branch,
@@ -215,6 +254,7 @@ Use this checklist in the pull request description:
 - [ ] `permissions: id-token: write` kept at job level; other permissions listed
 - [ ] Role, token names and secret paths unchanged
 - [ ] Values only in step-level `env:`
+- [ ] Each use of a value that `exportEnv` put in the job environment is now mapped in step-level `env:`
 - [ ] No leftover `steps.<id>.outputs.<NAME>` references
 - [ ] Job-level `VAULT_URL` removed when unused
 - [ ] `actionlint` passes

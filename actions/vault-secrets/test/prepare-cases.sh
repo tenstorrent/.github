@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Test helper for .github/workflows/vault-secrets-test.yml. Not used by the action.
-# Runs prepare.sh directly, without Vault or the network, and checks the
-# reserved output name rule: prepare.sh accepts a `secrets` value that only
-# contains the reserved name, and refuses a value that uses it as an output name.
+# Runs prepare.sh directly, without Vault or the network. Checks that each
+# pre-check refuses its case with its own message, and checks the reserved
+# output name rule: prepare.sh accepts a `secrets` value that only contains the
+# reserved name, and refuses a value that uses it as an output name.
 # Uses no token and no secret.
 set -euo pipefail
 
@@ -14,9 +15,10 @@ trap 'rm -rf "$work"' EXIT
 status=0
 nl=$'\n'
 
-# Runs prepare.sh with IN_SECRETS=$2 and IN_GITHUB_TOKEN=$3.
+# Runs prepare.sh with valid inputs. Each argument (NAME=value) replaces one
+# of them; NAME= gives an empty value, which prepare.sh treats as not set.
 # Sets rc and spec (the spec output, empty if prepare.sh failed).
-run_prepare() {
+run_env() {
   local out="$work/out" log="$work/log"
   : >"$out"
   rc=0
@@ -24,16 +26,47 @@ run_prepare() {
     ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/not-used \
     EVENT_NAME=workflow_dispatch \
     IN_ROLE=test-role \
-    IN_SECRETS="$1" \
-    IN_GITHUB_TOKEN="$2" \
+    IN_SECRETS= \
+    IN_GITHUB_TOKEN=test-token \
+    IN_VAULT_URL= \
     IN_JOIN_TAILNET=false \
+    IN_TS_CLIENT_ID=test-client \
+    IN_TS_AUDIENCE=test-audience \
+    IN_TS_TAGS=tag:test \
     GITHUB_OUTPUT="$out" \
+    "$@" \
     bash "$prepare" >"$log" 2>&1 || rc=$?
   spec="$(awk '
     /^spec<</ { d = substr($0, 7); on = 1; next }
     on && $0 == d { on = 0; next }
     on { print }
   ' "$out")"
+}
+
+# Runs prepare.sh with IN_SECRETS=$1 and IN_GITHUB_TOKEN=$2.
+run_prepare() {
+  run_env IN_SECRETS="$1" IN_GITHUB_TOKEN="$2"
+}
+
+# Fails unless prepare.sh, with the replaced inputs $3..., fails with one
+# '::error' line that contains the text $2.
+refuses_with() {
+  local title="$1" want="$2"
+  shift 2
+  run_env "$@"
+  if [ "$rc" -eq 0 ]; then
+    echo "::error::$title: prepare.sh accepted it, expected a refusal"
+    status=1
+  elif ! grep -F -- '::error title=vault-secrets::' "$work/log" | grep -q -F -- "$want"; then
+    echo "::error::$title: prepare.sh failed, but not with the message '$want'"
+    cat "$work/log"
+    status=1
+  elif [ -s "$work/out" ]; then
+    echo "::error::$title: prepare.sh wrote outputs before it failed"
+    status=1
+  else
+    echo "OK: refused: $title"
+  fi
 }
 
 accepts() {
@@ -54,20 +87,49 @@ accepts() {
 
 refuses() {
   local title="$1" secrets="$2"
-  run_prepare "$secrets" test-token
-  if [ "$rc" -eq 0 ]; then
-    echo "::error::$title: prepare.sh accepted it, expected a refusal"
-    status=1
-  elif ! grep -q 'keeps for github-token' "$work/log"; then
-    echo "::error::$title: prepare.sh failed for another reason"
-    cat "$work/log"
-    status=1
-  else
-    echo "OK: refused: $title"
-  fi
+  refuses_with "$title" 'which this action keeps for github-token' \
+    IN_SECRETS="$secrets" IN_GITHUB_TOKEN=test-token
 }
 
 token_line='github/token/test-token token | VAULT_SECRETS_GITHUB_TOKEN'
+
+# One case for each pre-check, in the order of prepare.sh.
+refuses_with 'pull_request_target' 'refused on pull_request_target' \
+  EVENT_NAME=pull_request_target
+refuses_with 'no OIDC token' 'job needs permissions: id-token: write' \
+  ACTIONS_ID_TOKEN_REQUEST_URL=
+refuses_with 'empty role' 'input role is empty' IN_ROLE=
+refuses_with 'role with a space' 'input role has characters that a Vault role name cannot have' \
+  'IN_ROLE=test role'
+refuses_with 'role with a /' 'input role has characters that a Vault role name cannot have' \
+  IN_ROLE=test/role
+refuses_with 'nothing to get' 'nothing to get' IN_GITHUB_TOKEN= IN_SECRETS=
+refuses_with 'nothing to get, secrets only blanks and ;' 'nothing to get' \
+  IN_GITHUB_TOKEN= "IN_SECRETS= ;${nl} ;"
+refuses_with 'token name with ;' 'input github-token is not a valid token name or path' \
+  'IN_GITHUB_TOKEN=bad;name'
+refuses_with 'token path with //' 'input github-token is not a valid token name or path' \
+  IN_GITHUB_TOKEN=github//token
+for url in \
+  http://vault-ospo.eng-svc.aws.tenstorrent.com \
+  https://vault-ospo.invalid \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com.invalid \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com/v1 \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com:8200 \
+  https://user@vault-ospo.eng-svc.aws.tenstorrent.com; do
+  refuses_with "vault-url $url" 'input vault-url is not an OSPO Vault URL' IN_VAULT_URL="$url"
+done
+refuses_with 'join-tailnet maybe' 'input join-tailnet must be auto, true or false' \
+  IN_JOIN_TAILNET=maybe
+refuses_with 'join without client id' 'input tailscale-client-id is empty' \
+  IN_JOIN_TAILNET=true IN_TS_CLIENT_ID=
+refuses_with 'join without audience' 'input tailscale-audience is empty' \
+  IN_JOIN_TAILNET=true IN_TS_AUDIENCE=
+refuses_with 'join without tags' 'input tailscale-tags is empty' \
+  IN_JOIN_TAILNET=true IN_TS_TAGS=
+
+# The valid inputs above pass, so each refusal comes from its own check.
+accepts 'valid inputs' '' test-token "$token_line"
 
 accepts 'reserved name inside a path' \
   'kv/data/VAULT_SECRETS_GITHUB_TOKEN_backup value | API_KEY' test-token \
