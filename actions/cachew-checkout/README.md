@@ -257,6 +257,14 @@ CHECKOUT_ACTION_JS=/absolute/path/to/checkout/dist/index.js \
   python3 -m unittest discover -s actions/cachew-checkout/tests -v
 ```
 
+To run the same tests on several processes (4 by default; `-j` sets the number):
+
+```sh
+CHECKOUT_ACTION_JS=/absolute/path/to/checkout/dist/index.js \
+  CACHEW_TEST_ALLOW_LOOPBACK_HTTP=1 \
+  python3 actions/cachew-checkout/tests/run_parallel.py -j 4
+```
+
 `CHECKOUT_ACTION_JS` is the `dist/index.js` of the `actions/checkout` commit
 this action forwards to; the tests compare cachew's checkouts with it. Tests
 that need CMake are skipped without it. The `Test cachew-checkout` workflow

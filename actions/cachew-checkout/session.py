@@ -595,6 +595,10 @@ def activate(environ):
             # never a redirect, which would repeat the header to another host.
             (f"http.{cache}/.sslVerify", "true"),
             (f"http.{cache}/.followRedirects", "false"),
+            # Headers the job configured less specifically (an unscoped
+            # http.extraHeader, say) are meant for upstream, not the cache: the
+            # empty value clears them for cache URLs even when no token is recorded.
+            (f"http.{cache}/.extraHeader", ""),
         ]
         if default := state["defaults"].get(settings.upstream):
             entries += auth_entries(cache, default)

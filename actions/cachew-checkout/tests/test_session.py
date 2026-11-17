@@ -404,6 +404,21 @@ class SessionTests(unittest.TestCase):
                 self.assertNotIn(encoded, file.read_bytes())
         self.finish()
 
+    def test_later_reads_without_a_token_do_not_send_inherited_headers_to_the_cache(self):
+        # No token is recorded with persist-credentials false, so nothing but the
+        # cache-scoped reset keeps the job's unscoped header from the cache.
+        self.fixture.repository("dependency")
+        self.env["CACHEW_PERSIST_CREDENTIALS"] = "false"
+        self.assertEqual(self.flow(), (True, True))
+        self.real_git("config", "--global", "http.extraHeader", "Authorization: basic aW5oZXJpdGVk")
+        before = len(self.fixture.cache.requests)
+        self.real_git("clone", self.fixture.upstream.url + "/org/dependency", "dependency")
+        requests = self.fixture.cache.requests[before:]
+        self.assertTrue(requests)
+        self.assertEqual({auth for _, _, auth in requests}, {None})
+        self.real_git("config", "--global", "--unset", "http.extraHeader")
+        self.finish()
+
     def test_secondary_checkout_keeps_primary_credentials_and_uses_its_own_scope(self):
         self.fixture.repository("secondary")
         self.fixture.repository("dependency")

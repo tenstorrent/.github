@@ -201,6 +201,45 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(code, 1, ref)
             self.assertIn(ref, out)
 
+    def test_verify_pins_reads_the_whole_uses_value(self):
+        # Git allows #, ' and " in branch names, so a SHA followed by any of them
+        # is a mutable ref, and the parts of a value YAML joins must be read whole.
+        self.run_main("--write")
+        workflow = self.root / ".github/workflows/ci.yml"
+        good = workflow.read_text()
+        action = "tenstorrent/.github/actions/cachew-checkout"
+        line = f"- uses: {PINNED}"
+        for bad in (
+            f"- uses: {action}@{SHA}#x",
+            f"- uses: \"{action}@{SHA}#x\"",
+            f"- uses: \"{action}@{SHA}'x\"",
+            f"- uses: '{action}@{SHA}\"x'",
+            f"- {{uses: {action}@main, with: {{a: b}}}}",
+            f"- uses: \"tenstorrent/.github/actions/cachew-checkou\\x74@main\"",
+            f"- uses: >-\n          {action}@main",
+            f"- uses: *pin",
+            f"- uses: \"{action}@\\\n          main\"",
+        ):
+            with self.subTest(bad=bad):
+                workflow.write_text(good.replace(line, bad))
+                code, out = self.run_main("--verify-pins")
+                self.assertEqual(code, 1, out)
+        for fine in (f"- uses: '{action}@{SHA}'", f'- uses: "{action}@{SHA}"', f"- {{uses: {action}@{SHA}}}"):
+            with self.subTest(fine=fine):
+                workflow.write_text(good.replace(line, fine))
+                code, out = self.run_main("--verify-pins")
+                self.assertEqual(code, 0, out)
+
+    def test_verify_pins_reads_composite_actions_anywhere(self):
+        self.run_main("--write")
+        action = self.root / "tools/ci/action.yml"
+        action.parent.mkdir(parents=True)
+        action.write_text("runs:\n  using: composite\n  steps:\n    - uses: tenstorrent/.github/actions/cachew-checkout@main\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("main", out)
+
     def test_verify_pins_sees_references_in_any_owner_and_repository_case(self):
         # GitHub resolves owner/repo case-insensitively, so this is the same action on a branch.
         self.run_main("--write")

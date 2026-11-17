@@ -1025,6 +1025,22 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(git(self.target, "config", "remote.origin.partialclonefilter"), "blob:none")
         self.assert_no_cache_credentials()
 
+    def test_sparse_lazy_fetches_send_the_cache_only_its_own_header(self):
+        # The caller's unscoped header is meant for upstream; the lazy fetches read
+        # the caller's configuration but must not repeat it to the cache.
+        self.add_layout()
+        with (self.home / ".gitconfig").open("a") as config:
+            config.write("[http]\n\textraHeader = Authorization: basic aW5oZXJpdGVk\n")
+        self.env.update(CACHEW_SUBMODULES="false", CACHEW_SPARSE_CHECKOUT=".github")
+        self.assertTrue(self.attempt())
+        self.assertEqual(self.upstream.requests, [])
+        # The seed fetch and the lazy blob fetch, each with only the checkout's header.
+        self.assertEqual(len(self.cache.discoveries()), 2)
+        expected = "basic " + base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode()
+        for _, path, auth in self.cache.requests:
+            if path != "/_liveness":
+                self.assertEqual(auth.lower(), expected.lower(), path)
+
     def test_sparse_lazy_fetch_failure_discards_and_falls_back(self):
         self.add_layout()
         self.env.update(CACHEW_SUBMODULES="false", CACHEW_SPARSE_CHECKOUT=".github")

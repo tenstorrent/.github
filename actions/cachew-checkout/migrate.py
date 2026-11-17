@@ -17,8 +17,11 @@ Modes:
   --check        exit 1 if any file still needs --write.
   --verify-pins  exit 1 unless every reference pins exactly action_sha.
 
-With no paths, every tracked .yml/.yaml under a .github/actions or
-.github/workflows directory is inspected.
+With no paths, --write and --check inspect every tracked .yml/.yaml under a
+.github/actions or .github/workflows directory. --verify-pins also reads every
+tracked action.yml/action.yaml, wherever a composite action lives, and accepts
+only a reference written as a plain or quoted value on its own `uses:` line,
+since that is the only form whose ref it can read exactly.
 
 Only checkouts of the exact version the action forwards to (actions/checkout
 v7.0.1, by commit or tag) are migrated, so no step changes checkout version. Left
@@ -62,13 +65,25 @@ CHECKOUT = re.compile(
     + r")@[0-9a-f]{40})"
     r"(?P=quote)(?:[ \t]*#[^\n]*)?[ \t]*$"
 )
-# The whole ref after @, so a branch, short SHA or padded SHA is compared as written.
-# GitHub resolves owner and repository names in any case, so a reference
-# spelled Tenstorrent/.GitHub/... is held to the pin as well.
+# Any mention of the action with a ref, wherever it appears in a file. GitHub
+# resolves owner and repository names in any case, so a reference spelled
+# Tenstorrent/.GitHub/... is held to the pin as well.
 ANY_PIN = re.compile(
     r"(?P<repo>(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r"))"
     r"(?P<subpath>/[\w./-]+)?@(?P<ref>[^\s'\"#]+)"
 )
+# A decoded uses: value naming the action. The ref is everything after the @, so
+# a branch, short SHA or padded SHA is compared as written, and so is a SHA
+# followed by more characters (`<sha>#x`, `<sha>'x`): Git allows those in branch
+# names, so they are mutable refs that only look like the pin.
+PIN_VALUE = re.compile(
+    r"(?P<repo>(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r"))"
+    r"(?P<subpath>/[^@]*)?@(?P<ref>.*)",
+    re.DOTALL,
+)
+# A uses: key in block style (`uses:` or `- uses:`) or inside a flow mapping
+# (`{uses: ...}`), its key optionally quoted.
+USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
 HOSTED_LABEL = re.compile(r"(?:ubuntu|windows|macos)-[\w.-]+")
 TOP_LEVEL = re.compile(r"^(?P<key>[\w-]+):")
@@ -189,23 +204,86 @@ def tracked_consumers(root, exclude=()):
             yield path
 
 
+def pinned_files(root, exclude=()):
+    """Every file whose uses: lines GitHub runs: the migrated workflow and action
+    directories, and composite actions (action.yml/action.yaml) anywhere."""
+    paths = set(tracked_consumers(root, exclude))
+    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
+    for value in tracked:
+        if value and not value.startswith(tuple(exclude)) and Path(value).name in ("action.yml", "action.yaml"):
+            paths.add(Path(value))
+    return sorted(paths)
+
+
+def uses_values(text):
+    """(start, end, value, problem) for each uses: value in YAML text. value is
+    decoded when it is a plain, single-quoted, or escape-free double-quoted scalar
+    on the key's own line; otherwise problem says why it cannot be read exactly."""
+    for key in USES_KEY.finditer(text):
+        start = key.end()
+        while start < len(text) and text[start] in " \t":
+            start += 1
+        line_end = text.find("\n", start)
+        line_end = len(text) if line_end < 0 else line_end
+        line = text[start:line_end].rstrip("\r")
+        if not line or line.startswith("#"):
+            yield start, start, None, "its value is not on the uses: line"
+        elif line[0] in "|>&*!{[":
+            yield start, start, None, "its value is not a plain or quoted scalar"
+        elif line[0] == "'":
+            match = re.match(r"'((?:[^']|'')*)'", line)
+            if not match:
+                yield start, start, None, "its quoted value does not end on the uses: line"
+            else:
+                yield start, start + match.end(), match[1].replace("''", "'"), None
+        elif line[0] == '"':
+            match = re.match(r'"((?:[^"\\]|\\.)*)"', line)
+            if not match:
+                yield start, start, None, "its quoted value does not end on the uses: line"
+            elif "\\" in match[1]:
+                yield start, start, None, "its quoted value contains escape sequences"
+            else:
+                yield start, start + match.end(), match[1], None
+        else:
+            # A plain scalar ends at a comment (` #`) and, in a flow mapping, at , or }.
+            end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
+            value = line[: end.start() if end else len(line)].rstrip()
+            yield start, start + len(value), value, None
+
+
 def verify_pins(root, action_sha, exclude=()):
     """Every reference pins exactly action_sha in tenstorrent/.github: no other
     commit, no reference to the old tt-metal location, no subdirectory.
     Whether action_sha exists there is for the caller's CI to check."""
     problems = []
     pins = {}
-    for path in tracked_consumers(root, exclude):
+    for path in pinned_files(root, exclude):
         # Files --write leaves alone (gh-aw lock files) are not held to its pin.
         if excluded(path, exclude):
             continue
-        for match in ANY_PIN.finditer((root / path).read_text()):
+        text = (root / path).read_text()
+        read = []
+        for start, end, value, problem in uses_values(text):
+            line = text.count("\n", 0, start) + 1
+            if problem:
+                problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
+                continue
+            match = PIN_VALUE.fullmatch(value)
+            if not match:
+                continue
+            read.append((start, end))
             if match["repo"].lower() == LEGACY_REPO.lower():
-                problems.append(f"{path} references {match[0]}; the action moved to {ACTION_REPO} (run --write)")
+                problems.append(f"{path}:{line} references {value}; the action moved to {ACTION_REPO} (run --write)")
                 continue
             if match["subpath"]:
-                problems.append(f"{path} references {match[0]}; reference the action itself, not a subdirectory")
+                problems.append(f"{path}:{line} references {value}; reference the action itself, not a subdirectory")
             pins.setdefault(match["ref"], []).append(path.as_posix())
+        # A mention the uses: values above do not account for (a comment, an
+        # anchor, a multi-line value) could still be what GitHub runs.
+        for match in ANY_PIN.finditer(text):
+            if not any(start <= match.start() < end for start, end in read):
+                line = text.count("\n", 0, match.start()) + 1
+                problems.append(f"{path}:{line} mentions {match[0]} outside a uses: value it can verify")
     if set(pins) - {action_sha}:
         problems.append(f"references pin {sorted(pins)}, expected only action_sha {action_sha}")
     for problem in problems:

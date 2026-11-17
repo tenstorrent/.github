@@ -494,6 +494,10 @@ class Checkout:
             ("fetch.recurseSubmodules", "false"),
             ("http.lowSpeedLimit", "1000"),
             ("http.lowSpeedTime", str(max(1, math.ceil(self.fetch_timeout)))),
+            # A sparse checkout's lazy fetches read the caller's configuration, whose
+            # less specific extraHeader values (an unscoped http.extraHeader, say)
+            # would otherwise go to the cache too. The empty value clears them.
+            (f"http.{self.cache}/.extraHeader", ""),
         ]
         if self.token:
             config.append((f"http.{self.cache}/.extraHeader", f"AUTHORIZATION: basic {self.auth}"))
