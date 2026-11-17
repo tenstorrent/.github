@@ -94,6 +94,21 @@ class SecurityViolation(Bypass):
     somewhere untrusted. Unlike a Bypass there is no fallback: the action fails."""
 
 
+def mask(value):
+    """A GitHub workflow command that hides value wherever the log would show it."""
+    if value:
+        print("::add-mask::" + value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"), flush=True)
+
+
+def mask_token(environ):
+    """Hide the checkout token and the Authorization header made from it, before
+    any Git process can print either."""
+    token = checkout_input(environ, "CACHEW_TOKEN")
+    if token:
+        mask(token)
+        mask(base64.b64encode(f"x-access-token:{token}".encode()).decode())
+
+
 def report_violation(error):
     """A GitHub error annotation. The message is one of this module's fixed
     strings, never the offending value, which could itself carry workflow commands."""
@@ -114,8 +129,12 @@ def loopback_http_allowed(environ):
 # shell command of `git submodule foreach`, so its host is limited to DNS names
 # and IP literals: no quotes, spaces or shell metacharacters.
 HOST = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])(?::[0-9]{1,5})?")
-# Never handed to child processes: Git, curl, hooks and `submodule foreach`
-# shells get credentials only through the configuration written for them.
+# Never handed to child processes as such. Git still receives the token as an
+# Authorization header in command-scoped configuration (GIT_CONFIG_VALUE_n),
+# which every process Git starts inherits: the job's hooks, filter drivers and
+# core.fsmonitor command, and the hooks of its GIT_TEMPLATE_DIR. Those run as the
+# runner user, which can read this process's environment anyway, so the header
+# is masked in the log before any Git process starts (as actions/checkout does).
 SECRET_ENVIRONMENT = ("CACHEW_TOKEN",)
 # Git lets this variable override http.sslVerify, so it is dropped wherever a
 # request can carry the token.
@@ -905,6 +924,7 @@ def main():
     # false: the cache endpoint itself failed, so later dependencies skip it.
     status = {"available": "unknown", "selected": ""}
     violation = False
+    mask_token(os.environ)
     try:
         session = os.environ.get("CACHEW_SESSION_DIR")
         if session and (Path(session) / "cache-disabled").exists():

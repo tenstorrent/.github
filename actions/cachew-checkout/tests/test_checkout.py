@@ -291,9 +291,21 @@ class CheckoutTests(unittest.TestCase):
         capture = io.StringIO()
         with patch.dict(os.environ, self.env, clear=True), redirect_stdout(capture):
             cachew_checkout.main()
-        self.assertNotIn(TOKEN, capture.getvalue())
-        self.assertNotIn(base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode(), capture.getvalue())
+        self.unmasked(capture.getvalue())
         return runner_file(self.root / "output")["checked-out"] == "true"
+
+    def unmasked(self, output):
+        """The output after the token masks, which must come first, before any Git
+        process could print the token; the token appears nowhere else."""
+        lines = output.splitlines()
+        token = cachew_checkout.checkout_input(self.env, "CACHEW_TOKEN")
+        header = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        masks = [f"::add-mask::{token}", f"::add-mask::{header}"] if token else []
+        self.assertEqual(lines[: len(masks)], masks)
+        rest = "\n".join(lines[len(masks) :])
+        self.assertNotIn(TOKEN, rest)
+        self.assertNotIn(base64.b64encode(f"x-access-token:{TOKEN}".encode()).decode(), rest)
+        return rest
 
     def assert_cache_attempts(self, repositories, attempts=1):
         paths = self.cache.discoveries()
@@ -742,8 +754,8 @@ class CheckoutTests(unittest.TestCase):
         if reported:
             self.assertEqual(outputs["checked-out"], "false")
             # One annotation line: no input text that could add workflow commands.
-            self.assertEqual(capture.getvalue().count("::"), 2, capture.getvalue())
-            self.assertNotIn(TOKEN, capture.getvalue())
+            rest = self.unmasked(capture.getvalue())
+            self.assertEqual(rest.count("::"), 2, capture.getvalue())
         return reported
 
     def test_attack_shaped_inputs_fail_with_an_error_annotation(self):

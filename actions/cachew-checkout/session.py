@@ -58,6 +58,7 @@ from checkout import (  # noqa: E402
     duration,
     git_version_at_least,
     healthy,
+    mask,
     origin,
     report_violation,
     repository_name,
@@ -171,11 +172,6 @@ def output(key, value):
 
 def environment(key, value):
     file_command("GITHUB_ENV", key, value)
-
-
-def mask(value):
-    if value:
-        print("::add-mask::" + value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
 
 
 def find_git(environ):
