@@ -57,6 +57,7 @@ Give values to later steps through `env:`. Do not put
 | `tailscale-client-id` | no | value of org variable `TS_VAULT_OSPO_CLIENT_ID` | Tailscale OAuth client ID. Not a secret. |
 | `tailscale-audience` | no | value of org variable `TS_VAULT_OSPO_AUDIENCE` | Tailscale OIDC audience. Not a secret. |
 | `tailscale-tags` | no | `tag:tt-gha-vault-ospo` | Tags of the runner node. |
+| `vault-timeout-seconds` | no | `120` | Time limit of the Vault login and read, in seconds (10 to 600). After this time the action stops the Vault step and fails. |
 
 Set `github-token`, `secrets`, or both. If both are empty, the action fails.
 
@@ -75,7 +76,7 @@ holds a copy. If an org variable changes, pass the new value:
 |---|---|
 | `token` | The GitHub token from `github-token`. Empty if `github-token` is not set. |
 | `secrets` | JSON object with one key per `<NAME>` in `secrets`. Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. |
-| `failed-step` | The step of the action that failed: `prepare` (input and job checks), `join` (Tailscale join), `wait` (Vault not reachable), `vault` (Vault login or read), `check` (empty value). Empty when the action succeeds. Use it with `continue-on-error: true`. |
+| `failed-step` | The step of the action that failed: `prepare` (input and job checks), `join` (Tailscale join), `wait` (Vault not reachable), `vault` (Vault login or read, also when it took longer than `vault-timeout-seconds`), `check` (empty value). Empty when the action succeeds. Use it with `continue-on-error: true`. |
 
 When `github-token` is set, `secrets` also has the key
 `VAULT_SECRETS_GITHUB_TOKEN` (the same value as `token`). Do not use that name
@@ -104,6 +105,16 @@ JSON string or `fromJSON`. Do not print values anyway.
 The Vault login and the GitHub token last at most 15 minutes. Call the action
 just before the step that needs the values. For a longer job, call it again
 later in the job.
+
+The Vault login and read stop after `vault-timeout-seconds` (default 120).
+Without this limit, one stalled network connection can hold the step for
+about 16 minutes. A composite action step cannot have `timeout-minutes`, so
+the action uses a background process for the limit. It needs `pgrep`. If
+`pgrep` is not on the runner, the action writes a warning and runs without the
+limit.
+
+Also set `timeout-minutes` on the job (for example `timeout-minutes: 30`), so
+that a stalled step in any part of the job cannot hold the runner for hours.
 
 ## Call it two times in one job
 
@@ -143,6 +154,8 @@ one job.
 | `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
 | `Vault ... is not reachable` | The runner is not on the tailnet, the join failed, the tag has no route to Vault, or the URL is wrong. | Read the "Join tailnet" step log. Use `join-tailnet: auto`. |
+| `Vault did not answer within N seconds` | The Vault step took longer than `vault-timeout-seconds`. The likely cause is a stalled network connection on the tailnet. | Run the job again. If it occurs again, report it to OSPO. |
+| `input vault-timeout-seconds must be a whole number from 10 to 600` | Wrong value. | Use a number from 10 to 600, or remove the input to use 120. |
 | Vault: `role "..." could not be found` | Wrong `role`, or the grant is not applied. | Check the role name in your grant file. |
 | Vault: `error validating claims` / `claim ... does not match` | The run does not match the role: wrong branch, wrong `environment:`, or an event the role does not allow. | Run from the bound ref or environment, or ask OSPO to change the grant. |
 | Vault: `permission denied` (403) on a `github/token/...` path | The role may not mint that token, or the name is wrong. | Check `github_tokens` in your grant. |

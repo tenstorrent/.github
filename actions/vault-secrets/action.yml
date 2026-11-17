@@ -49,6 +49,12 @@ inputs:
     description: Tailscale tags for the runner node.
     required: false
     default: tag:tt-gha-vault-ospo
+  vault-timeout-seconds:
+    description: >-
+      Time limit of the Vault login and read, in seconds (10 to 600). After this
+      time the action stops the Vault step and fails with failed-step `vault`.
+    required: false
+    default: "120"
 
 outputs:
   token:
@@ -69,7 +75,9 @@ outputs:
         steps.prepare.outcome == 'failure' && 'prepare' ||
         steps.join.outcome == 'failure' && 'join' ||
         steps.wait.outcome == 'failure' && 'wait' ||
+        steps.watchdog.outcome == 'failure' && 'vault' ||
         steps.vault.outcome == 'failure' && 'vault' ||
+        steps.watchdog_stop.outcome == 'failure' && 'vault' ||
         steps.check.outcome == 'failure' && 'check' || ''
       }}
 
@@ -88,6 +96,7 @@ runs:
         IN_TS_CLIENT_ID: ${{ inputs.tailscale-client-id }}
         IN_TS_AUDIENCE: ${{ inputs.tailscale-audience }}
         IN_TS_TAGS: ${{ inputs.tailscale-tags }}
+        IN_VAULT_TIMEOUT: ${{ inputs.vault-timeout-seconds }}
         EVENT_NAME: ${{ github.event_name }}
       run: bash "$GITHUB_ACTION_PATH/prepare.sh"
 
@@ -108,6 +117,15 @@ runs:
         VAULT_URL: ${{ steps.prepare.outputs.url }}
       run: bash "$GITHUB_ACTION_PATH/wait-for-vault.sh"
 
+    # Composite steps cannot have timeout-minutes, and vault-action has no
+    # request timeout. A background watchdog stops the Vault step at the limit.
+    - name: Start time limit for Vault
+      id: watchdog
+      shell: bash
+      env:
+        VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
+      run: bash "$GITHUB_ACTION_PATH/watchdog.sh" start
+
     # vault-action masks every value it reads (core.setSecret, per line).
     - name: Log in to Vault and read
       id: vault
@@ -124,6 +142,17 @@ runs:
         exportToken: false
         outputToken: false
         secrets: ${{ steps.prepare.outputs.spec }}
+
+    # Runs also when the Vault step failed or the job was cancelled, so that
+    # no watchdog stays behind. Fails if the watchdog stopped the Vault step.
+    - name: Stop time limit for Vault
+      id: watchdog_stop
+      if: always() && steps.watchdog.outcome == 'success'
+      shell: bash
+      env:
+        WATCHDOG_ID: ${{ steps.watchdog.outputs.id }}
+        VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
+      run: bash "$GITHUB_ACTION_PATH/watchdog.sh" stop
 
     # Vault can hold an empty string, and vault-action passes it on without an
     # error. An empty value is always an error here. Names only in the log.

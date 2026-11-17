@@ -3,9 +3,9 @@
 # Every input arrives through env (never through ${{ }} in shell text).
 #
 # Reads:  IN_ROLE IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
-#         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS EVENT_NAME
+#         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
 #         ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
-# Writes: outputs url, join, spec
+# Writes: outputs url, join, spec, vault-timeout
 set -euo pipefail
 
 DEFAULT_URL='https://vault-ospo.eng-svc.aws.tenstorrent.com'
@@ -101,6 +101,12 @@ case "$url" in
   *) fail "input vault-url is not an OSPO Vault URL. Remove the input to use the default. Allowed: https://vault-ospo.eng-svc.aws.tenstorrent.com, https://vault-ospo-staging.eng-svc.aws.tenstorrent.com." ;;
 esac
 
+# Time limit of the Vault step, in seconds (see watchdog.sh).
+vault_timeout="${IN_VAULT_TIMEOUT:-120}"
+if ! [[ "$vault_timeout" =~ ^[1-9][0-9]{0,3}$ ]] || [ "$vault_timeout" -lt 10 ] || [ "$vault_timeout" -gt 600 ]; then
+  fail "input vault-timeout-seconds must be a whole number from 10 to 600."
+fi
+
 join="${IN_JOIN_TAILNET:-auto}"
 case "$join" in
   true | false) ;;
@@ -125,5 +131,6 @@ delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 {
   printf 'url=%s\n' "$url"
   printf 'join=%s\n' "$join"
+  printf 'vault-timeout=%s\n' "$vault_timeout"
   printf 'spec<<%s\n%s\n%s\n' "$delimiter" "$spec" "$delimiter"
 } >>"$GITHUB_OUTPUT"

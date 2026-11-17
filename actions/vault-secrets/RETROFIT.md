@@ -266,6 +266,7 @@ Use this checklist in the pull request description:
 - [ ] Each use of a value that `exportEnv` put in the job environment is now mapped in step-level `env:`
 - [ ] No leftover `steps.<id>.outputs.<NAME>` references
 - [ ] Job-level `VAULT_URL` removed when unused
+- [ ] Job has `timeout-minutes` (for example 30)
 - [ ] `actionlint` passes
 - [ ] Run on the permitted ref passes and behaves as before
 - [ ] No value in the log

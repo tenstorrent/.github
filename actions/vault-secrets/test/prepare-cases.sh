@@ -33,6 +33,7 @@ run_env() {
     IN_TS_CLIENT_ID=test-client \
     IN_TS_AUDIENCE=test-audience \
     IN_TS_TAGS=tag:test \
+    IN_VAULT_TIMEOUT= \
     GITHUB_OUTPUT="$out" \
     "$@" \
     bash "$prepare" >"$log" 2>&1 || rc=$?
@@ -119,6 +120,10 @@ for url in \
   https://user@vault-ospo.eng-svc.aws.tenstorrent.com; do
   refuses_with "vault-url $url" 'input vault-url is not an OSPO Vault URL' IN_VAULT_URL="$url"
 done
+for t in abc 0 9 601 -1 12.5 ' 60' 0060 99999; do
+  refuses_with "vault-timeout-seconds '$t'" 'input vault-timeout-seconds must be a whole number from 10 to 600' \
+    IN_VAULT_TIMEOUT="$t"
+done
 refuses_with 'join-tailnet maybe' 'input join-tailnet must be auto, true or false' \
   IN_JOIN_TAILNET=maybe
 refuses_with 'join without client id' 'input tailscale-client-id is empty' \
@@ -143,6 +148,24 @@ accepts 'output name that only starts with the reserved name' \
 accepts 'default name with a dash is not the reserved name' \
   'kv/data/app VAULT-SECRETS_GITHUB_TOKEN' test-token \
   "kv/data/app VAULT-SECRETS_GITHUB_TOKEN ;${nl}${token_line}"
+
+# Fails unless prepare.sh, with IN_VAULT_TIMEOUT=$1, writes vault-timeout=$2.
+timeout_is() {
+  run_env IN_VAULT_TIMEOUT="$1"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::vault-timeout-seconds '$1': prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x -- "vault-timeout=$2" "$work/out"; then
+    echo "::error::vault-timeout-seconds '$1': output vault-timeout is not $2"
+    status=1
+  else
+    echo "OK: accepted: vault-timeout-seconds '$1' gives $2"
+  fi
+}
+timeout_is '' 120
+timeout_is 10 10
+timeout_is 600 600
 
 refuses 'exact output name' 'kv/data/app value | VAULT_SECRETS_GITHUB_TOKEN'
 refuses 'exact output name with blanks and ;' "kv/data/app value |  VAULT_SECRETS_GITHUB_TOKEN  ;${nl}"
