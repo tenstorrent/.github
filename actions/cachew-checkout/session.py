@@ -539,11 +539,16 @@ def activate(environ):
     state = read_state(session)
     real_git = state["real_git"]
     global_config = session / "global.config"
-    checkout = Path(environ.get("GITHUB_WORKSPACE", "."), checkout_input(environ, "CACHEW_PATH"))
+    workspace = Path(environ.get("GITHUB_WORKSPACE", ".")).resolve()
+    checkout = (workspace / checkout_input(environ, "CACHEW_PATH")).resolve()
+    # This step also runs after a refused checkout: a path the checkout rejects
+    # (outside the workspace) is never handed to Git here either.
+    inside = checkout.is_relative_to(workspace)
     view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
     # First, whatever fails below: a rewrite an earlier activation left in a
     # locked file still redirects this checkout's lazy fetches.
-    pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"))
+    if inside:
+        pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"))
     settings = Settings(environ)
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
@@ -600,8 +605,12 @@ def activate(environ):
             # empty value clears them for cache URLs even when no token is recorded.
             (f"http.{cache}/.extraHeader", ""),
         ]
+        # The workflow repository's token, for this upstream's repositories only:
+        # scoped to the cache's /git/<host>/ paths, so a URL a later step takes
+        # from repository content (a submodule naming the cache with another
+        # host in its path) is requested without it.
         if default := state["defaults"].get(settings.upstream):
-            entries += auth_entries(cache, default)
+            entries += auth_entries(f"{cache}/git/{host}", default)
         for repository, header in state["tokens"].items():
             if repository.startswith(settings.upstream + "/"):
                 cached = f"{cache}/git/{host}/{repository[len(settings.upstream) + 1 :]}"
@@ -613,7 +622,8 @@ def activate(environ):
         write_state(session, state)
         append_locked(global_config, render(entries))
         state["active"] = True
-        pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache)
+        if inside:
+            pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache)
         write_state(session, state)
         wrapper = session / "bin"
         wrapper.mkdir(mode=0o700, exist_ok=True)

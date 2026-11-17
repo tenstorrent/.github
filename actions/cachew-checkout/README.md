@@ -141,7 +141,7 @@ Afterward the action adds:
 
 ```text
 url.<cachew>/git/github.com/.insteadOf = https://github.com/
-http.<cachew>/....extraHeader          = the checkout token (cache URLs only)
+http.<cachew>/git/github.com/....extraHeader = the checkout token (the cache's github.com URLs only)
 http.<cachew>/.sslVerify               = true
 http.<cachew>/.followRedirects         = false
 checkout.workers = 0

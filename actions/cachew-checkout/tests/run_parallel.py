@@ -10,7 +10,8 @@ then a combined summary. The tests use their own temporary directories and
 servers on free ports, so they run side by side safely.
 
 usage: python3 run_parallel.py [-j JOBS] [tests directory]
-Exit status 1 if any test fails or errors, or a shard does not run all its tests.
+Exit status 1 if any test fails or errors, a shard does not run all its tests,
+or a shard exits with a non-zero status.
 """
 
 import argparse
@@ -56,6 +57,7 @@ def main(argv=None):
     ]
     totals = {"ran": 0, "failures": 0, "errors": 0, "skipped": 0}
     complete = True
+    exited_nonzero = 0
     for shard, process in zip(shards, processes):
         output = process.communicate()[0]
         ran = re.search(r"^Ran (\d+) tests? in", output, re.MULTILINE)
@@ -65,13 +67,18 @@ def main(argv=None):
             totals[key] += int(value)
         if not ran or int(ran[1]) != len(shard):
             complete = False
+        # A shard can print a passing summary and still exit non-zero (an
+        # unexpected success, or a crash while the interpreter shuts down).
         if process.returncode:
+            exited_nonzero += 1
             print(output)
-    failed = totals["failures"] or totals["errors"] or not complete
+            print(f"shard exited with status {process.returncode}")
+    failed = totals["failures"] or totals["errors"] or not complete or exited_nonzero
     print(
         f"Ran {totals['ran']} of {len(tests)} tests on {len(processes)} processes in "
         f"{time.monotonic() - start:.0f}s: {'FAILED' if failed else 'OK'} "
-        f"(failures={totals['failures']}, errors={totals['errors']}, skipped={totals['skipped']})"
+        f"(failures={totals['failures']}, errors={totals['errors']}, skipped={totals['skipped']}, "
+        f"shards exited non-zero={exited_nonzero})"
     )
     return 1 if failed else 0
 

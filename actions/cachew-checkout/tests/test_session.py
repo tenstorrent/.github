@@ -253,6 +253,37 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(all(auth.lower() == expected.lower() for _, _, auth in requests))
         self.finish()
 
+    def test_workflow_token_is_not_sent_to_cache_paths_of_another_host(self):
+        # The cache serves /git/<host>/...: a URL taken from repository content
+        # (a submodule, say) can name the cache with any host in its path.
+        self.assertEqual(self.flow(), (True, True))
+        for command in ("git", self.env["CACHEW_REAL_GIT"]):
+            subprocess.run(
+                [command, "ls-remote", self.fixture.cache.url + "/git/other.example/org/main"],
+                cwd=self.fixture.root,
+                env=self.env,
+                capture_output=True,
+                timeout=30,
+            )
+        requests = [request for request in self.fixture.cache.requests if "/other.example/" in request[1]]
+        self.assertTrue(requests)
+        self.assertEqual([auth for _, _, auth in requests if auth], [])
+        self.finish()
+
+    def test_activation_leaves_a_repository_outside_the_workspace_alone(self):
+        # The configure step runs even after the checkout refused its path.
+        self.assertEqual(self.flow(), (True, True))
+        outside = self.fixture.root / "outside"
+        upstream = self.fixture.upstream.url + "/org/main"
+        self.real_git("init", "-q", str(outside))
+        self.real_git("-C", str(outside), "config", "remote.origin.url", upstream)
+        self.real_git("-C", str(outside), "config", "remote.origin.promisor", "true")
+        before = (outside / ".git" / "config").read_bytes()
+        self.env["CACHEW_PATH"] = os.path.relpath(outside, self.env["GITHUB_WORKSPACE"])
+        self.activate()
+        self.assertEqual((outside / ".git" / "config").read_bytes(), before)
+        self.finish()
+
     def path_git(self, *args):
         """Git as a later step runs it: the shim on PATH."""
         result = subprocess.run(
