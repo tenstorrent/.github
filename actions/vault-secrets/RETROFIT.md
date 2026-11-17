@@ -51,13 +51,21 @@ and the step does not always fail.
 
 Do these steps before you remove the old step:
 
-1. Make a list of the output names in `secrets` (the text after `|`, or the
-   default name from the selector).
-2. In each later step of the same job, find each use of a name: `$NAME`,
-   `${NAME}`, `${{ env.NAME }}`, and use by a script or a tool that reads the
-   environment. Read the scripts that the steps call.
-3. For each step that uses a name, add it to the step-level `env:` of that
-   step: `NAME: ${{ fromJSON(steps.<id>.outputs.secrets).NAME }}`, or
+1. For each entry in `secrets`, write down two names. They can be different.
+   - The output key. With `| NAME`, it is `NAME`. Without `| NAME`, it is
+     made from the selector: each `.` becomes `__`, and each `-` and each
+     other character that is not a letter, a digit or `_` is removed. The
+     case does not change. Example: `api_key`.
+   - The exported name, which is the environment variable. With `| NAME`,
+     it is `NAME`. Without `| NAME`, it is the output key in upper case.
+     Example: `API_KEY`.
+2. In each later step of the same job, find each use of an exported name:
+   `$API_KEY`, `${API_KEY}`, `${{ env.API_KEY }}`, and use by a script or a
+   tool that reads the environment. Read the scripts that the steps call.
+3. For each step that uses an exported name, add it to the step-level `env:`
+   of that step. The left side is the exported name. The right side reads
+   the output key:
+   `API_KEY: ${{ fromJSON(steps.<id>.outputs.secrets).api_key }}`, or
    `NAME: ${{ steps.<id>.outputs.token }}` for the `github-token` value.
 4. If you cannot find all uses (for example, a tool reads an unknown
    variable), stop and ask a human.
@@ -232,9 +240,10 @@ Complete each item before you open the pull request.
 - [ ] Search for old references. Run
       `grep -n "steps\.<id>\.outputs\." <file>` for each Vault step `id`.
       Each result must be `outputs.token` or `outputs.secrets`.
-- [ ] If the old step exported values (section 2a): search for each output
-      name, for example `grep -n "NAME" <file>`. Each use must read the value
-      from step-level `env:`.
+- [ ] If the old step exported values (section 2a): search for each
+      exported name (not the output key), for example
+      `grep -n "API_KEY" <file>`. Each use must read the value from
+      step-level `env:`.
 - [ ] Search for the removed steps: `grep -n "tailscale/github-action\|hashicorp/vault-action\|VAULT_URL" <file>`.
       The result must be empty, unless a step is out of scope (section 4).
 - [ ] Run the workflow on a ref that the Vault role allows (branch,
