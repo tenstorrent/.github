@@ -19,11 +19,13 @@ case "$CASE" in
   bad-token-name) token="bad;name" ;;
   bad-join-value) join=maybe ;;
   http-url) url="http://${VAULT_URL#https://}" ;;
+  other-host-url) url="https://vault-ospo.invalid" ;;
+  url-with-path) url="${VAULT_URL}/v1" ;;
+  url-with-port) url="${VAULT_URL}:8200" ;;
   reserved-output-name) secrets="$VAULT_KV_PATH $VAULT_KV_FIELD | VAULT_SECRETS_GITHUB_TOKEN" ;;
   # No '| NAME': vault-action takes the output name from the selector.
   reserved-default-name) secrets="$VAULT_KV_PATH VAULT_SECRETS_GITHUB_TOKEN" ;;
   # Network: fail before Vault login.
-  unreachable-url) url="https://vault-ospo.invalid" ;;
   no-tailnet) join=false ;;
   # Vault refuses (needs the grant to be meaningful).
   wrong-role) role="${VAULT_ROLE}--no-such-role" ;;

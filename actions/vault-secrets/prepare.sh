@@ -95,8 +95,11 @@ fi
 
 url="${IN_VAULT_URL:-$DEFAULT_URL}"
 while [[ "$url" == */ ]]; do url="${url%/}"; done
-[[ "$url" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~/-]*)?$ ]] \
-  || fail "input vault-url must be an https:// URL without query or spaces."
+# The action sends the OIDC token of the job to this URL. Only OSPO Vault gets it.
+case "$url" in
+  https://vault-ospo.eng-svc.aws.tenstorrent.com | https://vault-ospo-staging.eng-svc.aws.tenstorrent.com) ;;
+  *) fail "input vault-url is not an OSPO Vault URL. Remove the input to use the default. Allowed: https://vault-ospo.eng-svc.aws.tenstorrent.com, https://vault-ospo-staging.eng-svc.aws.tenstorrent.com." ;;
+esac
 
 join="${IN_JOIN_TAILNET:-auto}"
 case "$join" in

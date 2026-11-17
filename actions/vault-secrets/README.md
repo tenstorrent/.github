@@ -52,7 +52,7 @@ Give values to later steps through `env:`. Do not put
 | `role` | yes | | Vault role of the workflow: `<org>--<repo>`, or `<org>--<repo>--<name>` for a named workflow entry. |
 | `github-token` | no | | Token name. A bare name reads `github/token/<name>`. A value with `/` is the full path, for example `github-members/token/<name>`. |
 | `secrets` | no | | Secrets in [hashicorp/vault-action](https://github.com/hashicorp/vault-action) `secrets` syntax: `<path> <field> \| <NAME> ;` per line. |
-| `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. The JWT audience is always this URL. |
+| `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
 | `join-tailnet` | no | `auto` | `auto` joins unless the runner is already on the tailnet. `true` always joins. `false` never joins. |
 | `tailscale-client-id` | no | value of org variable `TS_VAULT_OSPO_CLIENT_ID` | Tailscale OAuth client ID. Not a secret. |
 | `tailscale-audience` | no | value of org variable `TS_VAULT_OSPO_AUDIENCE` | Tailscale OIDC audience. Not a secret. |
@@ -139,7 +139,7 @@ one job.
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role is empty` / `... characters ...` | `role` is missing or not valid. | Set the role name from your grant. |
 | `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the token name only, without `token` or `\|`. |
-| `input vault-url must be an https:// URL` | `vault-url` is not https. | Fix `vault-url`, or remove it to use the default. |
+| `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
 | `Vault ... is not reachable` | The runner is not on the tailnet, the join failed, the tag has no route to Vault, or the URL is wrong. | Read the "Join tailnet" step log. Use `join-tailnet: auto`. |
 | Vault: `role "..." could not be found` | Wrong `role`, or the grant is not applied. | Check the role name in your grant file. |

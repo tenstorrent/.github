@@ -22,7 +22,9 @@ inputs:
     required: false
     default: ""
   vault-url:
-    description: Vault URL. The JWT audience is always this URL.
+    description: >-
+      Vault URL. Only the OSPO Vault production URL (default) and the staging URL
+      are allowed. The JWT audience is always this URL.
     required: false
     default: https://vault-ospo.eng-svc.aws.tenstorrent.com
   join-tailnet:
@@ -103,6 +105,10 @@ runs:
         role: ${{ inputs.role }}
         jwtGithubAudience: ${{ steps.prepare.outputs.url }}
         exportEnv: false
+        # Defaults of vault-action v4.0.0, set here so that a later version cannot change them:
+        # the Vault login token never goes to the environment or to the outputs.
+        exportToken: false
+        outputToken: false
         secrets: ${{ steps.prepare.outputs.spec }}
 
     # Vault can hold an empty string, and vault-action passes it on without an
