@@ -145,12 +145,14 @@ runs:
 
     # Runs also when the Vault step failed or the job was cancelled, so that
     # no watchdog stays behind. Fails if the watchdog stopped the Vault step.
+    # Warns if the Vault step ran and the watchdog did not find its process.
     - name: Stop time limit for Vault
       id: watchdog_stop
       if: always() && steps.watchdog.outcome == 'success'
       shell: bash
       env:
         WATCHDOG_ID: ${{ steps.watchdog.outputs.id }}
+        VAULT_OUTCOME: ${{ steps.vault.outcome }}
         VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
       run: bash "$GITHUB_ACTION_PATH/watchdog.sh" stop
 

@@ -9,18 +9,25 @@
 #                       start, it writes a warning and the Vault step runs
 #                       without a time limit.
 #   watchdog.sh stop    Stops the watchdog of this call. Fails with an error
-#                       message if the watchdog stopped the Vault step.
+#                       message if the watchdog stopped the Vault step. Writes
+#                       a warning if the Vault step ran and the watchdog did
+#                       not find its process (the step ran without a limit).
 #   watchdog.sh loop    The background watchdog. Started by `start` only.
 #
-# The watchdog takes the FIRST process that matches the pattern as its target.
+# The watchdog takes the FIRST process that matches the pattern as its target
+# and writes its command line to the attached record. Until then it looks
+# every 0.1 second, so it also finds a Vault step of about 0.5 second.
 # It exits when that process ends, or after it stops the process, or at the
 # time limit. It never stops a process that starts after its target, so it
 # cannot stop the Vault step of a later call in the same job.
 #
 # Reads (start): VAULT_TIMEOUT RUNNER_TEMP RUNNER_WORKSPACE GITHUB_OUTPUT
 #                VAULT_WATCHDOG_PATTERN (optional; tests set it)
-# Reads (stop):  VAULT_TIMEOUT RUNNER_TEMP WATCHDOG_ID
-# Files:         $RUNNER_TEMP/vault-secrets-watchdog-<id>.pid and .marker
+# Reads (stop):  VAULT_TIMEOUT VAULT_OUTCOME RUNNER_TEMP WATCHDOG_ID
+# Files in $RUNNER_TEMP/vault-secrets-watchdog/, per call:
+#   <id>.pid       PID of the watchdog (removed by stop)
+#   <id>.marker    the watchdog stopped the Vault step (removed by stop)
+#   <id>.attached  command line of the process it watched (kept; tests count it)
 set -euo pipefail
 
 warn() {
@@ -28,9 +35,10 @@ warn() {
 }
 
 files() {
-  base="${RUNNER_TEMP:?RUNNER_TEMP is not set}/vault-secrets-watchdog-$1"
-  pid_file="$base.pid"
-  marker="$base.marker"
+  dir="${RUNNER_TEMP:?RUNNER_TEMP is not set}/vault-secrets-watchdog"
+  pid_file="$dir/$1.pid"
+  marker="$dir/$1.marker"
+  attached="$dir/$1.attached"
 }
 
 # Escapes a path for use in an extended regular expression.
@@ -50,7 +58,7 @@ default_pattern() {
 
 # Prints the PIDs of this user's processes that match the pattern.
 matching() {
-  pgrep -u "$(id -u)" -f -- "$WATCHDOG_PATTERN" 2>/dev/null || true
+  pgrep -u "$uid" -f -- "$WATCHDOG_PATTERN" 2>/dev/null || true
 }
 
 do_start() {
@@ -75,13 +83,15 @@ do_start() {
 
   id="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
   files "$id"
-  rm -f "$pid_file" "$marker"
+  mkdir -p "$dir"
+  rm -f "$pid_file" "$marker" "$attached"
 
   # Detach: no stdio, own session if setsid exists, so the step does not wait.
   local -a detach=(nohup)
   if command -v setsid >/dev/null 2>&1; then detach=(nohup setsid); fi
   WATCHDOG_LIMIT="$limit" WATCHDOG_PATTERN="$pattern" \
     WATCHDOG_PID_FILE="$pid_file" WATCHDOG_MARKER="$marker" \
+    WATCHDOG_ATTACHED="$attached" \
     "${detach[@]}" bash "${BASH_SOURCE[0]}" loop </dev/null >/dev/null 2>&1 &
 
   # The watchdog writes its own PID. Wait for it, at most 5 seconds.
@@ -99,17 +109,24 @@ do_start() {
 
 do_loop() {
   local limit="$WATCHDOG_LIMIT" target="" deadline
+  uid="$(id -u)"
   printf '%s\n' "$$" >"$WATCHDOG_PID_FILE"
   deadline=$((SECONDS + limit))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if [ -z "$target" ]; then
       target="$(matching | head -n 1)"
+      if [ -n "$target" ]; then
+        # The command line has the node and script paths only, no value.
+        ps -p "$target" -o args= >"$WATCHDOG_ATTACHED" 2>/dev/null || true
+        [ -s "$WATCHDOG_ATTACHED" ] || echo "pid $target" >"$WATCHDOG_ATTACHED"
+      fi
+      sleep 0.1
     elif ! kill -0 "$target" 2>/dev/null; then
       exit 0 # The Vault step ended in time.
+    else
+      sleep 1
     fi
-    sleep 1
   done
-  [ -n "$target" ] || target="$(matching | head -n 1)"
   [ -n "$target" ] || exit 0
   # Stop the target only if it still runs and still matches.
   matching | grep -q -x -- "$target" || exit 0
@@ -144,6 +161,11 @@ do_stop() {
     rm -f "$marker"
     printf '::error title=vault-secrets::%s\n' "Vault did not answer within ${VAULT_TIMEOUT:-?} seconds. The action stopped the Vault step. The likely cause is a stalled network connection on the tailnet. Run the job again."
     return 1
+  fi
+  if [ -s "$attached" ]; then
+    echo "The time limit watched the Vault step."
+  elif [ "${VAULT_OUTCOME:-}" = success ] || [ "${VAULT_OUTCOME:-}" = failure ]; then
+    warn "the time limit did not find the Vault step. The Vault step ran without a time limit."
   fi
 }
 

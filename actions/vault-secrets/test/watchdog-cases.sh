@@ -5,7 +5,7 @@
 # stand in for hashicorp/vault-action: their command line has the same form,
 #   node <work>/_actions/hashicorp/vault-action/<ref>/dist/index.js
 # so the test uses the default pattern of watchdog.sh. Needs node and pgrep.
-# Takes about 30 seconds. Uses no token and no secret.
+# Also checks the attached record of each call. Takes about 30 seconds. Uses no token and no secret.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,15 +50,27 @@ run_watchdog() {
     GITHUB_OUTPUT="$out" \
     VAULT_TIMEOUT="$limit" \
     WATCHDOG_ID="${id:-}" \
+    VAULT_OUTCOME="${outcome:-}" \
     bash "$watchdog" "$1" >"$work/log" 2>&1 || rc=$?
   log="$(cat "$work/log")"
   if [ "$1" = start ]; then
     id="$(sed -n 's/^id=//p' "$out")"
-    wd_pid="$(cat "$work/temp/vault-secrets-watchdog-$id.pid" 2>/dev/null || true)"
+    wd_pid="$(cat "$wd/$id.pid" 2>/dev/null || true)"
   fi
 }
 
+wd="$work/temp/vault-secrets-watchdog"
+
 alive() { kill -0 "$1" 2>/dev/null; }
+
+# Fails unless the attached record of call $id names the target script.
+attached_ok() {
+  if grep -q -F -- "$target_dir/index.js" "$wd/$id.attached" 2>/dev/null; then
+    echo "OK: attached record: $(cat "$wd/$id.attached")"
+  else
+    fail "$1: no attached record with the target command line"
+  fi
+}
 
 fail() {
   echo "::error::$1"
@@ -93,9 +105,11 @@ fi
 alive "$bystander" && echo "OK: a process with another path still runs." \
   || fail "case 1: the watchdog stopped a process that does not match"
 kill -KILL "$bystander" 2>/dev/null || true
-[ -e "$work/temp/vault-secrets-watchdog-$id.marker" ] && echo "OK: the marker exists." \
+[ -e "$wd/$id.marker" ] && echo "OK: the marker exists." \
   || fail "case 1: no marker file"
+attached_ok "case 1"
 gone_within "$wd_pid" 3 && echo "OK: the watchdog exited." || fail "case 1: the watchdog still runs"
+outcome=failure
 run_watchdog stop
 want="::error title=vault-secrets::Vault did not answer within $limit seconds."
 if [ "$rc" -ne 0 ] && printf '%s\n' "$log" | grep -q -F -- "$want"; then
@@ -103,26 +117,33 @@ if [ "$rc" -ne 0 ] && printf '%s\n' "$log" | grep -q -F -- "$want"; then
 else
   fail "case 1: stop step: rc $rc, expected a failure with '$want'"
 fi
-[ -z "$(ls -A "$work/temp")" ] && echo "OK: no files left." || fail "case 1: files left in RUNNER_TEMP"
+left="$(cd "$wd" && echo *)"
+[ "$left" = "$id.attached" ] && echo "OK: only the attached record is left." \
+  || fail "case 1: other files left: $left"
 
-# ── Case 2: the target ends in time ───────────────────────────────────────────
-echo "Case 2: the Vault step ends in time."
-id=""
-run_watchdog start
-[ "$rc" -eq 0 ] && [ -n "$id" ] || fail "case 2: start failed (rc $rc)"
-start_dummy "$target_dir/index.js" 1
-target=$dummy
-wait "$target" 2>/dev/null || true
-gone_within "$wd_pid" 3 && echo "OK: the watchdog exited after the target ended." \
-  || fail "case 2: the watchdog still runs after the target ended"
-[ ! -e "$work/temp/vault-secrets-watchdog-$id.marker" ] && echo "OK: no marker." \
-  || fail "case 2: marker file exists"
-run_watchdog stop
-if [ "$rc" -eq 0 ] && ! printf '%s\n' "$log" | grep -q -F '::error'; then
-  echo "OK: the stop step passed without an error."
-else
-  fail "case 2: stop step: rc $rc, expected success without an error"
-fi
+# ── Case 2: the target ends in time (a short Vault step, 0.5 second) ─────────
+# Five times: the watchdog must find a short process every time.
+for n in 1 2 3 4 5; do
+  echo "Case 2.$n: the Vault step ends in time after 0.5 second."
+  id=""
+  run_watchdog start
+  [ "$rc" -eq 0 ] && [ -n "$id" ] || fail "case 2.$n: start failed (rc $rc)"
+  start_dummy "$target_dir/index.js" 0.5
+  target=$dummy
+  wait "$target" 2>/dev/null || true
+  gone_within "$wd_pid" 3 && echo "OK: the watchdog exited after the target ended." \
+    || fail "case 2.$n: the watchdog still runs after the target ended"
+  [ ! -e "$wd/$id.marker" ] && echo "OK: no marker." \
+    || fail "case 2.$n: marker file exists"
+  attached_ok "case 2.$n"
+  outcome=success
+  run_watchdog stop
+  if [ "$rc" -eq 0 ] && [ "$log" = "The time limit watched the Vault step." ]; then
+    echo "OK: the stop step passed and wrote that it watched the Vault step."
+  else
+    fail "case 2.$n: stop step: rc $rc, expected success with the 'watched' line only"
+  fi
+done
 
 # ── Case 3: an old watchdog does not stop a later call ────────────────────────
 echo "Case 3: a later process with the same pattern is not stopped."
@@ -139,7 +160,7 @@ second=$dummy
 sleep $((limit + 4))
 alive "$second" && echo "OK: the later process still runs after the limit." \
   || fail "case 3: the old watchdog stopped a later process"
-[ ! -e "$work/temp/vault-secrets-watchdog-$id.marker" ] && echo "OK: no marker." \
+[ ! -e "$wd/$id.marker" ] && echo "OK: no marker." \
   || fail "case 3: marker file exists"
 alive "$wd_pid" && fail "case 3: the old watchdog still runs" || echo "OK: the old watchdog exited."
 kill -KILL "$second" 2>/dev/null || true
@@ -152,10 +173,26 @@ limit=60
 id=""
 run_watchdog start
 [ "$rc" -eq 0 ] && [ -n "$wd_pid" ] || fail "case 4: start failed (rc $rc)"
+outcome=skipped
 run_watchdog stop
-[ "$rc" -eq 0 ] || fail "case 4: stop step failed (rc $rc)"
+[ "$rc" -eq 0 ] && [ -z "$log" ] && echo "OK: the stop step passed without a message (Vault step skipped)." \
+  || fail "case 4: stop step: rc $rc, expected success without a message"
 gone_within "$wd_pid" 2 && echo "OK: the stop step ended the watchdog." \
   || fail "case 4: the watchdog still runs after the stop step"
+
+# ── Case 4b: the Vault step ran, but the watchdog did not find it ────────────
+echo "Case 4b: the Vault step ran and the watchdog did not find it."
+id=""
+run_watchdog start
+[ "$rc" -eq 0 ] && [ -n "$wd_pid" ] || fail "case 4b: start failed (rc $rc)"
+outcome=failure
+run_watchdog stop
+want='::warning title=vault-secrets::the time limit did not find the Vault step.'
+if [ "$rc" -eq 0 ] && printf '%s\n' "$log" | grep -q -F -- "$want"; then
+  echo "OK: the stop step passed with a warning."
+else
+  fail "case 4b: stop step: rc $rc, expected success with '$want'"
+fi
 
 # ── Case 5: no pgrep ──────────────────────────────────────────────────────────
 echo "Case 5: no pgrep on the runner."

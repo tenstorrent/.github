@@ -113,6 +113,10 @@ the action uses a background process for the limit. It needs `pgrep`. If
 `pgrep` is not on the runner, the action writes a warning and runs without the
 limit.
 
+When the limit found the Vault step, the log shows `The time limit watched the
+Vault step.` If it did not find the step, the action writes a warning and the
+Vault step runs without the limit. The action does not fail in that case.
+
 Also set `timeout-minutes` on the job (for example `timeout-minutes: 30`), so
 that a stalled step in any part of the job cannot hold the runner for hours.
 
