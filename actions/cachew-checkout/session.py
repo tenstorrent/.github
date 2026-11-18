@@ -553,29 +553,33 @@ def activate(environ):
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
     mask(encoded)
-    # As actions/checkout removes a path's persisted credentials before every
-    # checkout into it: the token an earlier checkout of this path recorded goes,
-    # unless another path's checkout recorded the same repository. A checkout
-    # with persist-credentials: false then leaves none for later steps to read.
+    # Each checkout path owns the token its last checkout recorded, as
+    # actions/checkout keeps a path's credentials in that path: it removes them
+    # before every checkout into it, so a checkout with persist-credentials: false
+    # leaves none for later steps to read. What the cache receives is derived
+    # from the paths that remain; a repository's latest checkout wins.
     paths = state.setdefault("paths", {})
-    previous = paths.pop(str(checkout), None) if inside else None
-    if previous and previous not in paths.values():
-        dropped = state["tokens"].pop(previous, None)
-        state["defaults"] = {name: value for name, value in state["defaults"].items() if value != dropped}
+    if inside:
+        paths.pop(str(checkout), None)
     if (
-        token
+        inside
+        and token
         and settings.upstream
         and settings.repository
         and checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
     ):
         # Cache-scoped only. Upstream credentials stay where actions/checkout put them.
-        header = f"AUTHORIZATION: basic {encoded}"
-        recorded = f"{settings.upstream}/{settings.repository}"
-        state["tokens"][recorded] = header
-        if inside:
-            paths[str(checkout)] = recorded
-        if settings.repository.lower() == environ.get("GITHUB_REPOSITORY", "").lower():
-            state["defaults"][settings.upstream] = header
+        workflow = settings.repository.lower() == environ.get("GITHUB_REPOSITORY", "").lower()
+        paths[str(checkout)] = {
+            "repository": f"{settings.upstream}/{settings.repository}",
+            "header": f"AUTHORIZATION: basic {encoded}",
+            "default": settings.upstream if workflow else None,
+        }
+    state["tokens"], state["defaults"] = {}, {}
+    for owned in paths.values():
+        state["tokens"][owned["repository"]] = owned["header"]
+        if owned["default"]:
+            state["defaults"][owned["default"]] = owned["header"]
     keep_safe_directories(
         real_git, environ, session / "checkout.config", state["checkout_safe_directories"], global_config
     )

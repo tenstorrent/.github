@@ -509,6 +509,42 @@ class SessionTests(unittest.TestCase):
                 self.assertNotIn(fixtures.TOKEN.encode(), content, file)
         self.finish()
 
+    def recorded(self):
+        return json.loads((Path(self.env["CACHEW_SESSION_DIR"]) / "state.json").read_text())
+
+    def test_dropping_another_checkouts_token_keeps_the_workflow_repositorys_default(self):
+        # Both checkouts use the job's token, as most jobs do: removing the
+        # secondary path's credentials must not take the primary's with them.
+        self.fixture.repository("secondary")
+        self.assertEqual(self.flow(), (True, True))
+        header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertEqual(self.recorded()["defaults"], {self.fixture.upstream.url: header})
+        self.env.update(CACHEW_REPOSITORY="org/secondary", CACHEW_PATH="secondary", CACHEW_REF="main")
+        self.assertEqual(self.flow(), (True, True))
+        self.env["CACHEW_PERSIST_CREDENTIALS"] = "false"
+        self.assertEqual(self.flow(), (False, True))
+        state = self.recorded()
+        self.assertEqual(state["defaults"], {self.fixture.upstream.url: header})
+        self.assertEqual(state["tokens"], {f"{self.fixture.upstream.url}/org/main": header})
+        self.finish()
+
+    def test_a_dropped_paths_token_does_not_stay_for_the_same_repository_elsewhere(self):
+        # The same repository at two paths with two tokens: dropping the second
+        # path's credentials leaves the first path's token, not the second's.
+        self.assertEqual(self.flow(), (True, True))
+        self.env.update(CACHEW_PATH="again", CACHEW_TOKEN="second-path-token")
+        self.assertEqual(self.flow(), (True, True))
+        second = base64.b64encode(b"x-access-token:second-path-token").decode()
+        self.assertIn(second, json.dumps(self.recorded()))
+        self.env["CACHEW_PERSIST_CREDENTIALS"] = "false"
+        self.assertEqual(self.flow(), (False, True))
+        state = self.recorded()
+        self.assertNotIn(second, json.dumps(state))
+        header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertEqual(state["tokens"], {f"{self.fixture.upstream.url}/org/main": header})
+        self.assertEqual(state["defaults"], {self.fixture.upstream.url: header})
+        self.finish()
+
     def test_disabled_cache_secondary_private_checkout_uses_its_current_token(self):
         self.fixture.repository("secondary")
         secondary_token = "secondary-private-token"
