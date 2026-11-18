@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -969,6 +970,33 @@ class SessionTests(unittest.TestCase):
         # A later checkout's prepare takes cachew's entries out of the job's file.
         self.run_step("session")
         self.assertEqual(self.real_git("config", "--global", "--get-all", key).split(), ["git@upstream.example:"])
+        self.finish()
+
+    def test_a_cleanup_that_cannot_remove_the_rewrite_keeps_its_tls_protection(self):
+        # A lock held for one write: the rewrite stays, so cache requests still
+        # happen. They must stay verified whatever the job's own http.sslVerify,
+        # and the token goes anyway.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        cache = self.fixture.cache.url
+        state = json.loads((session / "state.json").read_text())
+        failing = self.fixture.root / "failing-git"
+        failing.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *--unset-all*.insteadOf*) exit 255 ;; esac\n'
+            f'exec "{state["real_git"]}" "$@"\n'
+        )
+        failing.chmod(0o700)
+        spec = importlib.util.spec_from_file_location("cachew_session", fixtures.ACTION / "session.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        remaining = module.remove_managed(str(failing), session / "global.config", state, self.env)
+        content = (session / "global.config").read_text()
+        self.assertIn(f"url.{cache}/git/", " ".join(remaining))
+        self.assertEqual(self.real_git("config", "--global", "--get", f"http.{cache}/.sslVerify"), "true")
+        self.assertEqual(self.real_git("config", "--global", "--get", f"http.{cache}/.followRedirects"), "false")
+        self.assertIn(f"http.{cache}/.sslVerify", remaining)
+        self.assertNotIn("AUTHORIZATION", content)
         self.finish()
 
     def test_prepare_refuses_a_path_or_ref_that_has_no_fallback(self):

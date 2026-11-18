@@ -243,21 +243,39 @@ def write_state(session, state):
 
 def remove_managed(real_git, config, state, environ, rewrites_only=False):
     """Unset cachew's entries; return the keys still present (e.g. the file was
-    locked). A rewrite is removed by its own value, so a value the job gave the
-    same key stays. A header never is: its value is the token, which must not
-    appear in a process's arguments, and its key is scoped to the cache's own
-    URL, where every value is cachew's."""
-    remaining = set()
-    for key, value in dict.fromkeys((key, value) for key, value in state.get("managed", [])):
-        if rewrites_only and not key.lower().endswith(".insteadof"):
-            continue
-        rewrite = key.lower().endswith((".insteadof", ".pushinsteadof"))
-        match = ("--fixed-value", "--unset-all", key, value) if rewrite else ("--unset-all", key)
+    locked for one of them).
+
+    In an order that is safe wherever it stops. The cache rewrites go first:
+    without them no request reaches the cache. Then the tokens. The settings
+    that protect a cache request (verified TLS, no redirects, no inherited
+    header) go last, and only once every rewrite is gone: a rewrite left behind
+    with its token would otherwise follow the job's own http.sslVerify.
+
+    A rewrite is removed by its own value, so a value the job gave the same key
+    stays. A token never is, since it must not appear in a process's arguments:
+    it is matched by the fixed start of the header cachew writes."""
+
+    def unset(*match):
         # `git config` takes the file's lock, so concurrent job writes are safe.
-        if git(real_git, environ, "config", "--file", str(config), *match, allowed=range(256)).returncode not in (
-            0,
-            5,  # the entry was already gone
-        ):
+        result = git(real_git, environ, "config", "--file", str(config), *match, allowed=range(256))
+        return result.returncode in (0, 5)  # 5: the entry was already gone
+
+    entries = list(dict.fromkeys((key, value) for key, value in state.get("managed", [])))
+    remaining = set()
+    for key, value in entries:
+        if key.lower().endswith(".insteadof") and not unset("--fixed-value", "--unset-all", key, value):
+            remaining.add(key)
+    if rewrites_only:
+        return remaining
+    rewrites_left = bool(remaining)
+    headers = dict.fromkeys(key for key, value in entries if key.lower().endswith(".extraheader") and value)
+    for key in headers:
+        if not unset("--unset-all", key, "^AUTHORIZATION: basic "):
+            remaining.add(key)
+    for key, value in entries:
+        if key.lower().endswith(".insteadof") or (key in headers and value):
+            continue
+        if rewrites_left or not unset("--fixed-value", "--unset-all", key, value):
             remaining.add(key)
     return remaining
 
