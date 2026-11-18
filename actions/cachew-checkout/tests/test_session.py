@@ -610,6 +610,12 @@ class SessionTests(unittest.TestCase):
         self.assertIn(self.fixture.cache.url, (Path(self.env["CACHEW_SESSION_DIR"]) / "global.config").read_text())
         encoded = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
         self.assertNotIn(encoded, log.read_text())
+        # Cleanup too: a later checkout's prepare removes the entries, headers included.
+        self.assertIn(encoded, (Path(self.env["CACHEW_SESSION_DIR"]) / "global.config").read_text())
+        self.run_step("session")
+        self.assertNotIn(encoded, (Path(self.env["CACHEW_SESSION_DIR"]) / "global.config").read_text())
+        self.assertIn("--unset-all", log.read_text())
+        self.assertNotIn(encoded, log.read_text())
         self.finish()
 
     def test_conditional_includes_stay_conditional_in_checkout_copies(self):

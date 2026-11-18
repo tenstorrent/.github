@@ -243,25 +243,22 @@ def write_state(session, state):
 
 def remove_managed(real_git, config, state, environ, rewrites_only=False):
     """Unset cachew's entries; return the keys still present (e.g. the file was
-    locked). Each by its own value: a value the job gave the same key stays."""
+    locked). A rewrite is removed by its own value, so a value the job gave the
+    same key stays. A header never is: its value is the token, which must not
+    appear in a process's arguments, and its key is scoped to the cache's own
+    URL, where every value is cachew's."""
     remaining = set()
     for key, value in dict.fromkeys((key, value) for key, value in state.get("managed", [])):
         if rewrites_only and not key.lower().endswith(".insteadof"):
             continue
+        rewrite = key.lower().endswith((".insteadof", ".pushinsteadof"))
+        match = ("--fixed-value", "--unset-all", key, value) if rewrite else ("--unset-all", key)
         # `git config` takes the file's lock, so concurrent job writes are safe.
-        if git(
-            real_git,
-            environ,
-            "config",
-            "--file",
-            str(config),
-            "--fixed-value",
-            "--unset-all",
-            key,
-            value,
-            allowed=range(256),
-        ).returncode not in (0, 5):
-            remaining.add(key)  # 5: the entry was already gone
+        if git(real_git, environ, "config", "--file", str(config), *match, allowed=range(256)).returncode not in (
+            0,
+            5,  # the entry was already gone
+        ):
+            remaining.add(key)
     return remaining
 
 
