@@ -161,7 +161,16 @@ def origin(value, environ):
         raise SecurityViolation("server URL host contains shell or configuration metacharacters")
     if not HOST.fullmatch(url.netloc):
         raise Bypass("unsupported server URL")
-    return f"{url.scheme}://{url.netloc}"
+    # The origin as actions/checkout reads it (URL.origin): the host in lower case
+    # and no default port, so `https://GitHub.com:443` is the same server, and a
+    # trusted cache spelled that way is still the trusted cache.
+    name, port = re.fullmatch(r"(.*?)(?::([0-9]+))?", url.netloc.lower()).groups()
+    if port is not None:
+        if int(port) > 65535:
+            raise Bypass("unsupported server URL")
+        if int(port) != (443 if url.scheme == "https" else 80):
+            name = f"{name}:{int(port)}"
+    return f"{url.scheme}://{name}"
 
 
 # The whitespace JavaScript's String.prototype.trim strips, as core.getInput does.

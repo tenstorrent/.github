@@ -126,6 +126,12 @@ jobs:
 
         self.assertEqual(migrate.rewrite(workflow(PLAIN, STALE, STALE), SHA), workflow(PINNED, PINNED, PINNED))
 
+    def test_the_exact_version_is_migrated_however_its_owner_and_name_are_cased(self):
+        # GitHub resolves Actions/Checkout as actions/checkout.
+        before = "runs:\n  steps:\n    - uses: Actions/Checkout@v7.0.1\n    - uses: actions/checkout@v7.0.10\n"
+        after = f"runs:\n  steps:\n    - uses: {PINNED}\n    - uses: actions/checkout@v7.0.10\n"
+        self.assertEqual(migrate.rewrite(before, SHA), after)
+
     def test_composite_actions_are_migrated_unless_kept(self):
         before = f"runs:\n  using: composite\n  steps:\n    - uses: {PLAIN}\n    - uses: {PLAIN} cachew: keep\n"
         expected = f"runs:\n  using: composite\n  steps:\n    - uses: {PINNED}\n    - uses: {PLAIN} cachew: keep\n"

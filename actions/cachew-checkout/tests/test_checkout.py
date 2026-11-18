@@ -831,6 +831,22 @@ class CheckoutTests(unittest.TestCase):
         self.assertIn(("http.sslVerify", "true"), attempt.cache_config)
         self.assertIn((f"http.{self.cache.url}/.sslVerify", "true"), attempt.cache_config)
 
+    def test_an_origin_is_read_as_actions_checkout_reads_it(self):
+        # URL.origin: the scheme and host in lower case, no default port.
+        for value, expected in (
+            ("HTTPS://GitHub.COM:443/", "https://github.com"),
+            ("https://github.com:0443", "https://github.com"),
+            ("https://GHE.example:8443", "https://ghe.example:8443"),
+            ("https://[::1]:443", "https://[::1]"),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(cachew_checkout.origin(value, {}), expected)
+        with self.assertRaises(cachew_checkout.Bypass):
+            cachew_checkout.origin("https://github.com:65536", {})
+        trusted = cachew_checkout.TRUSTED_CACHES[0]
+        spelled = trusted.replace("https://cachew", "HTTPS://Cachew") + ":443"
+        self.assertEqual(cachew_checkout.cache_candidates(spelled, "https://github.com", {}), [trusted])
+
     def test_a_ref_is_classified_by_its_uppercase_form_as_actions_checkout_does(self):
         # U+017F uppercases to S: actions/checkout reads this ref as a branch.
         self.env["CACHEW_REF"] = "ref\u017f/heads/main"

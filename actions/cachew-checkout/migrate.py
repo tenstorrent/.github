@@ -59,7 +59,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 
 CHECKOUT = re.compile(
     r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?uses:[ \t]*)(?P<quote>['\"]?)"
-    r"(?:actions/checkout@(?:"
+    r"(?:(?i:actions/checkout)@(?:"
     + "|".join(map(re.escape, MIGRATABLE_REFS))
     + r")|(?i:"
     + re.escape(ACTION_REPO)
