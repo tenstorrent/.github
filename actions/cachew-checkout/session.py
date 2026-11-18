@@ -60,6 +60,7 @@ from checkout import (  # noqa: E402
     healthy,
     mask,
     origin,
+    refuse_attack_inputs,
     report_violation,
     repository_name,
 )
@@ -241,16 +242,26 @@ def write_state(session, state):
 
 
 def remove_managed(real_git, config, state, environ, rewrites_only=False):
-    """Unset cachew's keys; return the ones still present (e.g. the file was locked)."""
+    """Unset cachew's entries; return the keys still present (e.g. the file was
+    locked). Each by its own value: a value the job gave the same key stays."""
     remaining = set()
-    for key in dict.fromkeys(key for key, _ in state.get("managed", [])):
+    for key, value in dict.fromkeys((key, value) for key, value in state.get("managed", [])):
         if rewrites_only and not key.lower().endswith(".insteadof"):
             continue
         # `git config` takes the file's lock, so concurrent job writes are safe.
         if git(
-            real_git, environ, "config", "--file", str(config), "--unset-all", key, allowed=range(256)
+            real_git,
+            environ,
+            "config",
+            "--file",
+            str(config),
+            "--fixed-value",
+            "--unset-all",
+            key,
+            value,
+            allowed=range(256),
         ).returncode not in (0, 5):
-            remaining.add(key)  # 5: the key was already gone
+            remaining.add(key)  # 5: the entry was already gone
     return remaining
 
 
@@ -382,8 +393,8 @@ def copy_globals(session, real_git, environ, caches):
 
 
 def flatten(real_git, environ, file, skip, depth=0):
-    """Entries of a config file with unconditional includes inlined, except keys
-    named in skip. Conditional includes stay directives, evaluated when Git reads
+    """Entries of a config file with unconditional includes inlined, except the
+    (key, value) pairs in skip. Conditional includes stay directives, evaluated when Git reads
     the result; inlining them would apply one repository's settings everywhere.
     Their paths are made absolute, since the result lives in another directory."""
     if depth > MAX_INCLUDE_DEPTH:
@@ -395,7 +406,7 @@ def flatten(real_git, environ, file, skip, depth=0):
             entries += flatten(real_git, environ, included, skip, depth + 1) if os.path.exists(included) else []
         elif re.fullmatch(r"includeif\..*\.path", key.lower()):
             entries.append((anchored_condition(key, file, environ), include_target(value, file, environ)))
-        elif key.lower() not in skip:
+        elif (key.lower(), value) not in skip:
             entries.append((key, value))
     return entries
 
@@ -408,7 +419,7 @@ def write_checkout_config(session, state, settings, environ):
     The low-speed abort is scoped to the checked-out repository: actions/checkout
     retries its fetch but not its submodule update, so a submodule must keep
     crawling rather than fail."""
-    skip = {key.lower() for key, _ in state["managed"]}
+    skip = {(key.lower(), value) for key, value in state["managed"]}
     entries = flatten(state["real_git"], environ, session / "global.config", skip)
     if settings.upstream and settings.repository:
         scope = f"http.{settings.upstream}/{settings.repository}"
@@ -422,6 +433,9 @@ def write_checkout_config(session, state, settings, environ):
 
 
 def prepare(environ):
+    # Here as well as in checkout.py, which does not run for a checkout that opts
+    # out of cachew in a job that already has a session.
+    refuse_attack_inputs(environ)
     settings = Settings(environ)
     if existing := environ.get("CACHEW_SESSION_DIR"):
         # A later checkout in the same job: take the cache rewrite out of the job's

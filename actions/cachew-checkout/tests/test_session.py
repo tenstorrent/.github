@@ -937,6 +937,31 @@ class SessionTests(unittest.TestCase):
         shutil.rmtree(self.fixture.target, ignore_errors=True)
         self.plain_checkout_without_cache(dict(self.env, CACHEW_CACHEW_URL="https://evil.example"))
 
+    def test_removing_cachews_entries_keeps_a_value_the_job_gave_the_same_key(self):
+        self.assertEqual(self.flow(), (True, True))
+        key = f"url.{self.fixture.upstream.url}/.pushInsteadOf"
+        own = self.fixture.upstream.url + "/"
+        self.assertEqual(self.real_git("config", "--global", "--get-all", key).split(), [own])
+        self.real_git("config", "--global", "--add", key, "git@upstream.example:")
+        # A later checkout's prepare takes cachew's entries out of the job's file.
+        self.run_step("session")
+        self.assertEqual(self.real_git("config", "--global", "--get-all", key).split(), ["git@upstream.example:"])
+        self.finish()
+
+    def test_prepare_refuses_a_path_or_ref_that_has_no_fallback(self):
+        # checkout.py does not run for `cachew: false` in a job with a session.
+        outside = self.fixture.root / "outside"
+        outside.mkdir()
+        (self.fixture.workspace / "link").symlink_to(outside, target_is_directory=True)
+        for attack in ({"CACHEW_PATH": "link/escape"}, {"CACHEW_REF": "--upload-pack=x"}):
+            with self.subTest(attack=attack):
+                (self.fixture.root / "output").write_text("")
+                result = self.run_step("session", dict(self.env, **attack))
+                outputs = fixtures.runner_file(self.fixture.root / "output")
+                self.assertEqual(outputs["ready"], "false")
+                self.assertEqual(outputs.get("security-violation"), "true")
+                self.assertIn("::error title=cachew-checkout: possible security", result.stdout)
+
     def test_an_untrusted_https_cache_origin_is_reported_as_a_security_violation(self):
         for url, violation in (("https://evil.example", "true"), ("http://10.43.0.100:8080", None)):
             with self.subTest(url=url):

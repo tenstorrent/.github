@@ -219,8 +219,9 @@ any checkout runs. They are:
   `RUNNER_TEMP`.
 
 The annotation names the check, never the offending value. These checks run only
-where cachew runs (self-hosted Linux, or `cachew: true`); elsewhere the action is
-still exactly `actions/checkout`. After a refusal the cache stays off for
+where cachew runs (self-hosted Linux, or `cachew: true`) and, for every later
+checkout, in a job that already has a cachew session, `cachew: false` included;
+elsewhere the action is still exactly `actions/checkout`. After a refusal the cache stays off for
 anything that still runs in the job.
 
 ## Upstream fallback

@@ -136,6 +136,9 @@ runs:
         CACHEW_CACHEW_FETCH_TIMEOUT: ${{ inputs.cachew-fetch-timeout }}
         CACHEW_GITHUB_SERVER_URL: ${{ inputs.github-server-url }}
         CACHEW_REPOSITORY: ${{ inputs.repository }}
+        # Only for the checks that have no fallback.
+        CACHEW_REF: ${{ inputs.ref }}
+        CACHEW_PATH: ${{ inputs.path }}
       # Runs from this action's own directory: the consumer's pin to this action
       # is the only pin. There is no post step; the runner empties RUNNER_TEMP,
       # and with it the session, when the job completes. Once a session exists,
