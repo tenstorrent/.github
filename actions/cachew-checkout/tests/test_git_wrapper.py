@@ -430,6 +430,24 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(len(self.upstream.discoveries()), 1)
         self.assert_disabled()
 
+    def test_an_alias_in_its_subsection_form_is_retried_upstream_like_a_fetch(self):
+        # alias.<name>.command, whose name may hold any character; the last form set wins.
+        target = self.cloned_dependency()
+        self.config(self.session / "global.config", "alias.up", "status")
+        self.config(self.session / "global.config", "alias.up.command", "fetch --tags")
+        self.config(self.session / "global.config", "alias.f.x.command", "up origin")
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("-C", str(target), "f.x")
+        self.assertEqual(len(self.upstream.discoveries()), 1)
+        self.assert_disabled()
+
+    def test_a_fetch_after_an_attribute_source_option_is_retried_upstream(self):
+        target = self.cloned_dependency()
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("-C", str(target), "--attr-source", "HEAD", "fetch", "origin")
+        self.assertEqual(len(self.upstream.discoveries()), 1)
+        self.assert_disabled()
+
     def test_shell_alias_reads_go_upstream(self):
         target = self.cloned_dependency()
         self.config(self.session / "global.config", "alias.sync", "!git fetch origin")

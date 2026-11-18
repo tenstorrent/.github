@@ -153,7 +153,9 @@ gc.auto = 0
 Tokens are scoped to cache URLs, and requests that can carry one always use
 verified TLS and never follow a redirect: the two `http.<cachew>/` settings
 above, with `GIT_SSL_NO_VERIFY` dropped from the cache checkout and from the
-wrapper's cache attempt. The `token` input itself is not in the environment of
+wrapper's cache attempt. Settings that choose which certificates to trust or
+which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `https_proxy`) are the
+job's own and stay in effect. The `token` input itself is not in the environment of
 any process the action starts. During the cache checkout, Git receives it as an
 `Authorization` header in command-scoped configuration (`GIT_CONFIG_VALUE_<n>`),
 which every process Git starts inherits: the job's own hooks, filter drivers and

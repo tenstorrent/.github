@@ -523,8 +523,10 @@ def shim(real_git, session):
     return f"""#!/bin/sh
 export CACHEW_REAL_GIT={shell_quote(real_git)}
 export CACHEW_SESSION_DIR={shell_quote(str(session))}
-# Whether Git has an alias named $2, read with the first $1 of the arguments that
-# follow (the options before the command, which can select or define the alias).
+# Whether Git has an alias named $2 in either form (alias.<name>, or
+# alias.<name>.command, whose name may hold any character), read with the first
+# $1 of the arguments that follow (the options before the command, which can
+# select or define the alias).
 aliased() (
   keep=$1 word=$2
   shift 2
@@ -535,18 +537,18 @@ aliased() (
     [ "$position" -lt "$keep" ] && set -- "$@" "$argument"
     position=$((position + 1))
   done
-  [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ]
+  [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ] ||
+    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word.command" 2>/dev/null)" ]
 )
 skip=0
 options=0
 for argument in "$@"; do
   if [ "$skip" = 1 ]; then skip=0; options=$((options + 1)); continue; fi
   case "$argument" in
-    -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) skip=1 ;;
+    -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--attr-source) skip=1 ;;
     -*) ;;
     clone|fetch|ls-remote|push|pull|submodule|remote) {wrapper} ;;
     {LOCAL_COMMANDS}) break ;;
-    *[!A-Za-z0-9_-]*) break ;;
     *) if aliased "$options" "$argument" "$@"; then {wrapper}; fi; break ;;
   esac
   options=$((options + 1))

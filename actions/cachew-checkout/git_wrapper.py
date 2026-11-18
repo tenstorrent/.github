@@ -35,7 +35,16 @@ from checkout import (  # noqa: E402
 )
 from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed  # noqa: E402
 
-OPTIONS_WITH_VALUE = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+OPTIONS_WITH_VALUE = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+    "--super-prefix",
+    "--attr-source",
+}
 CLONE_OPTIONS_WITH_VALUE = {
     "-o",
     "--origin",
@@ -101,6 +110,19 @@ def command_index(arguments):
     return None
 
 
+def alias_expansion(listing, word):
+    """The alias Git runs for a command word, from `git config --list -z`: either
+    form, alias.<name> or alias.<name>.command (which allows any character in
+    the name), and the last one set, as Git reads them."""
+    plain, subsection = f"alias.{word.lower()}", f"alias.{word}.command"
+    expansion = None
+    for entry in (listing or "").split("\0"):
+        key, _, value = entry.partition("\n")
+        if key == subsection or ("." not in word and key == plain):
+            expansion = value
+    return expansion
+
+
 def resolve_alias(real_git, arguments, index, environ):
     """Expand Git aliases as Git will, so routing sees the command that really runs
     (`alias.up = fetch`, `alias.pu = push`). Returns the expanded arguments and the
@@ -117,7 +139,7 @@ def resolve_alias(real_git, arguments, index, environ):
         word = arguments[index]
         if word in NETWORK_COMMANDS:
             break
-        expansion = output("config", "--get", f"alias.{word}")
+        expansion = alias_expansion(output("config", "--list", "-z"), word)
         if not expansion or not expansion.strip():
             break
         if commands is None:

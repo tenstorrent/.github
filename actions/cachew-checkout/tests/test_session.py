@@ -292,6 +292,23 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout.strip()
 
+    def shim_hands_to_the_wrapper(self, *arguments):
+        """Only the wrapper turns caching off and retries a failed cache read upstream."""
+        self.fixture.repository("dependency")
+        self.assertEqual(self.flow(), (True, True))
+        self.path_git("clone", self.fixture.upstream.url + "/org/dependency", "dependency")
+        self.path_git("config", "--global", "alias.f.x.command", "fetch origin")
+        self.fixture.cache.fail_repo = "dependency"
+        self.path_git("-C", "dependency", *arguments)
+        self.assertTrue((Path(self.env["CACHEW_SESSION_DIR"]) / "cache-disabled").exists())
+        self.finish()
+
+    def test_the_shim_hands_an_alias_in_its_subsection_form_to_the_wrapper(self):
+        self.shim_hands_to_the_wrapper("f.x")
+
+    def test_the_shim_hands_a_fetch_after_an_attribute_source_option_to_the_wrapper(self):
+        self.shim_hands_to_the_wrapper("--attr-source", "HEAD", "fetch", "origin")
+
     def test_aliases_are_routed_like_the_commands_they_expand_to(self):
         self.fixture.repository("dependency")
         self.assertEqual(self.flow(), (True, True))
