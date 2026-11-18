@@ -553,6 +553,15 @@ def activate(environ):
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
     mask(encoded)
+    # As actions/checkout removes a path's persisted credentials before every
+    # checkout into it: the token an earlier checkout of this path recorded goes,
+    # unless another path's checkout recorded the same repository. A checkout
+    # with persist-credentials: false then leaves none for later steps to read.
+    paths = state.setdefault("paths", {})
+    previous = paths.pop(str(checkout), None) if inside else None
+    if previous and previous not in paths.values():
+        dropped = state["tokens"].pop(previous, None)
+        state["defaults"] = {name: value for name, value in state["defaults"].items() if value != dropped}
     if (
         token
         and settings.upstream
@@ -561,7 +570,10 @@ def activate(environ):
     ):
         # Cache-scoped only. Upstream credentials stay where actions/checkout put them.
         header = f"AUTHORIZATION: basic {encoded}"
-        state["tokens"][f"{settings.upstream}/{settings.repository}"] = header
+        recorded = f"{settings.upstream}/{settings.repository}"
+        state["tokens"][recorded] = header
+        if inside:
+            paths[str(checkout)] = recorded
         if settings.repository.lower() == environ.get("GITHUB_REPOSITORY", "").lower():
             state["defaults"][settings.upstream] = header
     keep_safe_directories(

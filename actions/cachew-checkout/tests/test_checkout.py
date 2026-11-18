@@ -15,6 +15,7 @@ import re
 import socket
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -1361,6 +1362,59 @@ class CheckoutTests(unittest.TestCase):
                 action,
             )
         self.assertIn("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", action)
+
+
+class ForkGuardPayloadTests(unittest.TestCase):
+    """actions/checkout reads the event payload as UTF-8 and fails on one it
+    cannot parse. The guard must refuse wherever that checkout would not run."""
+
+    SHA = "a1b2c3d4" * 5
+    PAYLOAD = {
+        "repository": {"id": 111},
+        "pull_request": {"title": "caf\u00e9 \u65e5\u672c", "head": {"repo": {"id": 222, "full_name": "fork/main"}, "sha": SHA}},
+    }
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.event = Path(self.directory.name, "event.json")
+        self.environ = {"GITHUB_EVENT_NAME": "pull_request_target", "GITHUB_EVENT_PATH": str(self.event)}
+
+    def refused(self):
+        return cachew_checkout.unsafe_pr_checkout(self.environ, "org/main", "", self.SHA)
+
+    def test_a_payload_that_cannot_be_parsed_is_refused(self):
+        for content in (b"", b"{", b"\xff\xfe{}", json.dumps(self.PAYLOAD).encode() + b"x", b"[" * 100000):
+            with self.subTest(content=content[:8]):
+                self.event.write_bytes(content)
+                self.assertTrue(self.refused())
+        # Invalid UTF-8 inside a string is replaced, as Node does, and the guard still applies.
+        self.event.write_bytes(json.dumps(self.PAYLOAD).encode().replace(b"caf", b"caf\xff"))
+        self.assertTrue(self.refused())
+
+    def test_no_payload_file_is_an_empty_payload(self):
+        self.assertFalse(self.refused())
+        del self.environ["GITHUB_EVENT_PATH"]
+        self.assertFalse(self.refused())
+
+    def test_a_non_ascii_payload_is_read_in_any_locale(self):
+        # Under a non-UTF-8 locale the payload did not decode and read as empty,
+        # which let a fork pull request with an accent in its title through.
+        self.event.write_text(json.dumps(self.PAYLOAD, ensure_ascii=False), encoding="utf-8")
+        script = (
+            "import importlib.util, os, sys\n"
+            "spec = importlib.util.spec_from_file_location('checkout', sys.argv[1])\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "print(module.unsafe_pr_checkout(dict(os.environ), 'org/main', '', sys.argv[2]))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-B", "-c", script, str(ACTION / "checkout.py"), self.SHA],
+            env={**os.environ, **self.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.stdout.strip(), "True", result.stderr)
 
 
 if __name__ == "__main__":

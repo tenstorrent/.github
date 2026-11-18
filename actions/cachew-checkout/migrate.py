@@ -65,29 +65,28 @@ CHECKOUT = re.compile(
     + r")@[0-9a-f]{40})"
     r"(?P=quote)(?:[ \t]*#[^\n]*)?[ \t]*$"
 )
-# Any mention of the action with a ref, wherever it appears in a file. GitHub
-# resolves owner and repository names in any case, so a reference spelled
-# Tenstorrent/.GitHub/... is held to the pin as well.
-ANY_PIN = re.compile(
-    r"(?P<repo>(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r"))"
-    r"(?P<subpath>/[\w./-]+)?@(?P<ref>[^\s'\"#]+)"
-)
-# A decoded uses: value naming the action. The ref is everything after the @, so
-# a branch, short SHA or padded SHA is compared as written, and so is a SHA
-# followed by more characters (`<sha>#x`, `<sha>'x`): Git allows those in branch
-# names, so they are mutable refs that only look like the pin.
-PIN_VALUE = re.compile(
-    r"(?P<repo>(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r"))"
-    r"(?P<subpath>/[^@]*)?@(?P<ref>.*)",
-    re.DOTALL,
-)
+# Any mention of the action with a ref, wherever it appears in a file and however
+# its path is spelled: one word that starts at the owner, names the action and
+# ends in @<ref>. GitHub resolves owner and repository names in any case, so a
+# reference spelled Tenstorrent/.GitHub/... is held to the pin as well.
+ANY_PIN = re.compile(r"(?i:tenstorrent[/\\][^\s@'\"#]*cachew-checkout)[^\s@'\"#]*@[^\s'\"#]+")
+# The action's directory in each repository it has lived in, in lower case.
+ACTION_PATHS = {
+    tuple(repo.lower().split("/")[:2]): tuple(repo.lower().split("/")[2:]) for repo in (ACTION_REPO, LEGACY_REPO)
+}
+# Escape sequences of a double-quoted YAML scalar that can spell a character of
+# the action's name or its @: \xNN, \uNNNN, \UNNNNNNNN, an escaped line break
+# (which joins two lines) and an escaped / or \.
+ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(\r?\n[ \t]*)|([/\\]))")
 # A uses: key in block style (`uses:` or `- uses:`) or inside a flow mapping
 # (`{uses: ...}`), its key optionally quoted.
 USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
 HOSTED_LABEL = re.compile(r"(?:ubuntu|windows|macos)-[\w.-]+")
 TOP_LEVEL = re.compile(r"^(?P<key>[\w-]+):")
-JOB = re.compile(r"^  [\w-]+:[ \t]*(?:#.*)?$")
+# Any key at the jobs' indentation starts a job, however it is written (quoted,
+# anchored): a job that is not seen would take the next job's runs-on.
+JOB = re.compile(r"^  [^\s#]")
 RUNS_ON = re.compile(r"^    runs-on:[ \t]*(?P<quote>['\"]?)(?P<label>[^'\"#\s]+)(?P=quote)[ \t]*(?:#.*)?$")
 
 
@@ -251,6 +250,38 @@ def uses_values(text):
             yield start, start + len(value), value, None
 
 
+def action_reference(value):
+    """How GitHub reads a decoded uses: value that names the action: (legacy,
+    subdirectory, ref, problem), or None for any other value. The runner splits
+    the part before the @ on / and \\ and drops empty segments, so
+    owner//repo\\actions/cachew-checkout is the action too. The ref is everything
+    after the @, so a branch, short SHA or padded SHA is compared as written, and
+    so is a SHA followed by more characters (`<sha>#x`, `<sha>'x`): Git allows
+    those in branch names, so they are mutable refs that only look like the pin."""
+    path, at, ref = value.partition("@")
+    segments = [segment.lower() for segment in re.split(r"[/\\]", path) if segment]
+    expected = ACTION_PATHS.get(tuple(segments[:2]))
+    if not at or expected is None:
+        return None
+    rest = tuple(segments[2:])
+    if "." in rest or ".." in rest:
+        # They resolve on the runner's disk, to the action's directory or any other.
+        return False, False, ref, "its path has . or .. segments"
+    if rest[: len(expected)] != expected:
+        return None
+    return expected is ACTION_PATHS[tuple(LEGACY_REPO.lower().split("/")[:2])], len(rest) > len(expected), ref, None
+
+
+def unescaped(text):
+    def decode(match):
+        code = match[1] or match[2] or match[3]
+        if code:
+            return chr(int(code, 16)) if int(code, 16) < 0x110000 else match[0]
+        return "" if match[4] else match[5]
+
+    return ESCAPE.sub(decode, text)
+
+
 def verify_pins(root, action_sha, exclude=()):
     """Every reference pins exactly action_sha in tenstorrent/.github: no other
     commit, no reference to the old tt-metal location, no subdirectory.
@@ -268,22 +299,30 @@ def verify_pins(root, action_sha, exclude=()):
             if problem:
                 problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
                 continue
-            match = PIN_VALUE.fullmatch(value)
-            if not match:
+            reference = action_reference(value)
+            if not reference:
                 continue
+            legacy, subdirectory, ref, problem = reference
             read.append((start, end))
-            if match["repo"].lower() == LEGACY_REPO.lower():
+            if problem:
+                problems.append(f"{path}:{line} references {value}: {problem}; write {ACTION_REPO}@<sha>")
+                continue
+            if legacy:
                 problems.append(f"{path}:{line} references {value}; the action moved to {ACTION_REPO} (run --write)")
                 continue
-            if match["subpath"]:
+            if subdirectory:
                 problems.append(f"{path}:{line} references {value}; reference the action itself, not a subdirectory")
-            pins.setdefault(match["ref"], []).append(path.as_posix())
+            pins.setdefault(ref, []).append(path.as_posix())
         # A mention the uses: values above do not account for (a comment, an
         # anchor, a multi-line value) could still be what GitHub runs.
         for match in ANY_PIN.finditer(text):
             if not any(start <= match.start() < end for start, end in read):
                 line = text.count("\n", 0, match.start()) + 1
                 problems.append(f"{path}:{line} mentions {match[0]} outside a uses: value it can verify")
+        # A double-quoted scalar can spell the action with escape sequences
+        # (\x65 for e), under a key the reader above does not take for uses:.
+        if len(ANY_PIN.findall(unescaped(text))) != len(ANY_PIN.findall(text)):
+            problems.append(f"{path} names the action through escape sequences; write it as one plain line")
     if set(pins) - {action_sha}:
         problems.append(f"references pin {sorted(pins)}, expected only action_sha {action_sha}")
     for problem in problems:

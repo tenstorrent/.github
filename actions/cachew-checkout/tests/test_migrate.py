@@ -27,6 +27,25 @@ LEGACY = "tenstorrent/tt-metal/.github/actions/cachew-checkout@" + "1" * 40 + " 
 
 
 class RewriteTests(unittest.TestCase):
+    def test_a_quoted_or_anchored_job_key_still_ends_the_job_before_it(self):
+        # Unseen, the hosted job's runs-on counted for the self-hosted job too,
+        # and --write turned that job's pin back into plain checkout.
+        for key in ('"lint":', "lint: &lint", "'lint':  # comment"):
+            before = f"""jobs:
+  self:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: {PINNED}
+      - uses: {PLAIN}
+  {key}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {PLAIN}
+"""
+            after = before.replace(f"- uses: {PLAIN}", f"- uses: {PINNED}", 1)
+            with self.subTest(key=key):
+                self.assertEqual(migrate.rewrite(before, SHA), after)
+
     def test_self_hosted_jobs_move_to_the_pinned_action_and_hosted_jobs_keep_checkout(self):
         before = f"""on: push
 jobs:
@@ -229,6 +248,57 @@ class RepositoryTests(unittest.TestCase):
                 workflow.write_text(good.replace(line, fine))
                 code, out = self.run_main("--verify-pins")
                 self.assertEqual(code, 0, out)
+
+    def test_verify_pins_reads_the_action_path_as_the_runner_does(self):
+        # The runner splits owner/repo/path on / and \\ and drops empty segments,
+        # and . or .. segments resolve on its disk.
+        self.run_main("--write")
+        workflow = self.root / ".github/workflows/ci.yml"
+        good = workflow.read_text()
+        line = f"- uses: {PINNED}"
+        spellings = (
+            "tenstorrent/.github//actions/cachew-checkout",
+            "tenstorrent//.github/actions/cachew-checkout",
+            "tenstorrent/.github/./actions/cachew-checkout",
+            "tenstorrent/.github/actions/../actions/cachew-checkout",
+            "tenstorrent/.github\\actions\\cachew-checkout",
+            "tenstorrent\\.github\\actions\\cachew-checkout",
+            "tenstorrent/tt-metal//.github/actions/cachew-checkout",
+        )
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                workflow.write_text(good.replace(line, f"- uses: {spelling}@main"))
+                code, out = self.run_main("--verify-pins")
+                self.assertEqual(code, 1, out)
+        # The same action at the pin passes, and so does another action of the repository.
+        for fine in (f"tenstorrent/.github//actions/cachew-checkout@{SHA}", "tenstorrent/.github/actions/other@main"):
+            with self.subTest(fine=fine):
+                workflow.write_text(good.replace(line, f"- uses: {fine}"))
+                code, out = self.run_main("--verify-pins")
+                self.assertEqual(code, 0, out)
+
+    def test_verify_pins_sees_the_action_spelled_with_escapes_under_any_key(self):
+        self.run_main("--write")
+        workflow = self.root / ".github/workflows/ci.yml"
+        good = workflow.read_text()
+        line = f"- uses: {PINNED}"
+        value = '"tenstorrent/.github/actions/cachew-ch\\x65ckout@main"'
+        for bad in (
+            f'- "us\\x65s": {value}',
+            f"- ? uses\n        : {value}",
+            f"- !!str uses: {value}",
+            f"- &k uses: {value}",
+            f'- "us\\x65s": "tenstorrent/.github/actions/cachew-checkout\\u0040main"',
+            f'- "us\\x65s": "tenstorrent/.github/actions/cachew-\\\n          checkout@main"',
+        ):
+            with self.subTest(bad=bad):
+                workflow.write_text(good.replace(line, bad))
+                code, out = self.run_main("--verify-pins")
+                self.assertEqual(code, 1, out)
+        # Escapes that spell nothing of the action are no concern of the gate.
+        workflow.write_text(good + '      - run: "printf \'a\\x41\\tb\'"\n')
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 0, out)
 
     def test_verify_pins_reads_composite_actions_anywhere(self):
         self.run_main("--write")

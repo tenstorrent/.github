@@ -493,6 +493,22 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(last.lower(), expected.lower())
         self.finish()
 
+    def test_same_path_persist_false_checkout_removes_the_earlier_token(self):
+        # actions/checkout removes a path's persisted credentials before checking
+        # out into it again: the usual way to drop them before running PR code.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        header = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertIn(header, (session / "state.json").read_text())
+        self.env["CACHEW_PERSIST_CREDENTIALS"] = "false"
+        self.assertEqual(self.flow(), (False, True))
+        for file in Path(self.env["RUNNER_TEMP"]).rglob("*"):
+            if file.is_file():
+                content = file.read_bytes()
+                self.assertNotIn(header.encode(), content, file)
+                self.assertNotIn(fixtures.TOKEN.encode(), content, file)
+        self.finish()
+
     def test_disabled_cache_secondary_private_checkout_uses_its_current_token(self):
         self.fixture.repository("secondary")
         secondary_token = "secondary-private-token"

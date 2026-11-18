@@ -193,11 +193,17 @@ def unsafe_pr_checkout(environ, repository, ref, commit):
     allowed = checkout_flag(environ, "CACHEW_ALLOW_UNSAFE_PR_CHECKOUT", "false")
     if allowed or event not in ("pull_request_target", "workflow_run"):
         return False
-    try:
-        with open(environ["GITHUB_EVENT_PATH"]) as stream:
-            payload = json.load(stream)
-    except (KeyError, OSError, ValueError):
-        payload = {}
+    # As actions/checkout reads it: no payload without the file, and UTF-8
+    # whatever the interpreter's locale. A payload that cannot be read or parsed
+    # fails that checkout, so it is refused here: an empty payload would pass.
+    path = environ.get("GITHUB_EVENT_PATH")
+    payload = {}
+    if path and os.path.exists(path):
+        try:
+            with open(path, "rb") as stream:
+                payload = json.loads(stream.read().decode("utf-8", "replace"))
+        except (OSError, ValueError, RecursionError):
+            return True
 
     def select(path):
         value = payload
