@@ -166,6 +166,9 @@ def resolve_alias(real_git, arguments, index, environ):
             break
     return arguments, index
 
+# Variables that make Git act on a repository other than the one it is run in.
+REPOSITORY_ENVIRONMENT = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+
 
 class UpstreamView:
     """A private copy of the job's global configuration without the cache rewrite.
@@ -245,6 +248,20 @@ def working_directory(arguments, index):
     return directory
 
 
+def takes_next(argument, with_value):
+    """Whether an option's value is the next argument: one of with_value, or a
+    cluster of short options (`-nb main`) whose last letter is. A value-taking
+    letter earlier in the cluster has the rest of it as its value (`-bmain`)."""
+    if argument in with_value:
+        return True
+    if argument.startswith("--") or not argument.startswith("-"):
+        return False
+    for position, letter in enumerate(argument[1:], 1):
+        if "-" + letter in with_value:
+            return position == len(argument) - 1
+    return False
+
+
 def clone_destination(arguments, index):
     """Where `git clone` will create its repository, or None if unknown."""
     positional = []
@@ -255,7 +272,7 @@ def clone_destination(arguments, index):
         if arg == "--":
             positional.extend(arguments[position + 1 :])
             break
-        if arg in CLONE_OPTIONS_WITH_VALUE:
+        if takes_next(arg, CLONE_OPTIONS_WITH_VALUE):
             position += 2
             continue
         if arg in ("--bare", "--mirror"):
@@ -347,7 +364,7 @@ def repository_argument(arguments, index):
         arg = tail[position]
         if arg == "--":
             return tail[position + 1] if position + 1 < len(tail) else None
-        if arg in with_value:
+        if takes_next(arg, with_value):
             position += 2
         elif arg.startswith("-"):
             position += 1
@@ -492,24 +509,34 @@ def run(arguments, environ):
     target = CloneTarget(arguments, index, environ)
 
     def done(result):
-        # However the clone or fetch went, later lazy fetches would use the rewrite.
-        # Pins only remotes the rewrite still reaches, so it is a no-op without one.
-        location = ["-C", str(target.path)] if command == "clone" and target.path else arguments[:index]
-        if result != 0 or command not in ("clone", "fetch", "submodule"):
+        # Whatever the command's exit status: one that fails partway (a submodule
+        # that cannot be cloned) leaves partial clones whose lazy fetches would
+        # use the rewrite. Pins only remotes the rewrite still reaches, so it is
+        # a no-op without one, and where there is no repository.
+        if command not in ("clone", "fetch", "pull", "remote", "submodule"):
             return result
+        location, pin_env = arguments[:index], environ
+        if command == "clone":
+            if not target.path:
+                return result
+            # git clone ignores the variables that select another repository.
+            location = ["-C", str(target.path)]
+            pin_env = {key: value for key, value in environ.items() if key not in REPOSITORY_ENVIRONMENT}
         cache = state.get("cache")
         if command != "submodule":
-            pin_promisor_remotes(real_git, location, environ, cache)
-        if command != "fetch":
-            # Filtered submodules are partial clones of their own.
+            pin_promisor_remotes(real_git, location, pin_env, cache)
+        if command in ("clone", "submodule"):
+            # Filtered submodules are partial clones of their own. NUL-separated:
+            # a path may hold a line feed.
             listing = subprocess.run(
-                [real_git, *location, "submodule", "--quiet", "foreach", "--recursive", "pwd"],
-                env=environ,
+                [real_git, *location, "submodule", "--quiet", "foreach", "--recursive", 'printf "%s\\0" "$PWD"'],
+                env=pin_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
-            for path in listing.stdout.decode(errors="surrogateescape").splitlines():
-                pin_promisor_remotes(real_git, ["-C", path], environ, cache)
+            for path in filter(None, listing.stdout.decode(errors="surrogateescape").split("\0")):
+                modules = {key: value for key, value in pin_env.items() if key not in REPOSITORY_ENVIRONMENT}
+                pin_promisor_remotes(real_git, ["-C", path], modules, cache)
         return result
 
     if disabled:

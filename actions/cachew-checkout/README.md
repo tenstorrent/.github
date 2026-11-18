@@ -154,8 +154,14 @@ Tokens are scoped to cache URLs, and requests that can carry one always use
 verified TLS and never follow a redirect: the two `http.<cachew>/` settings
 above, with `GIT_SSL_NO_VERIFY` dropped from the cache checkout and from the
 wrapper's cache attempt. Settings that choose which certificates to trust or
-which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `https_proxy`) are the
-job's own and stay in effect. The `token` input itself is not in the environment of
+which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `http.proxy`,
+`https_proxy`) are the job's own and stay in effect. The cache checkout's Git reads
+no configuration file, so it is given the job's values of those settings for the
+server and for the cache (`http.proxy`, `http.noProxy`, `http.sslCAInfo`,
+`http.sslCAPath`, `http.sslCert`, `http.sslKey` and their kin, with a
+`http.<url>.` value preferred as Git prefers it). The liveness probe passes the same
+proxy and certificates to curl, which reads neither Git's configuration nor
+`GIT_SSL_CAINFO`. The `token` input itself is not in the environment of
 any process the action starts. During the cache checkout, Git receives it as an
 `Authorization` header in command-scoped configuration (`GIT_CONFIG_VALUE_<n>`),
 which every process Git starts inherits: the job's own hooks, filter drivers and
@@ -240,8 +246,8 @@ a stall longer than `cachew-fetch-timeout`, or the one-hour hard deadline) remov
 the job's cache rewrite; answers about one repository or ref (401/403/404, a
 missing ref, `ls-remote --exit-code` finding nothing) keep caching on. A failed
 cache clone's partial destination is removed before the upstream retry. Git runs a
-partial clone's lazy fetches itself, past the wrapper, so after a clone, fetch or
-`submodule` command each promisor remote the cache rewrite reaches, in the
+partial clone's lazy fetches itself, past the wrapper, so after a clone, fetch, pull,
+`remote` or `submodule` command, whether or not it succeeded, each promisor remote the cache rewrite reaches, in the
 repository and in its submodules, is pinned with a repository-local `insteadOf`,
 as the checkout's `origin` is. The pin maps the remote's URL to the URL Git would
 use without cachew. If the job has its own `insteadOf` for that URL, the pin

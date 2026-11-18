@@ -651,6 +651,95 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_lazy_fetch_skips_dead_cache(updated / "deps/kid", "kid")
 
+    def test_clone_under_an_inherited_git_dir_pins_the_clone(self):
+        # git clone ignores GIT_DIR; the pin must not read that other repository.
+        self.history("hist")
+        other = self.root / "other"
+        self.assertEqual(self.git_result("init", str(other)).returncode, 0)
+        destination = self.root / "under-git-dir"
+        env = dict(self.env, GIT_DIR=str(other / ".git"))
+        url = self.upstream.url + "/org/hist"
+        result = self.git_result("clone", "--filter=blob:none", url, str(destination), env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_lazy_fetch_skips_dead_cache(destination, "hist")
+
+    def test_clustered_short_options_do_not_hide_the_repository(self):
+        # In `-nb main`, main is the branch, not the repository.
+        self.history("hist")
+        url = self.upstream.url + "/org/hist"
+        destination = self.root / "clustered"
+        result = self.git_result("clone", "-nb", "main", "--filter=blob:none", url, str(destination))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_lazy_fetch_skips_dead_cache(destination, "hist")
+        self.cache.fail_status = 404
+        retried = self.git_result("clone", "-nb", "main", url, str(self.root / "clustered-retry"))
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        wrapper = load_wrapper()
+        for arguments, expected in (
+            (["clone", "-nb", "main", "u", "d"], "u"),
+            (["clone", "-bmain", "u"], "u"),
+            (["clone", "-nq", "u"], "u"),
+            (["fetch", "-qj", "4", "origin"], "origin"),
+        ):
+            self.assertEqual(wrapper.repository_argument(arguments, 0), expected, arguments)
+        self.assertEqual(wrapper.clone_destination(["clone", "-nb", "main", "h:o/r", "d"], 0), Path.cwd() / "d")
+
+    def test_a_failed_recursive_clone_still_pins_what_it_left(self):
+        # One submodule cannot be cloned: Git exits 1 and leaves the others in place.
+        kid = self.history("kid")
+        children = [("kid-name", "deps/kid", "../kid", kid), ("ghost", "deps/ghost", "../ghost", kid)]
+        self.git_fixture.repository("top", children)
+        destination = self.root / "partly"
+        result = self.git_result(
+            "clone",
+            "--filter=blob:none",
+            "--also-filter-submodules",
+            "--recurse-submodules",
+            self.upstream.url + "/org/top",
+            str(destination),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_lazy_fetch_skips_dead_cache(destination / "deps/kid", "kid")
+
+    def test_pull_and_remote_update_pin_a_promisor_remote(self):
+        self.history("hist")
+        for name, command, spec in (
+            ("pulled", ["pull", "origin", "main"], "HEAD~1:content.txt"),
+            ("updated", ["remote", "update"], "origin/main~1:content.txt"),
+        ):
+            repo = self.root / name
+            self.git_result("init", "-b", "main", str(repo))
+            self.git_result("-C", str(repo), "remote", "add", "origin", self.upstream.url + "/org/hist")
+            self.git_result("-C", str(repo), "config", "remote.origin.promisor", "true")
+            self.git_result("-C", str(repo), "config", "remote.origin.partialclonefilter", "blob:none")
+            result = self.git_result("-C", str(repo), *command)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assert_lazy_fetch_skips_dead_cache(repo, "hist", spec)
+            self.cache.fail_repo = None
+
+    def test_a_submodule_path_with_a_line_break_is_pinned(self):
+        kid = self.history("kid")
+        path = "deps/k\nid\u2028x"
+        repo = self.git_fixture.project_root / "org" / "odd"
+        repo.mkdir(parents=True)
+        fixture.git(repo, "init", "--initial-branch=main", env=self.env)
+        fixture.git(repo, "config", "-f", ".gitmodules", "submodule.kid.path", path, env=self.env)
+        fixture.git(repo, "config", "-f", ".gitmodules", "submodule.kid.url", "../kid", env=self.env)
+        fixture.git(repo, "update-index", "--add", "--cacheinfo", f"160000,{kid},{path}", env=self.env)
+        fixture.git(repo, "add", ".gitmodules", env=self.env)
+        fixture.git(repo, "commit", "-m", "sub", env=self.env)
+        destination = self.root / "odd"
+        result = self.git_result(
+            "clone",
+            "--recurse-submodules",
+            "--filter=blob:none",
+            "--also-filter-submodules",
+            self.upstream.url + "/org/odd",
+            str(destination),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_lazy_fetch_skips_dead_cache(destination / path, "kid")
+
     def test_pin_keeps_the_rewrite_the_job_wrote_for_the_remote(self):
         # A later step's own insteadOf, here one that adds a credential, ties with
         # cachew's and loses. The pin must send reads where the job's rewrite does.

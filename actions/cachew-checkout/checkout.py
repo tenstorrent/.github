@@ -306,14 +306,91 @@ def cache_candidates(value, upstream, environ):
 PERMANENT_CURL_EXITS = frozenset({6, 51, 60, 77})
 
 
-def liveness(cache, timeout, env):
+# The job's http.* settings that choose a route or what to trust: a proxy, the
+# certificates to verify against, a client certificate. A runner that needs them
+# to reach the server or the cache needs them in every request made here too.
+# Never the ones that weaken a request (sslVerify, followRedirects) or add to
+# it (extraHeader, cookieFile).
+TRANSPORT_KEYS = (
+    "proxy",
+    "proxyauthmethod",
+    "noproxy",
+    "proxysslcainfo",
+    "proxysslcert",
+    "proxysslkey",
+    "sslcainfo",
+    "sslcapath",
+    "sslcert",
+    "sslkey",
+    "sslbackend",
+    "sslversion",
+    "version",
+)
+
+
+def job_transport(git, environ, url):
+    """The job's TRANSPORT_KEYS settings for a URL, as Git selects them
+    (`http.<url>.*` over `http.*`), read outside any repository."""
+    with tempfile.TemporaryDirectory(prefix="cachew-config-") as empty:
+        env = {key: value for key, value in environ.items() if key not in ("GIT_DIR", "GIT_WORK_TREE")}
+        env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(empty)
+        command = [git, "config", "--null", "--get-urlmatch", "http", url.rstrip("/") + "/"]
+        try:
+            result = subprocess.run(command, env=env, cwd=empty, capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return {}
+    settings = {}
+    for entry in result.stdout.decode(errors="surrogateescape").split("\0"):
+        key, separator, value = entry.partition("\n")
+        if separator and key.lower().removeprefix("http.") in TRANSPORT_KEYS:
+            settings[key.lower()] = value
+    return settings
+
+
+def curl_transport(transport, environ):
+    """curl options for the route and trust settings Git would use: curl reads
+    neither Git's configuration nor its GIT_SSL_* variables."""
+
+    def setting(name, variable=None):
+        value = environ.get(variable) if variable else None
+        return transport.get(f"http.{name}") if value is None else value
+
+    def path(value):
+        home = environ.get("HOME")
+        return home + value[1:] if home and value.startswith("~/") else value
+
+    options = []
+    proxy = setting("proxy")
+    if proxy == "":
+        # An empty http.proxy turns off a proxy from the environment.
+        options += ["--noproxy", "*"]
+    elif proxy:
+        options += ["--proxy", proxy]
+        if setting("noproxy"):
+            options += ["--noproxy", setting("noproxy")]
+    for name, variable, option in (
+        ("sslcainfo", "GIT_SSL_CAINFO", "--cacert"),
+        ("sslcapath", "GIT_SSL_CAPATH", "--capath"),
+        ("sslcert", "GIT_SSL_CERT", "--cert"),
+        ("sslkey", "GIT_SSL_KEY", "--key"),
+    ):
+        value = setting(name, variable)
+        if value:
+            options += [option, path(value)]
+    return options
+
+
+def liveness(cache, timeout, env, transport=None):
     """Classify a trusted cache origin's unauthenticated liveness probe: "ok" for a
     200, "retry" for a failure that may pass (no answer, a timeout or a 5xx), and
     "fail" for one that will not: a name that does not resolve (every runner off the
     CI VLAN), a certificate that does not verify, a redirect, a 4xx or any other answer."""
     # --disable ignores ~/.curlrc, which could otherwise add auth or retries.
     # The process deadline also bounds DNS resolution, unlike a socket timeout.
+    if transport is None:
+        transport = job_transport(env.get("CACHEW_REAL_GIT") or "git", env, cache)
     command = ["curl", "--disable", "--silent", "--fail", "--retry", "0", "--max-time", str(timeout)]
+    command += curl_transport(transport, env)
     command += ["--output", os.devnull, "--write-out", "%{http_code}", cache + "/_liveness"]
     try:
         health = subprocess.run(command, env=env, capture_output=True, timeout=timeout + 0.5)
@@ -329,7 +406,8 @@ def liveness(cache, timeout, env):
 
 
 def healthy(cache, timeout, env):
-    """Whether a trusted cache origin answers its unauthenticated liveness probe."""
+    """Whether a trusted cache origin answers its unauthenticated liveness probe.
+    `env` is the job's: its Git configuration gives the proxy and certificates."""
     return liveness(cache, timeout, env) == "ok"
 
 
@@ -524,7 +602,11 @@ class Checkout:
         ]
         if self.token:
             upstream_config.append((f"http.{self.upstream}/.extraHeader", f"AUTHORIZATION: basic {self.auth}"))
+        # This Git reads no configuration file, so the job's route to the server
+        # (a proxy, a private certificate authority) is carried over by name.
+        upstream_config += job_transport(self.git_executable, self.local_env, self.upstream).items()
         apply_git_config(self.upstream_env, upstream_config)
+        self.cache_transport = {}
         self.modules = 0
         self.refs = {}
         self.listed = None
@@ -553,6 +635,9 @@ class Checkout:
         ]
         if self.token:
             config.append((f"http.{self.cache}/.extraHeader", f"AUTHORIZATION: basic {self.auth}"))
+        # The job's route to the cache, scoped to it like everything above.
+        for key, value in self.cache_transport.get(self.cache, {}).items():
+            config.append((f"http.{self.cache}/.{key.removeprefix('http.')}", value))
         self.cache_config = config
         apply_git_config(self.env, config)
 
@@ -835,7 +920,9 @@ class Checkout:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
                 raise Bypass("cache checkout time budget exhausted", transport=True)
-            state = liveness(cache, min(self.health_timeout, remaining), self.env)
+            if cache not in self.cache_transport:
+                self.cache_transport[cache] = job_transport(self.git_executable, self.local_env, cache)
+            state = liveness(cache, min(self.health_timeout, remaining), self.env, self.cache_transport[cache])
             if state == "ok":
                 self.cache = cache
                 self.configure_transport()

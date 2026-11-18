@@ -7,6 +7,8 @@ import base64
 from contextlib import redirect_stdout
 import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import http.client
+import http.server
 import io
 import json
 import os
@@ -191,6 +193,55 @@ class GitServer:
 
     def discoveries(self):
         return [path for method, path, _ in self.requests if method == "GET" and path.endswith("/info/refs")]
+
+
+class ForwardingProxy:
+    """An HTTP proxy. `routes` maps an address nothing listens on to a real one, so
+    that address is reachable only through the proxy, as on a runner that needs one."""
+
+    def __init__(self):
+        self.routes = {}
+        self.seen = []
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def forward(self):
+                url = urllib.parse.urlsplit(self.path)
+                owner.seen.append(url.netloc)
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                skipped = ("proxy-connection", "connection")
+                headers = {key: value for key, value in self.headers.items() if key.lower() not in skipped}
+                connection = http.client.HTTPConnection(owner.routes.get(url.netloc, url.netloc), timeout=20)
+                connection.request(self.command, url.path + ("?" + url.query if url.query else ""), body, headers)
+                response = connection.getresponse()
+                payload = response.read()
+                self.send_response(response.status)
+                for key, value in response.getheaders():
+                    if key.lower() not in ("transfer-encoding", "connection", "content-length"):
+                        self.send_header(key, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                connection.close()
+
+            do_GET = do_POST = forward
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def unused_address(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            return f"127.0.0.1:{probe.getsockname()[1]}"
 
 
 class CheckoutTests(unittest.TestCase):
@@ -854,6 +905,60 @@ class CheckoutTests(unittest.TestCase):
         with patch.object(attempt, "lookup", return_value="0" * 40):
             attempt.resolve()
         self.assertEqual(attempt.checkout_target, ("main", "refs/remotes/origin/main"))
+
+    def proxied(self):
+        proxy = ForwardingProxy()
+        self.addCleanup(proxy.close)
+        for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
+            self.env.pop(name, None)
+            self.env.pop(name.upper(), None)
+        return proxy
+
+    def test_the_proxy_in_the_jobs_git_configuration_reaches_upstream(self):
+        # The server answers only through a proxy that the job's Git configuration
+        # names. The ref lookup read no configuration, so every such checkout fell back.
+        proxy = self.proxied()
+        far = proxy.unused_address()
+        proxy.routes[far] = urllib.parse.urlsplit(self.upstream.url).netloc
+        cache = GitServer(self.project_root, far, real_git=self.env["CACHEW_REAL_GIT"])
+        self.addCleanup(cache.close)
+        with (self.home / ".gitconfig").open("a") as config:
+            config.write(f'[http "http://{far}/"]\n\tproxy = {proxy.url}\n')
+        self.env.update(
+            GITHUB_SERVER_URL=f"http://{far}",
+            CACHEW_CACHEW_URL=cache.url,
+            CACHEW_SUBMODULES="false",
+            CACHEW_REF="v1.0.0",
+        )
+        with patch.dict(os.environ, self.env, clear=True), redirect_stdout(io.StringIO()):
+            cachew_checkout.main()
+        self.assertEqual(runner_file(self.root / "output")["checked-out"], "true")
+        self.assertIn(far, proxy.seen)
+
+    def test_the_liveness_probe_uses_the_proxy_git_would_use_for_the_cache(self):
+        proxy = self.proxied()
+        far = proxy.unused_address()
+        proxy.routes[far] = urllib.parse.urlsplit(self.cache.url).netloc
+        with (self.home / ".gitconfig").open("a") as config:
+            config.write(f'[http "http://{far}/"]\n\tproxy = {proxy.url}\n')
+        env = {key: value for key, value in self.env.items() if not key.startswith("CACHEW_")}
+        env["CACHEW_REAL_GIT"] = self.env["CACHEW_REAL_GIT"]
+        self.assertEqual(cachew_checkout.liveness(f"http://{far}", 5, env), "ok")
+        self.assertIn(far, proxy.seen)
+
+    def test_curl_trusts_the_certificates_git_is_told_to_trust(self):
+        home = {"HOME": "/home/runner"}
+        cases = [
+            ({"http.sslcainfo": "~/ca.pem"}, {}, ["--cacert", "/home/runner/ca.pem"]),
+            ({"http.sslcainfo": "/a.pem"}, {"GIT_SSL_CAINFO": "/b.pem"}, ["--cacert", "/b.pem"]),
+            ({"http.sslcapath": "/certs"}, {}, ["--capath", "/certs"]),
+            ({"http.proxy": ""}, {}, ["--noproxy", "*"]),
+            ({"http.proxy": "http://p", "http.noproxy": "a,b"}, {}, ["--proxy", "http://p", "--noproxy", "a,b"]),
+            ({"http.sslcert": "/c.pem", "http.sslkey": "/k.pem"}, {}, ["--cert", "/c.pem", "--key", "/k.pem"]),
+            ({}, {}, []),
+        ]
+        for transport, environ, expected in cases:
+            self.assertEqual(cachew_checkout.curl_transport(transport, {**home, **environ}), expected)
 
     def test_sparse_lines_are_trimmed_as_javascript_trims_them(self):
         # actions/checkout trims each line with String.prototype.trim: U+FEFF goes,
