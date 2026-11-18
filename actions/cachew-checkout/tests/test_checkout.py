@@ -973,6 +973,19 @@ class CheckoutTests(unittest.TestCase):
         self.assertFalse((self.home / "escape").exists())
         self.assertEqual(self.cache.requests, [])
 
+    def test_inputs_without_a_fallback_are_refused_whatever_else_chooses_the_standard_checkout(self):
+        (self.workspace / "link").symlink_to(self.home, target_is_directory=True)
+        attacks = ({"CACHEW_PATH": "link/escape"}, {"CACHEW_REF": "--upload-pack=x"})
+        fallbacks = ({"CACHEW_LFS": "true"}, {"CACHEW_SSH_KEY_SET": "true"}, {"CACHEW_FILTER": "bad filter"})
+        base = dict(self.env)
+        for attack in attacks:
+            for fallback in fallbacks:
+                with self.subTest(attack=attack, fallback=fallback):
+                    self.env = dict(base, **attack, **fallback)
+                    self.assertFalse(self.attempt())
+                    self.assertEqual(self.output()["security-violation"], "true")
+        self.assertEqual(self.cache.requests, [])
+
     def test_explicit_sha_and_direct_submodules_at_depth_500(self):
         self.env.update(CACHEW_REF=self.sha, CACHEW_SUBMODULES="true", CACHEW_FETCH_DEPTH="500")
         self.assertTrue(self.attempt())

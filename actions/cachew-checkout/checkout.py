@@ -358,6 +358,38 @@ def remove_stale_stages(target):
             shutil.rmtree(entry, ignore_errors=True)
 
 
+def refuse_attack_inputs(environ):
+    """The checks that have no fallback, before anything can choose the standard
+    checkout: an unsupported mode (LFS, an SSH key), an old Git or a cache turned
+    off earlier in the job would otherwise hand the same input to that checkout,
+    which follows a symlinked path out of the workspace."""
+
+    def check(read):
+        try:
+            read()
+        except SecurityViolation:
+            raise
+        except (Bypass, KeyError, ValueError):
+            pass
+
+    def path():
+        workspace = Path(environ["GITHUB_WORKSPACE"]).resolve()
+        if not (workspace / checkout_input(environ, "CACHEW_PATH")).resolve().is_relative_to(workspace):
+            raise SecurityViolation("checkout path is outside the workspace")
+
+    def ref():
+        if checkout_input(environ, "CACHEW_REF").startswith("-"):
+            raise SecurityViolation("ref starts with '-' and would be read as a Git option")
+
+    def server():
+        return origin(checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
+
+    check(path)
+    check(ref)
+    check(lambda: repository_name(checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]))
+    check(lambda: cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), server(), environ))
+
+
 class Checkout:
     def __init__(self, environ, deadline=None):
         self.git_executable = environ.get("CACHEW_REAL_GIT", "git")
@@ -938,6 +970,7 @@ def main():
     violation = False
     mask_token(os.environ)
     try:
+        refuse_attack_inputs(os.environ)
         session = os.environ.get("CACHEW_SESSION_DIR")
         if session and (Path(session) / "cache-disabled").exists():
             status["available"] = "false"

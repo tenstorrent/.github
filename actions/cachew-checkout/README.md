@@ -153,8 +153,13 @@ gc.auto = 0
 Tokens are scoped to cache URLs, and requests that can carry one always use
 verified TLS and never follow a redirect: the two `http.<cachew>/` settings
 above, with `GIT_SSL_NO_VERIFY` dropped from the cache checkout and from the
-wrapper's cache attempt. The token is not in the environment of any process the
-action starts (Git, curl, hooks, `submodule foreach` shells). The upstream
+wrapper's cache attempt. The `token` input itself is not in the environment of
+any process the action starts. During the cache checkout, Git receives it as an
+`Authorization` header in command-scoped configuration (`GIT_CONFIG_VALUE_<n>`),
+which every process Git starts inherits: the job's own hooks, filter drivers and
+`core.fsmonitor` command. The worktree commands (`checkout`, `submodule
+update`, `submodule foreach` shells) run without it, except a sparse checkout's,
+which may fetch missing blobs from the cache. The token and the header are masked in the log before any Git process starts. The upstream
 origin (`github-server-url`) must be `https://<host>[:port]` with a plain DNS
 name or IP literal, and a submodule URL exactly `<origin>/<owner>/<name>`;
 anything else uses the standard checkout. Upstream credentials stay exactly where
