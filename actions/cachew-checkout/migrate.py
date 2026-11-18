@@ -26,6 +26,9 @@ since that is the only form whose ref it can read exactly.
 Only checkouts of the exact version the action forwards to (actions/checkout
 v7.0.1, by commit or tag) are migrated, so no step changes checkout version. Left
 as plain actions/checkout on purpose:
+  * `uses:` lines inside a block scalar (a `run: |` script that writes another
+    workflow, say): they are text, not steps of this file. A pin to the action
+    there is still moved to action_sha, never turned back into actions/checkout;
   * steps with a trailing `# cachew: keep` comment;
   * jobs whose runs-on is a literal GitHub-hosted label (ubuntu-*, windows-*,
     macos-*), where cachew is a no-op; --write turns cachew pins there back
@@ -88,6 +91,11 @@ TOP_LEVEL = re.compile(r"^(?P<key>[\w-]+):")
 # anchored): a job that is not seen would take the next job's runs-on.
 JOB = re.compile(r"^  [^\s#]")
 RUNS_ON = re.compile(r"^    runs-on:[ \t]*(?P<quote>['\"]?)(?P<label>[^'\"#\s]+)(?P=quote)[ \t]*(?:#.*)?$")
+
+
+# A line whose value is a block scalar: `key: |`, `- >-`, `key: !!str |2`, with
+# an optional comment. Its content is every following line indented more deeply.
+BLOCK_SCALAR = re.compile(r"(?:^[ \t]*|[:\-][ \t]+)(?:[!&]\S*[ \t]+)*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#.*)?$")
 
 
 class ConfigError(Exception):
@@ -155,17 +163,42 @@ def hosted_jobs(text):
     return spans
 
 
+def block_scalars(text):
+    """Character ranges of block scalar content: scripts and other embedded text,
+    where a `uses:` line is not a step."""
+    spans, parent, start, offset = [], None, None, 0
+    for line in text.splitlines(keepends=True):
+        content = line.strip()
+        indent = len(line) - len(line.lstrip(" \t"))
+        if parent is not None and content and indent <= parent:
+            spans.append((start, offset))
+            parent = None
+        if parent is None and content and not content.startswith("#") and BLOCK_SCALAR.search(line.rstrip("\r\n")):
+            parent, start = indent, offset + len(line)
+        offset += len(line)
+    if parent is not None:
+        spans.append((start, offset))
+    return spans
+
+
 def rewrite(text, action_sha):
     if not SHA.fullmatch(action_sha):
         raise ValueError(f"action_sha must be a full commit SHA, got {action_sha!r}")
     action = f"{ACTION_REPO}@{action_sha}"
     hosted = hosted_jobs(text)
+    embedded = block_scalars(text)
 
     def replace(match):
         if "cachew: keep" in match[0]:
             return match[0]
+        pinned = "cachew-checkout@" in match[0].lower()
+        if any(start <= match.start() < end for start, end in embedded):
+            # Text a script writes or prints, not a step of this file: a checkout
+            # there is not migrated. A pin to the action is still moved to the
+            # current commit, as --verify-pins holds every mention to it.
+            return f"{match['prefix']}{action} # cachew checkout" if pinned else match[0]
         if any(start <= match.start() < end for start, end in hosted):
-            return f"{match['prefix']}{PLAIN_CHECKOUT}" if "cachew-checkout@" in match[0].lower() else match[0]
+            return f"{match['prefix']}{PLAIN_CHECKOUT}" if pinned else match[0]
         return f"{match['prefix']}{action} # cachew checkout"
 
     return CHECKOUT.sub(replace, text)

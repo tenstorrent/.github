@@ -112,7 +112,13 @@ runs:
       env:
         CACHEW_INPUT: ${{ inputs.cachew }}
       run: |
-        normalize() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"; printf '%s' "${v,,}"; }
+        # The whitespace JavaScript's trim strips, matched byte by byte: [:space:]
+        # depends on the locale and never covers U+00A0 or U+FEFF, so a padded
+        # `false` would not opt out and the token would go to the cache.
+        LC_ALL=C
+        shopt -s extglob
+        space=$'[ \t\n\v\f\r]|\xc2\xa0|\xe1\x9a\x80|\xe2\x80[\x80-\x8a\xa8\xa9\xaf]|\xe2\x81\x9f|\xe3\x80\x80|\xef\xbb\xbf'
+        normalize() { local v="$1"; v="${v##*($space)}"; v="${v%%*($space)}"; printf '%s' "${v,,}"; }
         mode="$(normalize "$CACHEW_INPUT")"
         [ "$(normalize "${CACHEW_CHECKOUT:-}")" = false ] && mode=false
         case "$mode" in false | true) ;; *) mode=auto ;; esac

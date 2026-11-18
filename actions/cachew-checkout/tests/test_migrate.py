@@ -99,6 +99,33 @@ jobs:
 """
         self.assertEqual(migrate.rewrite(before, SHA), expected)
 
+    def test_uses_lines_inside_a_script_are_text_not_steps(self):
+        def workflow(step, embedded_pin, hosted_pin):
+            return (
+                "jobs:\n  build:\n    runs-on: [self-hosted]\n    steps:\n"
+                f"      - uses: {step}\n"
+                "      - name: Write another workflow\n"
+                "        run: |\n"
+                "          cat > generated.yml <<'EOF'\n"
+                "          jobs:\n"
+                "            lint:\n"
+                "              runs-on: ubuntu-latest\n"
+                "              steps:\n"
+                f"                - uses: {PLAIN}\n"
+                "\n"
+                f"                - uses: {embedded_pin}\n"
+                "          EOF\n"
+                "      - run: >-\n"
+                f"          echo uses: {PLAIN}\n"
+                f"      - uses: {step}\n"
+                "  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - run: |  # keep\n"
+                f"          - uses: {hosted_pin}\n"
+                f"      - uses: {PLAIN}\n"
+            )
+
+        self.assertEqual(migrate.rewrite(workflow(PLAIN, STALE, STALE), SHA), workflow(PINNED, PINNED, PINNED))
+
     def test_composite_actions_are_migrated_unless_kept(self):
         before = f"runs:\n  using: composite\n  steps:\n    - uses: {PLAIN}\n    - uses: {PLAIN} cachew: keep\n"
         expected = f"runs:\n  using: composite\n  steps:\n    - uses: {PINNED}\n    - uses: {PLAIN} cachew: keep\n"

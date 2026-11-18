@@ -91,6 +91,11 @@ def mode(context):
         return dict(line.split("=", 1) for line in Path(output.name).read_text().splitlines())["cachew"]
 
 
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
 class RunnerGateTests(unittest.TestCase):
     def setUp(self):
         self.steps = steps()
@@ -174,6 +179,11 @@ class RunnerGateTests(unittest.TestCase):
             ({"inputs.cachew": "auto"}, "secret"),
             ({"inputs.cachew": "false\n"}, False),
             ({"inputs.cachew": "auto", "env.CACHEW_CHECKOUT": " false"}, False),
+            # Every character JavaScript's trim strips, as actions/checkout reads inputs.
+            *(({"inputs.cachew": f"{space}False{space}"}, False) for space in JS_WHITESPACE),
+            *(({"inputs.cachew": "auto", "env.CACHEW_CHECKOUT": f"false{space}"}, False) for space in JS_WHITESPACE),
+            # U+200B is not whitespace to JavaScript: not an opt-out.
+            ({"inputs.cachew": "false\u200b"}, "secret"),
         ):
             with self.subTest(context=context):
                 token = {"inputs.token": "secret", "steps.mode.outputs.cachew": mode(context)}
