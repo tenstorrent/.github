@@ -408,7 +408,7 @@ class Checkout:
                 raise Bypass("checkout mode uses upstream directly")
         # actions/checkout's getMultilineInput: trim the input, drop empty lines, trim each.
         sparse = checkout_input(environ, "CACHEW_SPARSE_CHECKOUT")
-        self.sparse = [line.strip() for line in sparse.split("\n") if line] if sparse else []
+        self.sparse = [JS_TRIM.sub("", line) for line in sparse.split("\n") if line] if sparse else []
         self.sparse_cone = checkout_flag(environ, "CACHEW_SPARSE_CHECKOUT_CONE_MODE", "true")
         self.filter = checkout_input(environ, "CACHEW_FILTER")
         if not self.filter and self.sparse:
@@ -458,9 +458,12 @@ class Checkout:
             raise SecurityViolation("ref starts with '-' and would be read as a Git option")
         if self.ref.startswith("+") or any(c.isspace() or c in ":*?[^~\\" for c in self.ref):
             raise Bypass("unsupported checkout ref")
-        self.depth = int(checkout_input(environ, "CACHEW_FETCH_DEPTH", "1"))
-        if self.depth < 0:
+        # Only the spellings int() and JavaScript's Number read alike: Number takes
+        # 1e1 and 0x10 and rejects 1_0 and non-ASCII digits, which int() accepts.
+        depth = checkout_input(environ, "CACHEW_FETCH_DEPTH", "1")
+        if not re.fullmatch(r"\+?[0-9]+", depth):
             raise Bypass("unsupported fetch depth")
+        self.depth = int(depth)
         self.tags = checkout_flag(environ, "CACHEW_FETCH_TAGS", "false")
         self.submodules = checkout_input(environ, "CACHEW_SUBMODULES", "false").lower()
         if self.sparse and self.submodules in ("true", "recursive"):

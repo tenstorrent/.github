@@ -66,7 +66,7 @@ CHECKOUT = re.compile(
     + "|"
     + re.escape(LEGACY_REPO)
     + r")@[0-9a-f]{40})"
-    r"(?P=quote)(?:[ \t]*#[^\n]*)?[ \t]*$"
+    r"(?P=quote)(?:[ \t]+#[^\n]*)?[ \t]*$"
 )
 # Any mention of the action with a ref, wherever it appears in a file and however
 # its path is spelled: one word that starts at the owner, names the action and
@@ -96,6 +96,15 @@ RUNS_ON = re.compile(r"^    runs-on:[ \t]*(?P<quote>['\"]?)(?P<label>[^'\"#\s]+)
 # A line whose value is a block scalar: `key: |`, `- >-`, `key: !!str |2`, with
 # an optional comment. Its content is every following line indented more deeply.
 BLOCK_SCALAR = re.compile(r"(?:^[ \t]*|[:\-][ \t]+)(?:[!&]\S*[ \t]+)*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#.*)?$")
+# The start of a line that holds block sequence entries: `- `, `- - `.
+ENTRIES = re.compile(r"[ \t]*(?:-[ \t]+)*")
+ITEM_SCALAR = re.compile(r"(?:[!&]\S*[ \t]+)*[|>]")
+
+
+def lines(text):
+    """The lines of a file, each with its line feed. Not str.splitlines, which
+    also splits at form feed, U+0085, U+2028 and others that YAML keeps in a line."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
 
 
 class ConfigError(Exception):
@@ -146,7 +155,7 @@ def hosted_jobs(text):
         if start is not None and hosted:
             spans.append((start, end))
 
-    for line in text.splitlines(keepends=True):
+    for line in lines(text):
         top = TOP_LEVEL.match(line)
         if top:
             close(offset)
@@ -167,14 +176,19 @@ def block_scalars(text):
     """Character ranges of block scalar content: scripts and other embedded text,
     where a `uses:` line is not a step."""
     spans, parent, start, offset = [], None, None, 0
-    for line in text.splitlines(keepends=True):
+    for line in lines(text):
         content = line.strip()
         indent = len(line) - len(line.lstrip(" \t"))
         if parent is not None and content and indent <= parent:
             spans.append((start, offset))
             parent = None
         if parent is None and content and not content.startswith("#") and BLOCK_SCALAR.search(line.rstrip("\r\n")):
-            parent, start = indent, offset + len(line)
+            # The scalar's content is indented past the node that holds it: the
+            # key after `- ` (so a sibling key of that step ends it), or the `-`
+            # itself when the entry is the scalar.
+            entries = ENTRIES.match(line)[0]
+            holder = len(entries) if not ITEM_SCALAR.match(line, len(entries)) else len(entries.rstrip()) - 1
+            parent, start = max(indent, holder), offset + len(line)
         offset += len(line)
     if parent is not None:
         spans.append((start, offset))
@@ -325,7 +339,11 @@ def verify_pins(root, action_sha, exclude=()):
         # Files --write leaves alone (gh-aw lock files) are not held to its pin.
         if excluded(path, exclude):
             continue
-        text = (root / path).read_text()
+        try:
+            text = (root / path).read_text()
+        except (OSError, ValueError) as error:
+            problems.append(f"{path}: cannot be read ({error})")
+            continue
         read = []
         for start, end, value, problem in uses_values(text):
             line = text.count("\n", 0, start) + 1
@@ -392,12 +410,22 @@ def main(argv=None):
     sha, exclude = config["action_sha"], config["exclude"]
     if args.verify_pins:
         return verify_pins(root, sha, exclude)
-    candidates = args.paths or tracked_consumers(root, exclude)
-    changed = [path for path in candidates if migrate_file(path, sha, args.write, root, exclude)]
+    # A path argument is relative to the current directory, as in any command.
+    candidates = [Path.cwd() / path for path in args.paths] or tracked_consumers(root, exclude)
+    changed, failed = [], False
+    for path in candidates:
+        try:
+            if migrate_file(path, sha, args.write, root, exclude):
+                changed.append(path)
+        except (OSError, ValueError) as error:
+            # One unreadable file (not UTF-8, deleted, outside the repository)
+            # must not stop the run midway with the others unvisited.
+            failed = True
+            print(f"Cannot migrate {path}: {error}", file=sys.stderr)
     for path in changed:
         print(f"{'Migrated' if args.write else 'Needs cachew migration:'} {path}")
     print(f"{len(changed)} file(s) {'updated' if args.write else 'need migration'}.")
-    return 1 if changed and args.check else 0
+    return 1 if failed or (changed and args.check) else 0
 
 
 if __name__ == "__main__":

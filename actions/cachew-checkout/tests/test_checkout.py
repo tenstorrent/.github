@@ -855,6 +855,22 @@ class CheckoutTests(unittest.TestCase):
             attempt.resolve()
         self.assertEqual(attempt.checkout_target, ("main", "refs/remotes/origin/main"))
 
+    def test_sparse_lines_are_trimmed_as_javascript_trims_them(self):
+        # actions/checkout trims each line with String.prototype.trim: U+FEFF goes,
+        # U+001F and U+0085 stay. Python's str.strip does the opposite.
+        self.env["CACHEW_SUBMODULES"] = "false"
+        self.env["CACHEW_SPARSE_CHECKOUT"] = ".github\n\ufeffsrc\u00a0\na\x1f \nb\x85"
+        self.assertEqual(cachew_checkout.Checkout(self.env).sparse, [".github", "src", "a\x1f", "b\x85"])
+
+    def test_a_fetch_depth_javascript_reads_differently_uses_the_standard_checkout(self):
+        # Number("1_0") is NaN (full history) and Number("1e1") is 10; int() reads 10 and fails.
+        for value in ("1_0", "1e1", "0x10", "1.5", "\u0661"):
+            self.env["CACHEW_FETCH_DEPTH"] = value
+            with self.assertRaises(cachew_checkout.Bypass, msg=value):
+                cachew_checkout.Checkout(self.env)
+        self.env["CACHEW_FETCH_DEPTH"] = "+7"
+        self.assertEqual(cachew_checkout.Checkout(self.env).depth, 7)
+
     def test_the_liveness_probe_counts_against_the_checkout_budget(self):
         attempt = cachew_checkout.Checkout(self.env, deadline=time.monotonic() - 1)
         with self.assertRaises(cachew_checkout.Bypass):

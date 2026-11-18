@@ -27,6 +27,44 @@ LEGACY = "tenstorrent/tt-metal/.github/actions/cachew-checkout@" + "1" * 40 + " 
 
 
 class RewriteTests(unittest.TestCase):
+    def test_a_step_key_after_a_block_scalar_in_the_same_step_is_a_step(self):
+        # The scalar belongs to the key after `- `, so a sibling key ends it.
+        before = f"""jobs:
+  self:
+    runs-on: [self-hosted]
+    steps:
+      - if: >-
+          github.event_name == 'push'
+        uses: {PLAIN}
+      - run: |
+          echo
+        name: x
+      - uses: {PLAIN}
+"""
+        self.assertEqual(migrate.rewrite(before, SHA), before.replace(PLAIN, PINNED))
+
+    def test_only_a_line_feed_ends_a_line(self):
+        # str.splitlines also splits at U+2028, U+0085 and form feed, which would
+        # end a script early and migrate the text after it.
+        for character in ("\u2028", "\x85", "\f", "\x1c"):
+            before = f"""jobs:
+  self:
+    runs-on: [self-hosted]
+    steps:
+      - run: |
+          cat <<EOF
+          a{character}b
+          - uses: {PLAIN}
+          EOF
+"""
+            self.assertEqual(migrate.rewrite(before, SHA), before, repr(character))
+
+    def test_a_hash_without_a_space_before_it_is_part_of_the_ref(self):
+        before = "steps:\n  - uses: actions/checkout@v7.0.1#x\n  - uses: actions/checkout@v7.0.1 #x\n"
+        after = migrate.rewrite(before, SHA)
+        self.assertIn("uses: actions/checkout@v7.0.1#x\n", after)
+        self.assertEqual(after.count(PINNED), 1)
+
     def test_a_quoted_or_anchored_job_key_still_ends_the_job_before_it(self):
         # Unseen, the hosted job's runs-on counted for the self-hosted job too,
         # and --write turned that job's pin back into plain checkout.
@@ -363,6 +401,31 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("@" + "d" * 40, lock.read_text())
         code, out = self.run_main("--verify-pins")
         self.assertEqual(code, 0, out)
+
+    def test_a_path_argument_is_read_from_the_current_directory(self):
+        nested = self.root / "sub"
+        nested.mkdir()
+        (nested / "wf.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        (self.root / "wf.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        with contextlib.chdir(nested):
+            code, out = self.run_main("--write", "wf.yml")
+        self.assertEqual(code, 0, out)
+        self.assertIn(PINNED, (nested / "wf.yml").read_text())
+        self.assertIn(PLAIN, self.read("wf.yml"))
+
+    def test_a_file_that_cannot_be_read_is_reported_and_the_rest_are_migrated(self):
+        workflows = self.root / ".github/workflows"
+        (workflows / "aaa-binary.yml").write_bytes(b"\xff\xfe uses\n")
+        (workflows / "zzz.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
+        code, out = self.run_main("--write")
+        self.assertEqual(code, 1, out)
+        self.assertIn("aaa-binary.yml", out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn(PINNED, (workflows / "zzz.yml").read_text())
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("aaa-binary.yml", out)
 
     def test_bad_config_is_reported(self):
         for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of path prefixes")):

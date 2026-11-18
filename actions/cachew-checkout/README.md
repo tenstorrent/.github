@@ -240,9 +240,13 @@ a stall longer than `cachew-fetch-timeout`, or the one-hour hard deadline) remov
 the job's cache rewrite; answers about one repository or ref (401/403/404, a
 missing ref, `ls-remote --exit-code` finding nothing) keep caching on. A failed
 cache clone's partial destination is removed before the upstream retry. Git runs a
-partial clone's lazy fetches itself, past the wrapper, so after a clone or fetch
-each promisor remote the cache rewrite reaches is pinned upstream with the same
-repository-local `insteadOf` as the checkout's `origin`.
+partial clone's lazy fetches itself, past the wrapper, so after a clone, fetch or
+`submodule` command each promisor remote the cache rewrite reaches, in the
+repository and in its submodules, is pinned with a repository-local `insteadOf`,
+as the checkout's `origin` is. The pin maps the remote's URL to the URL Git would
+use without cachew. If the job has its own `insteadOf` for that URL, the pin
+copies its result, including a credential in it, into the repository's
+`.git/config`. A partial clone made by a shell alias is not pinned.
 
 Native recursive clones, submodule and `remote` commands, initialized-submodule
 fetches, pushes and pulls use upstream directly. So does a shell alias (`!...`):

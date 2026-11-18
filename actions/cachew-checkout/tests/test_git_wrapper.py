@@ -605,6 +605,75 @@ class DownstreamGitTests(unittest.TestCase):
             index = wrapper.command_index(arguments)
             self.assertEqual(wrapper.clone_destination(arguments, index), expected, arguments)
 
+    def history(self, name, children=()):
+        """A repository whose content.txt changed: a blob:none clone lacks HEAD~1's blob."""
+        self.git_fixture.repository(name, children)
+        path = self.git_fixture.project_root / "org" / name
+        (path / "content.txt").write_text(name + " second version\n")
+        fixture.git(path, "commit", "-am", "second", env=self.env)
+        return fixture.git(path, "rev-parse", "HEAD", env=self.env)
+
+    def git_result(self, *arguments, env=None):
+        return subprocess.run(["git", *arguments], env=env or self.env, text=True, capture_output=True, timeout=60)
+
+    def assert_lazy_fetch_skips_dead_cache(self, repo, name, spec="HEAD~1:content.txt"):
+        self.cache.fail_repo = name
+        before = len(self.cache.requests)
+        result = self.git_result("-C", str(repo), "show", spec)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.cache.requests), before)
+
+    def test_filtered_fetch_from_a_url_is_pinned(self):
+        # Git records the URL itself as the promisor remote: there is no remote.<name>.url.
+        self.history("hist")
+        repo = self.root / "by-url"
+        self.assertEqual(self.git_result("init", str(repo)).returncode, 0)
+        result = self.git_result(
+            "-C", str(repo), "fetch", "--filter=blob:none", self.upstream.url + "/org/hist", "main"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_lazy_fetch_skips_dead_cache(repo, "hist", "FETCH_HEAD~1:content.txt")
+
+    def test_filtered_submodules_are_pinned(self):
+        kid = self.history("kid")
+        self.git_fixture.repository("top", [("kid-name", "deps/kid", "../kid", kid)])
+        top = self.upstream.url + "/org/top"
+        recursive = self.root / "recursive"
+        result = self.git_result(
+            "clone", "--recurse-submodules", "--filter=blob:none", "--also-filter-submodules", top, str(recursive)
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_lazy_fetch_skips_dead_cache(recursive / "deps/kid", "kid")
+        self.cache.fail_repo = None
+        updated = self.root / "updated"
+        self.assertEqual(self.git_result("clone", top, str(updated)).returncode, 0)
+        result = self.git_result("-C", str(updated), "submodule", "update", "--init", "--filter=blob:none")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_lazy_fetch_skips_dead_cache(updated / "deps/kid", "kid")
+
+    def test_pin_keeps_the_rewrite_the_job_wrote_for_the_remote(self):
+        # A later step's own insteadOf, here one that adds a credential, ties with
+        # cachew's and loses. The pin must send reads where the job's rewrite does.
+        self.history("priv")
+        required = "Basic " + base64.b64encode(b"x:JOBPAT").decode()
+        self.upstream.required_auth["priv"] = required
+        self.cache.required_auth["priv"] = required
+        env = dict(self.env, GIT_TERMINAL_PROMPT="0")
+        authed = self.upstream.url.replace("http://", "http://x:JOBPAT@")
+        subprocess.run(
+            [self.real_git, "config", "--global", f"url.{authed}/.insteadOf", self.upstream.url + "/"],
+            env=env,
+            check=True,
+        )
+        destination = self.root / "private"
+        url = self.upstream.url + "/org/priv"
+        result = self.git_result("clone", "--filter=blob:none", url, str(destination), env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lazy = self.git_result("-C", str(destination), "show", "HEAD~1:content.txt", env=env)
+        self.assertEqual(lazy.returncode, 0, lazy.stderr)
+        fetch = self.git_result("-C", str(destination), "fetch", "origin", env=env)
+        self.assertEqual(fetch.returncode, 0, fetch.stderr)
+
 
 def load_wrapper():
     import importlib.util

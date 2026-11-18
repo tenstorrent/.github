@@ -495,8 +495,21 @@ def run(arguments, environ):
         # However the clone or fetch went, later lazy fetches would use the rewrite.
         # Pins only remotes the rewrite still reaches, so it is a no-op without one.
         location = ["-C", str(target.path)] if command == "clone" and target.path else arguments[:index]
-        if result == 0 and command in ("clone", "fetch"):
-            pin_promisor_remotes(real_git, location, environ, state.get("cache"))
+        if result != 0 or command not in ("clone", "fetch", "submodule"):
+            return result
+        cache = state.get("cache")
+        if command != "submodule":
+            pin_promisor_remotes(real_git, location, environ, cache)
+        if command != "fetch":
+            # Filtered submodules are partial clones of their own.
+            listing = subprocess.run(
+                [real_git, *location, "submodule", "--quiet", "foreach", "--recursive", "pwd"],
+                env=environ,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            for path in listing.stdout.decode(errors="surrogateescape").splitlines():
+                pin_promisor_remotes(real_git, ["-C", path], environ, cache)
         return result
 
     if disabled:

@@ -303,27 +303,36 @@ def remove_cache_keys(real_git, session, state, environ, disable=True):
 def pin_promisor_remotes(real_git, location, environ, cache):
     """Git runs a partial clone's lazy fetches itself, not through the wrapper,
     so they would follow the cache rewrite with no upstream retry. Pin each
-    promisor remote the rewrite reaches to its own URL: a repository-local
-    self-mapping is a longer insteadOf match."""
+    promisor remote the rewrite reaches to the URL Git would use without cachew:
+    a repository-local mapping of the whole URL is a longer insteadOf match."""
     if not cache:
         return
+    prefix = cache.rstrip("/") + "/git/"
 
     def run(*arguments):
         result = subprocess.run(
             [real_git, *location, *arguments], env=environ, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
         )
-        return result.stdout.decode(errors="replace").strip() if result.returncode == 0 else ""
+        return result.stdout.decode(errors="surrogateescape") if result.returncode == 0 else ""
+
+    def without_cachew(url):
+        """The URL as Git rewrites it when cachew's rewrite is absent: the job's
+        own insteadOf for it, which ties with cachew's and loses, still applies."""
+        best = ("", "")
+        for entry in run("config", "--null", "--get-regexp", r"^url\..*\.insteadof$").split("\0"):
+            key, _, value = entry.partition("\n")
+            base = key[len("url.") : -len(".insteadof")]
+            if value and url.startswith(value) and len(value) > len(best[1]) and not base.startswith(prefix):
+                best = (base, value)
+        return best[0] + url[len(best[1]) :]
 
     for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
         key, _, value = line.partition(" ")
         remote = key[len("remote.") : -len(".promisor")]
-        url = run("config", "--local", "--get", f"remote.{remote}.url")
-        if (
-            value.lower() == "true"
-            and url
-            and run("ls-remote", "--get-url", remote).startswith(cache.rstrip("/") + "/git/")
-        ):
-            run("config", "--local", "--add", f"url.{url}.insteadOf", url)
+        # A filtered fetch from a URL records the URL itself as the promisor remote.
+        url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
+        if value.lower() == "true" and run("ls-remote", "--get-url", remote).startswith(prefix):
+            run("config", "--local", "--add", f"url.{without_cachew(url)}.insteadOf", url)
 
 
 def subsection(key, prefix, suffix):
