@@ -95,8 +95,8 @@ attempting direct requests. Userspace mode still needs the pinned Tailscale
 action's normal installation privileges/tools, including sudo; it removes the
 TUN and NET_ADMIN requirements.
 
-Proxy variables are scoped to the Vault step, overriding inherited upper- and
-lowercase proxy settings so `NO_PROXY=*` cannot bypass the private route.
+Lowercase proxy overrides are scoped to the Vault step and take precedence over
+inherited upper- or lowercase settings, so `NO_PROXY=*` cannot bypass the route.
 Only the GitHub OIDC request host bypasses the proxy. Kernel mode passes an
 empty environment mapping and preserves the runner's original proxy settings.
 

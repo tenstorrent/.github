@@ -194,9 +194,9 @@ if [ "$rc" -ne 0 ]; then
 else
   proxy_env="$(sed -n 's/^proxy-env=//p' "$work/out")"
   if ! printf '%s' "$proxy_env" | jq -e '
-    .HTTP_PROXY == "http://127.0.0.1:21055" and .http_proxy == .HTTP_PROXY and
-    .HTTPS_PROXY == .HTTP_PROXY and .https_proxy == .HTTP_PROXY and
-    .NO_PROXY == "example.invalid" and .no_proxy == .NO_PROXY and
+    .http_proxy == "http://127.0.0.1:21055" and .https_proxy == .http_proxy and
+    .no_proxy == "example.invalid" and
+    (has("HTTP_PROXY") | not) and (has("HTTPS_PROXY") | not) and (has("NO_PROXY") | not) and
     .NODE_OPTIONS == "--trace-warnings --use-env-proxy"' >/dev/null; then
     echo '::error::userspace mode did not scope proxy settings correctly'
     status=1

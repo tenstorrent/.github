@@ -148,10 +148,12 @@ case "$network_mode" in
     oidc_host="${oidc_host%%[/?#]*}"
     oidc_host="${oidc_host%%:*}"
     [[ "$oidc_host" =~ ^[A-Za-z0-9.-]+$ ]] || fail "cannot determine the GitHub OIDC host for proxy bypass."
+    # Expression objects treat names case-insensitively: do not emit both
+    # HTTP_PROXY and http_proxy. Lowercase takes precedence in Node and the
+    # GitHub HTTP client, overriding inherited variants without duplicate keys.
     proxy_env="$(jq -cn --arg proxy "$proxy_url" --arg bypass "$oidc_host" \
       --arg options "${NODE_OPTIONS:+$NODE_OPTIONS }--use-env-proxy" \
-      '{HTTP_PROXY:$proxy, http_proxy:$proxy, HTTPS_PROXY:$proxy, https_proxy:$proxy,
-        NO_PROXY:$bypass, no_proxy:$bypass, NODE_OPTIONS:$options}')"
+      '{http_proxy:$proxy, https_proxy:$proxy, no_proxy:$bypass, NODE_OPTIONS:$options}')"
     ;;
   *) fail "input network-mode must be kernel or userspace." ;;
 esac
