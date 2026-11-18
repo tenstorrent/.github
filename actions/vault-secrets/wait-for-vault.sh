@@ -2,9 +2,14 @@
 # Waits until Vault answers its health endpoint. Reads VAULT_URL from env.
 set -euo pipefail
 
+curl_args=(-fsS --max-time 5 -o /dev/null)
+if [ -n "${VAULT_PROXY:-}" ]; then
+  # Explicitly defeat inherited NO_PROXY rules for the private Vault endpoint.
+  curl_args+=(--proxy "$VAULT_PROXY" --noproxy '')
+fi
 health="${VAULT_URL}/v1/sys/health?standbyok=true&uninitcode=204&sealedcode=204"
 for _ in 1 2 3 4 5 6; do
-  if curl -fsS --max-time 5 -o /dev/null "$health"; then
+  if curl "${curl_args[@]}" "$health"; then
     echo "Vault ${VAULT_URL} is reachable."
     exit 0
   fi

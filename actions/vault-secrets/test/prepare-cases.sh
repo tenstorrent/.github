@@ -175,4 +175,34 @@ refuses 'output name in the second entry' \
 refuses 'default name from the selector' 'kv/data/app VAULT_SECRETS_GITHUB_TOKEN'
 refuses 'default name from a quoted selector' 'kv/data/app "vault_secrets_github_token"'
 
+refuses_with 'bad network mode' 'network-mode must be kernel or userspace' IN_NETWORK_MODE=auto
+refuses_with 'userspace on unsupported OS' 'requires a Linux runner' IN_NETWORK_MODE=userspace RUNNER_OS=macOS
+for port in 0 65536 -1 12.5 01055 '1055;echo bad'; do
+  refuses_with "bad proxy port $port" 'proxy-port must be a whole number' \
+    IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$port"
+done
+run_env IN_NETWORK_MODE=kernel
+if ! grep -q -x 'proxy-env={}' "$work/out" || ! grep -q -x 'proxy-url=' "$work/out"; then
+  echo '::error::kernel mode changed the proxy environment'
+  status=1
+fi
+run_env IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT=21055 \
+  NODE_OPTIONS=--trace-warnings NO_PROXY='*' no_proxy='*'
+if [ "$rc" -ne 0 ]; then
+  cat "$work/log"
+  status=1
+else
+  proxy_env="$(sed -n 's/^proxy-env=//p' "$work/out")"
+  if ! printf '%s' "$proxy_env" | jq -e '
+    .HTTP_PROXY == "http://127.0.0.1:21055" and .http_proxy == .HTTP_PROXY and
+    .HTTPS_PROXY == .HTTP_PROXY and .https_proxy == .HTTP_PROXY and
+    .NO_PROXY == "example.invalid" and .no_proxy == .NO_PROXY and
+    .NODE_OPTIONS == "--trace-warnings --use-env-proxy"' >/dev/null; then
+    echo '::error::userspace mode did not scope proxy settings correctly'
+    status=1
+  fi
+  grep -q -x 'proxy-url=http://127.0.0.1:21055' "$work/out" || status=1
+  grep -q -- '--tun=userspace-networking' "$work/out" || status=1
+fi
+
 exit "$status"
