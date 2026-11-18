@@ -831,6 +831,20 @@ class CheckoutTests(unittest.TestCase):
         self.assertIn(("http.sslVerify", "true"), attempt.cache_config)
         self.assertIn((f"http.{self.cache.url}/.sslVerify", "true"), attempt.cache_config)
 
+    def test_a_ref_is_classified_by_its_uppercase_form_as_actions_checkout_does(self):
+        # U+017F uppercases to S: actions/checkout reads this ref as a branch.
+        self.env["CACHEW_REF"] = "ref\u017f/heads/main"
+        attempt = cachew_checkout.Checkout(self.env)
+        with patch.object(attempt, "lookup", return_value="0" * 40):
+            attempt.resolve()
+        self.assertEqual(attempt.checkout_target, ("main", "refs/remotes/origin/main"))
+
+    def test_the_liveness_probe_counts_against_the_checkout_budget(self):
+        attempt = cachew_checkout.Checkout(self.env, deadline=time.monotonic() - 1)
+        with self.assertRaises(cachew_checkout.Bypass):
+            attempt.probe()
+        self.assertEqual(self.cache.requests, [])
+
     def test_a_lazy_fetch_never_follows_a_redirect_the_callers_configuration_allows(self):
         # Git prefers a value scoped to the URL over an unscoped one, whatever
         # their sources: the caller's scoped setting would beat an unscoped false.

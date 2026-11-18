@@ -545,6 +545,18 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(state["defaults"], {self.fixture.upstream.url: header})
         self.finish()
 
+    def test_a_failed_activation_does_not_keep_the_token_of_a_path_checked_out_again(self):
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        header = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertIn(header, (session / "state.json").read_text())
+        # The second checkout's activation fails after reading the session.
+        self.env.update(CACHEW_PERSIST_CREDENTIALS="false", CACHEW_CACHEW_URL="https://evil.example")
+        self.assertFalse(self.activate())
+        for file in session.rglob("*"):
+            if file.is_file():
+                self.assertNotIn(header.encode(), file.read_bytes(), file)
+
     def test_disabled_cache_secondary_private_checkout_uses_its_current_token(self):
         self.fixture.repository("secondary")
         secondary_token = "secondary-private-token"

@@ -650,21 +650,23 @@ class Checkout:
             if not ref.startswith("refs/heads/") or "HEAD" not in refs:
                 raise Bypass("default branch not found upstream")
             self.ref, commit = ref, refs["HEAD"]
-        lower = ref.lower()
-        if lower.startswith("refs/heads/"):
+        # As actions/checkout's ref helper classifies it: by the uppercased ref,
+        # which is not the lowercased one for every character (U+017F uppercases to S).
+        upper = ref.upper()
+        if upper.startswith("REFS/HEADS/"):
             branch = ref[len("refs/heads/") :]
             commit = commit or self.lookup(ref, "--heads")
             self.refs[f"refs/remotes/origin/{branch}"] = commit
             self.want, self.checkout_target = commit, (branch, f"refs/remotes/origin/{branch}")
-        elif lower.startswith("refs/pull/"):
+        elif upper.startswith("REFS/PULL/"):
             local = f"refs/remotes/pull/{ref[len('refs/pull/'):]}"
             self.refs[local] = commit or self.lookup(ref)
             self.want, self.checkout_target = self.refs[local], (local, None)
-        elif lower.startswith("refs/tags/"):
+        elif upper.startswith("REFS/TAGS/"):
             # Tags are fetched by name; the commit only verifies them.
             self.refs[ref] = self.lookup(ref, "--tags")
             self.want, self.checkout_target = self.refs[ref], (ref, None)
-        elif lower.startswith("refs/"):
+        elif upper.startswith("REFS/"):
             if commit:
                 self.want, self.checkout_target = commit, (commit, None)
             else:
@@ -817,7 +819,11 @@ class Checkout:
     def probe(self):
         transient = False
         for cache in self.caches:
-            state = liveness(cache, self.health_timeout, self.env)
+            # The probes count against the checkout budget like every Git command.
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                raise Bypass("cache checkout time budget exhausted", transport=True)
+            state = liveness(cache, min(self.health_timeout, remaining), self.env)
             if state == "ok":
                 self.cache = cache
                 self.configure_transport()

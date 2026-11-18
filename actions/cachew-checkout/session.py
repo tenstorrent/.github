@@ -226,6 +226,16 @@ def read_state(session):
     return json.loads((session / "state.json").read_text())
 
 
+def own_tokens(state):
+    """The tokens and per-upstream defaults the cache receives: those of the
+    checkout paths that still own one, a later checkout over an earlier one."""
+    state["tokens"], state["defaults"] = {}, {}
+    for owned in state["paths"].values():
+        state["tokens"][owned["repository"]] = owned["header"]
+        if owned["default"]:
+            state["defaults"][owned["default"]] = owned["header"]
+
+
 def write_state(session, state):
     write_private(session / "state.json", json.dumps(state))
 
@@ -257,6 +267,9 @@ def remove_cache_keys(real_git, session, state, environ, disable=True):
     if remaining:
         marker.touch(mode=0o600, exist_ok=True)
     state = dict(state, active=False, managed=[entry for entry in state.get("managed", []) if entry[0] in remaining])
+    if marker.exists():
+        # Nothing reads a recorded token once caching is off for the job.
+        state.update(tokens={}, defaults={}, paths={})
     write_state(session, state)
     return state
 
@@ -544,8 +557,19 @@ def activate(environ):
     # This step also runs after a refused checkout: a path the checkout rejects
     # (outside the workspace) is never handed to Git here either.
     inside = checkout.is_relative_to(workspace)
+    # Each checkout path owns the token its last checkout recorded, as
+    # actions/checkout keeps a path's credentials in that path: it removes them
+    # before every checkout into it, so a checkout with persist-credentials: false
+    # leaves none for later steps to read. What the cache receives is derived
+    # from the paths that remain; a repository's latest checkout wins.
+    # Dropped and saved first: a failure below must not keep the earlier token.
+    paths = state.setdefault("paths", {})
+    if inside:
+        paths.pop(str(checkout), None)
+    own_tokens(state)
+    write_state(session, state)
     view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
-    # First, whatever fails below: a rewrite an earlier activation left in a
+    # Then, whatever fails below: a rewrite an earlier activation left in a
     # locked file still redirects this checkout's lazy fetches.
     if inside:
         pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"))
@@ -553,14 +577,6 @@ def activate(environ):
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
     mask(encoded)
-    # Each checkout path owns the token its last checkout recorded, as
-    # actions/checkout keeps a path's credentials in that path: it removes them
-    # before every checkout into it, so a checkout with persist-credentials: false
-    # leaves none for later steps to read. What the cache receives is derived
-    # from the paths that remain; a repository's latest checkout wins.
-    paths = state.setdefault("paths", {})
-    if inside:
-        paths.pop(str(checkout), None)
     if (
         inside
         and token
@@ -575,11 +591,7 @@ def activate(environ):
             "header": f"AUTHORIZATION: basic {encoded}",
             "default": settings.upstream if workflow else None,
         }
-    state["tokens"], state["defaults"] = {}, {}
-    for owned in paths.values():
-        state["tokens"][owned["repository"]] = owned["header"]
-        if owned["default"]:
-            state["defaults"][owned["default"]] = owned["header"]
+        own_tokens(state)
     keep_safe_directories(
         real_git, environ, session / "checkout.config", state["checkout_safe_directories"], global_config
     )
