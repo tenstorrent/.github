@@ -831,6 +831,26 @@ class CheckoutTests(unittest.TestCase):
         self.assertIn(("http.sslVerify", "true"), attempt.cache_config)
         self.assertIn((f"http.{self.cache.url}/.sslVerify", "true"), attempt.cache_config)
 
+    def test_a_lazy_fetch_never_follows_a_redirect_the_callers_configuration_allows(self):
+        # Git prefers a value scoped to the URL over an unscoped one, whatever
+        # their sources: the caller's scoped setting would beat an unscoped false.
+        attempt = cachew_checkout.Checkout(self.env)
+        attempt.cache = self.cache.url
+        attempt.configure_transport()
+        with tempfile.TemporaryDirectory() as directory:
+            caller = Path(directory) / "caller.config"
+            caller.write_text(f'[http "{self.cache.url}/"]\n\tfollowRedirects = true\n')
+            env = dict(attempt.local_env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=str(caller))
+            cachew_checkout.apply_git_config(env, attempt.cache_config, append=True)
+            value = subprocess.run(
+                ["git", "config", "--get-urlmatch", "http.followRedirects", f"{self.cache.url}/git/github.com/o/r"],
+                env=env,
+                cwd=directory,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        self.assertEqual(value, "false")
+
     def test_submodule_url_must_be_exactly_owner_and_name(self):
         child = git(self.project_root / "org" / "child", "rev-parse", "HEAD", env=self.env)
         for index, url in enumerate(("../child?ref=1", "../child%2f..%2f..%2fadmin", "../child@x")):

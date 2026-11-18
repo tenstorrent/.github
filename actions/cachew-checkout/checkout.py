@@ -493,7 +493,9 @@ class Checkout:
         attached before a trusted origin has answered the liveness probe."""
         config = [
             ("http.followRedirects", "false"),
-            # Also for lazy fetches, which read the caller's own configuration.
+            # Also for lazy fetches, which read the caller's own configuration: there
+            # a value scoped to the cache's URL would win over the unscoped one.
+            (f"http.{self.cache}/.followRedirects", "false"),
             ("http.sslVerify", "true"),
             (f"http.{self.cache}/.sslVerify", "true"),
             ("credential.helper", ""),
