@@ -676,6 +676,18 @@ class Checkout:
             raise Bypass(f"{message} failed", transport=transport, transient=transient)
         return output
 
+    def protect(self, git, env, url):
+        """Leave the cache unless Git, run as `git` with `env`, verifies the
+        certificate and follows no redirect for `url`. Git applies the most
+        specific http.<url>.* it reads, whatever its source, so a file may hold
+        one that outranks cachew's own: the new repository's configuration,
+        copied from a template, or the caller's files, which lazy fetches read."""
+        for name, wanted in (("http.sslVerify", "true"), ("http.followRedirects", "false")):
+            command = [*git, "config", "--type=bool", "--get-urlmatch", name, url]
+            # A value that is not a boolean (followRedirects=initial) fails here.
+            if self.run_git(command, env, "reading the cache's settings").decode().strip() != wanted:
+                raise Bypass(f"the job's Git configuration sets {name} for the cache")
+
     def git(self, gitdir, *arguments, input=None):
         command = [self.git_executable, f"--git-dir={gitdir}", *arguments]
         return self.run_git(command, self.env, "cache Git operation", input=input)
@@ -701,9 +713,9 @@ class Checkout:
             f"url.{self.cache_url(self.url)}.insteadOf={self.url}",
             "-C",
             str(self.target),
-            *arguments,
         ]
-        return self.run_git(command, env, "sparse checkout")
+        self.protect(command, env, self.cache_url(self.url))
+        return self.run_git([*command, *arguments], env, "sparse checkout")
 
     def ls_remote(self, *arguments):
         """The only upstream contact: names resolve there, objects come from the cache.
@@ -805,6 +817,7 @@ class Checkout:
         self.git(gitdir, "init", "--bare", str(gitdir))
         self.git(gitdir, "remote", "add", "origin", self.url)
         cache_url = self.cache_url(self.url)
+        self.protect([self.git_executable, f"--git-dir={gitdir}"], self.env, cache_url)
         options = ["--force", "--no-recurse-submodules", "--no-tags"]
         if self.depth:
             options.append(f"--depth={self.depth}")
@@ -861,6 +874,7 @@ class Checkout:
     def seed(self, gitdir, url, sha):
         self.git(gitdir, "init", "--bare", str(gitdir))
         self.git(gitdir, "remote", "add", "origin", url)
+        self.protect([self.git_executable, f"--git-dir={gitdir}"], self.env, self.cache_url(url))
         options = ["--force", "--no-recurse-submodules"]
         if self.depth:
             options.append(f"--depth={self.depth}")

@@ -1246,6 +1246,10 @@ class SessionTests(unittest.TestCase):
             (["-c", "HTTP.https://x/.sslVerify=false", "status"], {}),
             (["--config-env=http.https://x/.followRedirects=X", "status"], {}),
             (["--config-env", "http.followRedirects=X", "status"], {}),
+            # A file the command includes may hold such a setting.
+            (["-c", "include.path=/x", "status"], {}),
+            (["-c", "IncludeIf.gitdir:/.path=/x", "status"], {}),
+            (["--config-env=include.path=X", "status"], {}),
         ):
             env = dict(self.env, X="true", **extra)
             result = subprocess.run([str(shim), *arguments], cwd=self.fixture.target, env=env, capture_output=True)

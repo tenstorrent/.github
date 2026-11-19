@@ -1242,6 +1242,36 @@ class CheckoutTests(unittest.TestCase):
             if path != "/_liveness":
                 self.assertEqual(auth.lower(), expected.lower(), path)
 
+    def test_a_narrower_setting_of_the_caller_keeps_the_token_off_a_weakened_lazy_fetch(self):
+        # The lazy fetches read the caller's configuration, and Git applies the
+        # most specific http.<url>.* whatever its source: a setting scoped more
+        # narrowly than cachew's own wins.
+        self.add_layout()
+        for setting in ("followRedirects = true", "sslVerify = false"):
+            with self.subTest(setting):
+                (self.home / ".gitconfig").write_text(f'[http "{self.cache.url}/git/"]\n\t{setting}\n')
+                self.env.update(CACHEW_SUBMODULES="false", CACHEW_SPARSE_CHECKOUT=".github")
+                self.assertFalse(self.attempt())
+                # The seed fetch, which reads none of the caller's files, and no other.
+                self.assertEqual(len(self.cache.discoveries()), 1)
+                self.assertEqual(list(self.target.iterdir()), [])
+                self.cache.requests.clear()
+
+    def test_a_template_that_weakens_cache_requests_keeps_the_checkout_off_the_cache(self):
+        # git init copies the template's configuration into the new repository,
+        # the only file the checkout's fetches read.
+        weak = self.root / "weak.config"
+        weak.write_text(f'[http "{self.cache.url}/git/"]\n\tsslVerify = false\n')
+        template = self.root / "template"
+        template.mkdir()
+        self.env["GIT_TEMPLATE_DIR"] = str(template)
+        for content in (weak.read_text(), f"[include]\n\tpath = {weak}\n"):
+            with self.subTest(content):
+                (template / "config").write_text(content)
+                self.assertFalse(self.attempt())
+                self.assertEqual(self.cache.discoveries(), [])
+                self.assertEqual(list(self.target.iterdir()), [])
+
     def test_sparse_lazy_fetch_failure_discards_and_falls_back(self):
         self.add_layout()
         self.env.update(CACHEW_SUBMODULES="false", CACHEW_SPARSE_CHECKOUT=".github")

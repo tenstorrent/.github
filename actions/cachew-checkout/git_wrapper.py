@@ -499,33 +499,41 @@ def weakened(real_git, arguments, index, environ, cache):
     def listed(*source):
         return [entry.partition("\n") for entry in read(*source, "--list")]
 
+    def located(path, directory):
+        if path.startswith("~/"):
+            return environ.get("HOME", "") + path[1:]
+        # Relative to the file that includes it.
+        return os.path.join(directory, path)
+
     def conditional(*source):
         """The files that conditional includes name, whatever their condition:
         the Git directory or the remote URL of a repository that does not exist yet."""
         fields = read(*source, "--show-origin", "--get-regexp", r"^includeif\..*\.path$")
         for origin, entry in zip(fields[0::2], fields[1::2]):
-            path = entry.partition("\n")[2]
-            if path.startswith("~/"):
-                path = environ.get("HOME", "") + path[1:]
-            elif not os.path.isabs(path) and origin.startswith("file:"):
-                # Relative to the file that includes it.
-                path = os.path.join(os.path.dirname(working_directory(arguments, index) / origin[5:]), path)
-            yield path
+            file = origin[5:] if origin.startswith("file:") else ""
+            yield located(entry.partition("\n")[2], os.path.dirname(working_directory(arguments, index) / file))
 
     entries = listed()
     if arguments[index] == "clone":
         # A clone gives its new repository the settings of its -c/--config
         # options and of its template directory before it fetches.
         settings, template = clone_settings(arguments[index + 1 :])
-        entries += [setting.partition("=") for setting in settings]
+        own = [setting.partition("=") for setting in settings]
+        entries += own
         template = template or environ.get("GIT_TEMPLATE_DIR")
         if template is None:
             template = next((value for key, _, value in entries if key == "init.templatedir"), None)
-        if template:
-            home = environ.get("HOME", "")
-            template = home + template[1:] if home and template.startswith("~/") else template
-            entries += listed("--file", os.path.join(template, "config"))
         pending, seen = list(conditional()), set()
+        if template:
+            template = located(template, "")
+            entries += listed("--file", os.path.join(template, "config"))
+            pending += conditional("--file", os.path.join(template, "config"))
+        for key, _, value in own:
+            # The new repository's configuration then includes the file, from its
+            # Git directory, which starts as a copy of the template.
+            section, _, variable = key.lower().rpartition(".")
+            if variable == "path" and section.partition(".")[0] in ("include", "includeif"):
+                pending.append(located(value, template or ""))
         while pending and len(seen) < MAX_CONDITIONAL_INCLUDES:
             path = pending.pop()
             if path not in seen:

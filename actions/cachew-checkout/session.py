@@ -614,17 +614,17 @@ aliased() (
 # Git lets GIT_SSL_NO_VERIFY override http.sslVerify, for any command that
 # reaches the cache: the wrapper then keeps the token off its requests. So it
 # does under configuration given for one command, in the environment or with
-# -c, which may hold an http.* setting.
+# -c, which may hold an http.* setting or include a file that does.
 [ -z "${{GIT_SSL_NO_VERIFY+set}}${{GIT_CONFIG_COUNT+set}}${{GIT_CONFIG_PARAMETERS+set}}" ] || {wrapper}
 skip=0
 options=0
 for argument in "$@"; do
   if [ "$skip" = 1 ]; then
-    case "$argument" in [Hh][Tt][Tt][Pp].*) {wrapper} ;; esac
+    case "$argument" in [Hh][Tt][Tt][Pp].*|[Ii][Nn][Cc][Ll][Uu][Dd][Ee]*) {wrapper} ;; esac
     skip=0; options=$((options + 1)); continue
   fi
   case "$argument" in
-    --config-env=[Hh][Tt][Tt][Pp].*) {wrapper} ;;
+    --config-env=[Hh][Tt][Tt][Pp].*|--config-env=[Ii][Nn][Cc][Ll][Uu][Dd][Ee]*) {wrapper} ;;
     -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--attr-source) skip=1 ;;
     -*) ;;
     clone|fetch|ls-remote|push|pull|submodule|remote) {wrapper} ;;

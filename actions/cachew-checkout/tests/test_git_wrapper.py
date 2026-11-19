@@ -828,6 +828,8 @@ class DownstreamGitTests(unittest.TestCase):
         template.mkdir()
         self.config(template / "config", scope + ".sslVerify", "false")
         configured = dict(self.env, GIT_TEMPLATE_DIR=str(template))
+        included = self.root / "included.config"
+        self.config(included, scope + ".sslVerify", "false")
         for number, (options, env) in enumerate(
             (
                 (["-c", scope + ".sslVerify=false"], self.env),
@@ -839,6 +841,10 @@ class DownstreamGitTests(unittest.TestCase):
                 (["--template", str(template)], self.env),
                 (["--template=" + str(template)], self.env),
                 ([], configured),
+                # The new repository's configuration then includes the file.
+                (["-c", f"include.path={included}"], self.env),
+                (["--config", f"Include.Path={included}"], self.env),
+                (["-c", f"includeIf.gitdir:{self.root.resolve()}/.path={included}"], self.env),
             )
         ):
             with self.subTest(options=options, template=env is configured):
@@ -869,11 +875,16 @@ class DownstreamGitTests(unittest.TestCase):
         template = self.root / "including-template"
         template.mkdir()
         self.config(template / "config", "include.path", str(weak))
+        conditional = self.root / "conditional-template"
+        conditional.mkdir()
+        by_template = self.root / "by-conditional-template"
+        self.config(conditional / "config", f"includeIf.gitdir:{by_template.resolve()}/.path", str(weak))
         destination = self.root / "inherited-gitdir"
         cases = (
             (f"includeIf.gitdir:{destination.resolve()}/.path", str(weak), destination, []),
             (f"includeIf.hasconfig:remote.*.url:{self.upstream.url}/**.path", str(weak), self.root / "by-url", []),
             ("", "", self.root / "by-template", ["--template", str(template)]),
+            ("", "", by_template, ["--template", str(conditional)]),
         )
         for key, value, target, options in cases:
             with self.subTest(key=key, options=options):
