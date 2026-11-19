@@ -544,10 +544,12 @@ def weakened(real_git, arguments, index, environ, cache):
         tail = arguments[index + 1 :]
         settings, template = clone_settings(tail)
         own = [setting.partition("=") for setting in settings]
-        entries += own
         template = template or environ.get("GIT_TEMPLATE_DIR")
         if template is None:
-            template = next((value for key, _, value in entries if key == "init.templatedir"), None)
+            # The last one set, as Git reads a single-valued setting, and not one
+            # of the clone's own options: Git copies the template before those.
+            template = next((value for key, _, value in reversed(entries) if key == "init.templatedir"), None)
+        entries += own
         directory = working_directory(arguments, index)
         destination = clone_destination(arguments, index)
         separate = option_value(tail, "--separate-git-dir", "--sep")

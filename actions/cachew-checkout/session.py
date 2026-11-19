@@ -572,8 +572,8 @@ def shell_quote(value):
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-# Frequent Git commands that never reach a remote. Git ignores an alias with the
-# name of one of its commands, so the shim skips the alias lookup for these.
+# Frequent Git commands that name no remote. Git ignores an alias with the name
+# of one of its commands, so the shim skips the alias lookup for these.
 LOCAL_COMMANDS = (
     "add|am|apply|branch|cat-file|checkout|cherry-pick|commit|config|describe|diff|for-each-ref|hash-object|init|"
     "log|ls-files|ls-tree|merge|merge-base|rebase|reset|restore|rev-list|rev-parse|rm|show|show-ref|stash|status|"
@@ -589,11 +589,12 @@ def shim(real_git, session):
     return f"""#!/bin/sh
 export CACHEW_REAL_GIT={shell_quote(real_git)}
 export CACHEW_SESSION_DIR={shell_quote(str(session))}
-# Whether Git has an alias named $2 in either form (alias.<name>, or
-# alias.<name>.command, whose name may hold any character), read with the first
-# $1 of the arguments that follow (the options before the command, which can
-# select or define the alias).
-aliased() (
+# Whether the wrapper must run the command: Git has an alias named $2 in either
+# form (alias.<name>, or alias.<name>.command, whose name may hold any
+# character; no $2, no lookup), or the job's settings may weaken a request to
+# the cache. Read with the first $1 of the arguments that follow (the options
+# before the command, which can select or define either).
+wrapped() (
   keep=$1 word=$2
   shift 2
   position=0 total=$#
@@ -603,13 +604,20 @@ aliased() (
     [ "$position" -lt "$keep" ] && set -- "$@" "$argument"
     position=$((position + 1))
   done
-  [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ] ||
-    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word.command" 2>/dev/null)" ] ||
-    # A setting that turns off certificate verification or allows redirects for
-    # one URL (a value other than cachew's own). The wrapper reads which URL,
-    # and keeps the token off a request to the cache that the setting weakens.
-    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get-regexp '^http\\..*\\.sslverify$' '!^true$' 2>/dev/null)" ] ||
-    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get-regexp '^http\\..*\\.followredirects$' '!^false$' 2>/dev/null)" ]
+  if [ -n "$word" ]; then
+    [ -z "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ] || exit 0
+    [ -z "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word.command" 2>/dev/null)" ] || exit 0
+  fi
+  # A setting that turns off certificate verification or allows redirects for
+  # one URL (a value other than cachew's own). The wrapper reads which URL,
+  # and keeps the token off a request to the cache that the setting weakens:
+  # any command may make one (a lazy fetch, the git-lfs filter of a checkout).
+  "$CACHEW_REAL_GIT" "$@" config --get-regexp '^http\\..*\\.(sslverify|followredirects)$' 2>/dev/null | {{
+    while IFS= read -r setting; do
+      case "$setting" in *.sslverify\\ true|*.followredirects\\ false) ;; *) exit 0 ;; esac
+    done
+    exit 1
+  }}
 )
 # Git lets GIT_SSL_NO_VERIFY override http.sslVerify, for any command that
 # reaches the cache: the wrapper then keeps the token off its requests. So it
@@ -628,8 +636,8 @@ for argument in "$@"; do
     -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--attr-source) skip=1 ;;
     -*) ;;
     clone|fetch|ls-remote|push|pull|submodule|remote) {wrapper} ;;
-    {LOCAL_COMMANDS}) break ;;
-    *) if aliased "$options" "$argument" "$@"; then {wrapper}; fi; break ;;
+    {LOCAL_COMMANDS}) if wrapped "$options" "" "$@"; then {wrapper}; fi; break ;;
+    *) if wrapped "$options" "$argument" "$@"; then {wrapper}; fi; break ;;
   esac
   options=$((options + 1))
 done

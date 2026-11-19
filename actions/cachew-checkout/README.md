@@ -195,11 +195,11 @@ fails with a 401 and no upstream retry.
 The shim on `PATH` starts the wrapper only when it has to: for the network
 commands and aliases, for any command when `GIT_SSL_NO_VERIFY`,
 `GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS` is set or a `-c`/`--config-env`
-option names an `http.*` setting or an include, and for a command it does not know (`git lfs`)
-when the job's files hold a weakening `http.<url>.*` setting. Two cases stay
-uncovered: Git run by its full path, and a command the shim knows as local
-(`git show`, `git checkout`) that lazily fetches into an unpinned partial clone
-while the job's files hold such a setting for the cache.
+option names an `http.*` setting or an include, and for any other command
+(`git checkout`, `git show`, `git lfs`) when the job's files hold a weakening
+`http.<url>.*` setting. To find that out, the shim runs one `git config` before
+each command it would otherwise pass straight to Git. One case stays
+uncovered: Git run by its full path.
 Settings that choose which certificates to trust or
 which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `http.proxy`,
 `https_proxy`) are the job's own and stay in effect. The cache checkout's Git reads

@@ -1289,7 +1289,23 @@ class SessionTests(unittest.TestCase):
         self.real_git("config", "--global", "http.https://elsewhere.example/.sslVerify", "false")
         result = subprocess.run([str(shim), "count-objects"], **local)
         self.assertEqual(result.returncode, 99, result.stderr)
+        marker.unlink()
+        # So does a command the shim knows as local: its lazy fetch, or the
+        # git-lfs filter of a checkout, may reach the cache under that setting.
+        for arguments in (["status"], ["-C", ".", "show", "--no-patch"]):
+            result = subprocess.run([str(shim), *arguments], **local)
+            self.assertEqual(result.returncode, 99, (arguments, result.stderr))
+            self.assertTrue(marker.exists(), arguments)
+            marker.unlink()
         self.real_git("config", "--global", "--unset", "http.https://elsewhere.example/.sslVerify")
+        self.real_git("config", "--global", "http.https://elsewhere.example/.followRedirects", "true")
+        result = subprocess.run([str(shim), "status"], **local)
+        self.assertEqual(result.returncode, 99, result.stderr)
+        marker.unlink()
+        self.real_git("config", "--global", "--unset", "http.https://elsewhere.example/.followRedirects")
+        result = subprocess.run([str(shim), "status"], **local)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
         shim.write_text(text)
         self.finish()
 

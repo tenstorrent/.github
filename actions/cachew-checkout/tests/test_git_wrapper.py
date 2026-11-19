@@ -858,6 +858,14 @@ class DownstreamGitTests(unittest.TestCase):
             result = self.git_result("-c", f"init.templateDir={template}", "clone", url, destination)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(self.cache.requests), requests)
+        with self.subTest("the last init.templateDir, as Git reads it"):
+            plain = self.root / "plain-template"
+            plain.mkdir()
+            requests = len(self.cache.requests)
+            chosen = ["-c", f"init.templateDir={plain}", "-c", f"init.templateDir={template}"]
+            result = self.git_result(*chosen, "clone", url, str(self.root / "cloned-last"))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.cache.requests), requests)
         requests = len(self.cache.requests)
         harmless = ["-c", "http.https://elsewhere.example/.sslVerify=false", "-b", "main", "-o", "c"]
         self.assertEqual(self.git_result("clone", *harmless, url, str(self.root / "cloned-cache")).returncode, 0)
