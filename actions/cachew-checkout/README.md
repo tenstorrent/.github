@@ -166,8 +166,11 @@ so each keeps reads off the cache:
   it finds, so the job's can outrank cachew's. The wrapper sends such a clone,
   fetch or `ls-remote` upstream. Git run past the wrapper is not checked.
 
-A step that sets `GIT_SSL_NO_VERIFY` only for itself, after the checkout, is
-covered for commands that go through the wrapper and not for Git run past it.
+A step that sets `GIT_SSL_NO_VERIFY` only for itself, after the checkout, keeps
+its cache rewrite. Every `git` command of that step goes through the wrapper,
+which sends the cache no token from the commands it does not route (a lazy fetch,
+`git lfs`): a private repository's read through the cache then fails with a 401
+and no upstream retry. Git run by its full path is not covered.
 Settings that choose which certificates to trust or
 which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `http.proxy`,
 `https_proxy`) are the job's own and stay in effect. The cache checkout's Git reads
@@ -360,6 +363,10 @@ plain `actions/checkout` where cachew can never serve the checkout:
   `windows-*`, `macos-*`), where cachew is a no-op; cachew pins there are
   turned back into `actions/checkout`. Labels behind expressions or
   reusable-workflow inputs cannot be seen;
+- `uses:` lines that are text, not steps: the content of a block scalar (`run: |`)
+  and the later lines of a quoted scalar that spans lines. A pin to this action
+  there is still moved to `action_sha`, since `--verify-pins` holds every mention
+  to it;
 - gh-aw generated `*.lock.yml` files and their `.md` sources;
 - paths under an `exclude` prefix.
 

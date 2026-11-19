@@ -1236,6 +1236,12 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 99, arguments)
             self.assertTrue(marker.exists(), arguments)
             marker.unlink()
+        # With GIT_SSL_NO_VERIFY any command may reach the cache unverified (a
+        # lazy fetch, say): the wrapper keeps the token off those requests.
+        unverified = dict(self.env, GIT_SSL_NO_VERIFY="")
+        result = subprocess.run([str(shim), "status"], cwd=self.fixture.target, env=unverified, capture_output=True)
+        self.assertEqual(result.returncode, 99, result.stderr)
+        self.assertTrue(marker.exists())
         shim.write_text(text)
         self.finish()
 

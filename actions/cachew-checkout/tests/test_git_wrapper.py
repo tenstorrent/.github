@@ -769,6 +769,23 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(Path(included).is_relative_to(self.session), included)
         self.assertEqual(Path(included).stat().st_mode & 0o077, 0)
 
+    def test_a_command_that_turns_off_verification_sends_the_cache_no_token(self):
+        # GIT_SSL_NO_VERIFY overrides http.sslVerify. A command the wrapper does
+        # not route (here a lazy fetch of a clone Git made by its full path, so
+        # unpinned) would send the cache its token over an unverified connection.
+        self.history("lazy")
+        destination = self.root / "lazy"
+        url = self.upstream.url + "/org/lazy"
+        subprocess.run(
+            [self.real_git, "clone", "--quiet", "--filter=blob:none", url, str(destination)], env=self.env, check=True
+        )
+        requests = len(self.cache.requests)
+        env = dict(self.env, GIT_SSL_NO_VERIFY="")
+        result = self.git_result("-C", str(destination), "show", "HEAD~1:content.txt", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreater(len(self.cache.requests), requests)
+        self.assertEqual({auth for _, _, auth in self.cache.requests[requests:]}, {None})
+
     def test_a_job_setting_that_weakens_cache_requests_keeps_the_read_off_the_cache(self):
         # A request to the cache can carry the token. Where the job's own
         # configuration, for the cache's host, turns off certificate verification

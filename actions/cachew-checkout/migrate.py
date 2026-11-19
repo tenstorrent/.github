@@ -99,6 +99,14 @@ BLOCK_SCALAR = re.compile(r"(?:^[ \t]*|[:\-][ \t]+)(?:[!&]\S*[ \t]+)*[|>](?:[+-]
 # The start of a line that holds block sequence entries: `- `, `- - `.
 ENTRIES = re.compile(r"[ \t]*(?:-[ \t]+)*")
 ITEM_SCALAR = re.compile(r"(?:[!&]\S*[ \t]+)*[|>]")
+# Where a node starts on a line: after white space and any tags and anchors.
+NODE_START = re.compile(r"[ \t]*(?:[!&]\S*[ \t]+)*")
+# A plain key and the `: ` after it; the `:` that follows a quoted key.
+PLAIN_KEY = re.compile(r"[^\s#'\"{\[|>][^#]*?:(?:[ \t]+|$)")
+KEY_END = re.compile(r"[ \t]*:(?:[ \t]+|$)")
+# In a flow collection, a quote that starts a node, and a comment.
+FLOW_QUOTE = re.compile(r"(?:^|[{\[,:])[ \t]*(?P<quote>['\"])")
+COMMENT = re.compile(r"(?:^|[ \t])#")
 
 
 def lines(text):
@@ -172,23 +180,96 @@ def hosted_jobs(text):
     return spans
 
 
+def quote_end(text, at, quote):
+    """The index after the quote that closes a quoted scalar whose content starts
+    at `at`, or -1 if the scalar goes on past this line."""
+    while at < len(text):
+        if text[at] == "\\" and quote == '"':
+            at += 2
+        elif text[at] != quote:
+            at += 1
+        elif quote == "'" and text[at + 1 : at + 2] == "'":
+            at += 2
+        else:
+            return at + 1
+    return -1
+
+
+def open_quote(text, at=0, state=None):
+    """(quote, flow) for the quoted scalar still open at the end of a line, or
+    None. `state` is that of a scalar already open where the line starts.
+
+    A quote opens a scalar only where a node starts: after the `- ` entries, after
+    a key's `: `, and in a flow collection after `{`, `[`, `,` or `:`. Anywhere
+    else it is a character of a plain scalar."""
+    quote, flow = state or (None, False)
+    key_seen = False
+    while True:
+        if quote:
+            at = quote_end(text, at, quote)
+            if at < 0:
+                return quote, flow
+            quote = None
+            if not flow:
+                # A quoted key (`"run": ...`) is followed by its value.
+                after = KEY_END.match(text, at)
+                if not after or key_seen:
+                    return None
+                key_seen, at = True, after.end()
+                continue
+        if flow:
+            # To the next quote that starts a node of the flow collection.
+            opener = FLOW_QUOTE.search(text, at)
+            if not opener or COMMENT.search(text, at, opener.start()):
+                return None
+            quote, at = opener["quote"], opener.end()
+            continue
+        at = NODE_START.match(text, at).end()
+        if text[at : at + 1] in ('"', "'"):
+            quote, at = text[at], at + 1
+        elif text[at : at + 1] in ("{", "["):
+            flow = True
+        else:
+            # A plain key, then its value; a plain value holds no quoted scalar.
+            after = PLAIN_KEY.match(text, at)
+            if not after or key_seen:
+                return None
+            key_seen, at = True, after.end()
+
+
 def block_scalars(text):
-    """Character ranges of block scalar content: scripts and other embedded text,
-    where a `uses:` line is not a step."""
-    spans, parent, start, offset = [], None, None, 0
+    """Character ranges of scalar content that is not on its key's line: block
+    scalars and the later lines of quoted scalars. They hold scripts and other
+    embedded text, where a `uses:` line is not a step."""
+    spans, parent, start, offset, quoted, previous = [], None, None, 0, None, -1
     for line in lines(text):
         content = line.strip()
         indent = len(line) - len(line.lstrip(" \t"))
+        bare = line.rstrip("\r\n")
+        if quoted:
+            spans.append((offset, offset + len(line)))
+            quoted = open_quote(bare, 0, quoted)
+            offset += len(line)
+            continue
         if parent is not None and content and indent <= parent:
             spans.append((start, offset))
             parent = None
-        if parent is None and content and not content.startswith("#") and BLOCK_SCALAR.search(line.rstrip("\r\n")):
-            # The scalar's content is indented past the node that holds it: the
-            # key after `- ` (so a sibling key of that step ends it), or the `-`
-            # itself when the entry is the scalar.
+        if parent is None and content and not content.startswith("#"):
             entries = ENTRIES.match(line)[0]
-            holder = len(entries) if not ITEM_SCALAR.match(line, len(entries)) else len(entries.rstrip()) - 1
-            parent, start = max(indent, holder), offset + len(line)
+            if BLOCK_SCALAR.search(bare):
+                # The scalar's content is indented past the node that holds it: the
+                # key after `- ` (so a sibling key of that step ends it), the `-`
+                # itself when the entry is the scalar, or the line before when the
+                # indicator stands alone on its line.
+                item = ITEM_SCALAR.match(line, len(entries))
+                if item and "-" not in entries:
+                    parent = previous
+                else:
+                    parent = max(indent, len(entries.rstrip()) - 1 if item else len(entries))
+                start = offset + len(line)
+            else:
+                quoted = open_quote(bare, len(entries))
+            previous = len(entries)
         offset += len(line)
     if parent is not None:
         spans.append((start, offset))

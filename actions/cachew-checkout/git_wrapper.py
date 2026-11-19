@@ -33,6 +33,7 @@ from checkout import (  # noqa: E402
     MAX_DEADLINE_SECONDS,
     MAX_FETCH_TIMEOUT_SECONDS,
     TLS_OVERRIDES,
+    apply_git_config,
     transport_error,
 )
 from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed, subsection  # noqa: E402
@@ -546,6 +547,15 @@ def run(arguments, environ):
         arguments, index = resolved
     command = arguments[index]
     target = CloneTarget(arguments, index, environ)
+    # For the commands that run as they are. Git lets GIT_SSL_NO_VERIFY override
+    # http.sslVerify, and any of them may reach the cache on its own (a lazy
+    # fetch, a helper such as git-lfs): those requests then carry no token. The
+    # empty values, read after the job's files, clear cachew's headers.
+    direct = environ
+    if not disabled and any(name in environ for name in TLS_OVERRIDES):
+        headers = dict.fromkeys(key for key, _ in state.get("managed", []) if key.lower().endswith(".extraheader"))
+        direct = dict(environ)
+        apply_git_config(direct, [(key, "") for key in headers], append=True)
 
     def done(result):
         # Whatever the command's exit status: one that fails partway (a submodule
@@ -599,10 +609,10 @@ def run(arguments, environ):
         with UpstreamView(real_git, environ, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     if command not in ("clone", "fetch", "ls-remote"):
-        return subprocess.call([real_git, *arguments], env=environ)
+        return subprocess.call([real_git, *arguments], env=direct)
     remotes = fetch_remotes(real_git, arguments, index, environ) if command == "fetch" else None
     if remotes is None and not reaches_cache(real_git, arguments, index, environ, state.get("cache")):
-        return subprocess.call([real_git, *arguments], env=environ)
+        return subprocess.call([real_git, *arguments], env=direct)
     if remotes is not None and not all(
         reaches_cache(real_git, arguments, index, environ, state.get("cache"), remote) for remote in remotes
     ):

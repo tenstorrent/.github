@@ -605,6 +605,9 @@ aliased() (
   [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ] ||
     [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word.command" 2>/dev/null)" ]
 )
+# Git lets GIT_SSL_NO_VERIFY override http.sslVerify, for any command that
+# reaches the cache: the wrapper then keeps the token off its requests.
+[ -z "${{GIT_SSL_NO_VERIFY+set}}" ] || {wrapper}
 skip=0
 options=0
 for argument in "$@"; do

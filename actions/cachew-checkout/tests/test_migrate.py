@@ -137,6 +137,31 @@ jobs:
 """
         self.assertEqual(migrate.rewrite(before, SHA), expected)
 
+    def test_uses_lines_inside_a_quoted_or_detached_scalar_are_text_not_steps(self):
+        line = "uses: actions/checkout@v7.0.1"
+        step = f"      - {line}\n"
+        migrated = f"      - uses: {migrate.ACTION_REPO}@{SHA} # cachew checkout\n"
+        head = "jobs:\n  build:\n    runs-on: [self-hosted]\n    steps:\n"
+        for name, script in {
+            "double quoted": f'      - run: "echo\n          {line}\n          done"\n',
+            "single quoted": f"      - run: 'echo ''\n          {line}\n          done'\n",
+            "escaped quote and line break": f'      - run: "a \\"\\\n          {line}\n          "\n',
+            "quoted on the next line": f'      - run:\n          "a\n          {line}\n          "\n',
+            "quoted key": f'      - "run": "a\n          {line}\n          "\n',
+            "flow mapping": f'      - {{name: x, run: "a\n          {line}\n          "}}\n',
+            "indicator on the next line": f"      - run:\n          |\n          {line}\n",
+            "indicator under a sequence entry": (
+                f"      - run:\n          - x\n          -\n            >-\n            {line}\n"
+            ),
+        }.items():
+            with self.subTest(name):
+                text = head + step + script + step
+                self.assertEqual(migrate.rewrite(text, SHA), head + migrated + script + migrated)
+        # Quotes inside a plain scalar open nothing.
+        for plain in ('      - run: echo "unclosed\n', "      - name: it's\n", '      - run: a "b" \'c\n'):
+            with self.subTest(plain):
+                self.assertEqual(migrate.rewrite(head + plain + step, SHA), head + plain + migrated)
+
     def test_uses_lines_inside_a_script_are_text_not_steps(self):
         def workflow(step, embedded_pin, hosted_pin):
             return (
