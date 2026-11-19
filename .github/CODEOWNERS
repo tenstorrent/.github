@@ -1,0 +1,11 @@
+# Code owners for tenstorrent/.github.
+# GitHub asks an owner for review when a pull request changes a matching path.
+# The last matching pattern wins.
+
+# Shared action for OSPO Vault tokens and secrets, its test workflow and its skill.
+/actions/vault-secrets/                      @jbakerTT
+/.github/workflows/vault-secrets-test.yml    @jbakerTT
+/skills/vault-secrets-workflow/              @jbakerTT
+
+# This file.
+/.github/CODEOWNERS                          @jbakerTT

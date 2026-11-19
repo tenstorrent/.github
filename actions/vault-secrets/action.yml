@@ -1,0 +1,166 @@
+name: OSPO Vault secrets
+description: >-
+  Joins the tailnet if needed, logs in to OSPO Vault with the job's GitHub OIDC
+  token, and gets an ephemeral GitHub token and/or Vault secrets.
+  The job needs `permissions: id-token: write`. See README.md.
+
+inputs:
+  role:
+    description: Vault role of this workflow (jwt-github), for example `<org>--<repo>` or `<org>--<repo>--<name>`.
+    required: true
+  github-token:
+    description: >-
+      Name of a GitHub token in Vault. A bare name reads `github/token/<name>`.
+      A value with `/` is the full path, for example `github-members/token/<name>`.
+      The token goes to output `token`.
+    required: false
+    default: ""
+  secrets:
+    description: >-
+      Secrets to read, in hashicorp/vault-action `secrets` syntax
+      (`<path> <field> | <NAME> ;` per line). The values go to output `secrets` (JSON).
+    required: false
+    default: ""
+  vault-url:
+    description: >-
+      Vault URL. Only the OSPO Vault production URL (default) and the staging URL
+      are allowed. The JWT audience is always this URL.
+    required: false
+    default: https://vault-ospo.eng-svc.aws.tenstorrent.com
+  join-tailnet:
+    description: >-
+      `auto`: join the tailnet unless the runner is already on it.
+      `true`: always join. `false`: never join.
+    required: false
+    default: auto
+  tailscale-client-id:
+    description: >-
+      Tailscale OAuth client ID for workload identity federation. Not a secret.
+      The default is the org variable TS_VAULT_OSPO_CLIENT_ID (same value in all six orgs).
+    required: false
+    default: T3ZY7MLEet11CNTRL-kf8wcW3CAv11CNTRL
+  tailscale-audience:
+    description: >-
+      Tailscale OIDC audience. Not a secret.
+      The default is the org variable TS_VAULT_OSPO_AUDIENCE (same value in all six orgs).
+    required: false
+    default: tailscale-gha-vault-ospo
+  tailscale-tags:
+    description: Tailscale tags for the runner node.
+    required: false
+    default: tag:tt-gha-vault-ospo
+  vault-timeout-seconds:
+    description: >-
+      Time limit of the Vault login and read, in seconds (10 to 600). After this
+      time the action stops the Vault step and fails with failed-step `vault`.
+    required: false
+    default: "120"
+
+outputs:
+  token:
+    description: The GitHub token from `github-token`. Empty when `github-token` is not set or the action failed. Masked in logs.
+    value: ${{ steps.check.outcome == 'success' && steps.vault.outputs.VAULT_SECRETS_GITHUB_TOKEN || '' }}
+  secrets:
+    description: >-
+      JSON object with one key per name in `secrets`. When `github-token` is set,
+      it also has the key VAULT_SECRETS_GITHUB_TOKEN. `{}` when the action failed.
+      Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Values are masked in logs.
+    value: ${{ steps.check.outcome == 'success' && toJSON(steps.vault.outputs) || '{}' }}
+  failed-step:
+    description: >-
+      The step of the action that failed: `prepare`, `join`, `wait`, `vault` or `check`.
+      Empty when the action succeeds. The runner sets composite outputs also when a step fails.
+    value: >-
+      ${{
+        steps.prepare.outcome == 'failure' && 'prepare' ||
+        steps.join.outcome == 'failure' && 'join' ||
+        steps.wait.outcome == 'failure' && 'wait' ||
+        steps.watchdog.outcome == 'failure' && 'vault' ||
+        steps.vault.outcome == 'failure' && 'vault' ||
+        steps.watchdog_stop.outcome == 'failure' && 'vault' ||
+        steps.check.outcome == 'failure' && 'check' || ''
+      }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs and job
+      id: prepare
+      shell: bash
+      env:
+        IN_ROLE: ${{ inputs.role }}
+        IN_GITHUB_TOKEN: ${{ inputs.github-token }}
+        IN_SECRETS: ${{ inputs.secrets }}
+        IN_VAULT_URL: ${{ inputs.vault-url }}
+        IN_JOIN_TAILNET: ${{ inputs.join-tailnet }}
+        IN_TS_CLIENT_ID: ${{ inputs.tailscale-client-id }}
+        IN_TS_AUDIENCE: ${{ inputs.tailscale-audience }}
+        IN_TS_TAGS: ${{ inputs.tailscale-tags }}
+        IN_VAULT_TIMEOUT: ${{ inputs.vault-timeout-seconds }}
+        EVENT_NAME: ${{ github.event_name }}
+      run: bash "$GITHUB_ACTION_PATH/prepare.sh"
+
+    # Do not pass `args: --accept-routes`: the action sets it, and a second copy fails.
+    - name: Join tailnet
+      id: join
+      if: steps.prepare.outputs.join == 'true'
+      uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+      with:
+        oauth-client-id: ${{ inputs.tailscale-client-id }}
+        audience: ${{ inputs.tailscale-audience }}
+        tags: ${{ inputs.tailscale-tags }}
+
+    - name: Wait for Vault
+      id: wait
+      shell: bash
+      env:
+        VAULT_URL: ${{ steps.prepare.outputs.url }}
+      run: bash "$GITHUB_ACTION_PATH/wait-for-vault.sh"
+
+    # Composite steps cannot have timeout-minutes, and vault-action has no
+    # request timeout. A background watchdog stops the Vault step at the limit.
+    - name: Start time limit for Vault
+      id: watchdog
+      shell: bash
+      env:
+        VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
+      run: bash "$GITHUB_ACTION_PATH/watchdog.sh" start
+
+    # vault-action masks every value it reads (core.setSecret, per line).
+    - name: Log in to Vault and read
+      id: vault
+      uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+      with:
+        url: ${{ steps.prepare.outputs.url }}
+        method: jwt
+        path: jwt-github
+        role: ${{ inputs.role }}
+        jwtGithubAudience: ${{ steps.prepare.outputs.url }}
+        exportEnv: false
+        # Defaults of vault-action v4.0.0, set here so that a later version cannot change them:
+        # the Vault login token never goes to the environment or to the outputs.
+        exportToken: false
+        outputToken: false
+        secrets: ${{ steps.prepare.outputs.spec }}
+
+    # Runs also when the Vault step failed or the job was cancelled, so that
+    # no watchdog stays behind. Fails if the watchdog stopped the Vault step.
+    # Warns if the Vault step ran and the watchdog did not find its process.
+    - name: Stop time limit for Vault
+      id: watchdog_stop
+      if: always() && steps.watchdog.outcome == 'success'
+      shell: bash
+      env:
+        WATCHDOG_ID: ${{ steps.watchdog.outputs.id }}
+        VAULT_OUTCOME: ${{ steps.vault.outcome }}
+        VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
+      run: bash "$GITHUB_ACTION_PATH/watchdog.sh" stop
+
+    # Vault can hold an empty string, and vault-action passes it on without an
+    # error. An empty value is always an error here. Names only in the log.
+    - name: Check that no value is empty
+      id: check
+      shell: bash
+      env:
+        VAULT_OUTPUTS: ${{ toJSON(steps.vault.outputs) }}
+      run: bash "$GITHUB_ACTION_PATH/check-values.sh"
