@@ -762,6 +762,41 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(lazy.returncode, 0, lazy.stderr)
         fetch = self.git_result("-C", str(destination), "fetch", "origin", env=env)
         self.assertEqual(fetch.returncode, 0, fetch.stderr)
+        # The credential stays out of the work tree, which a job may upload whole:
+        # the pin that holds it is a session file the repository includes.
+        self.assertNotIn("JOBPAT", (destination / ".git/config").read_text())
+        included = self.run_git("-C", str(destination), "config", "--local", "--get", "include.path")
+        self.assertTrue(Path(included).is_relative_to(self.session), included)
+        self.assertEqual(Path(included).stat().st_mode & 0o077, 0)
+
+    def test_a_job_setting_that_weakens_cache_requests_keeps_the_read_off_the_cache(self):
+        # A request to the cache can carry the token. Where the job's own
+        # configuration, for the cache's host, turns off certificate verification
+        # or allows redirects, Git would apply it: the read goes upstream instead.
+        self.history("guarded")
+        url = self.upstream.url + "/org/guarded"
+        active = self.session / "global.config"
+        for key, value, options in (
+            (f"http.{self.cache.url}/git/.sslVerify", "false", []),
+            (f"http.{self.cache.url}/git/.followRedirects", "true", []),
+            (f"http.{self.cache.url}/.followRedirects", "initial", []),
+            ("", "", ["-c", f"http.{self.cache.url}/.sslVerify=false"]),
+        ):
+            with self.subTest(key=key, options=options):
+                if key:
+                    self.config(active, key, value)
+                requests = len(self.cache.requests)
+                result = self.git_result(*options, "ls-remote", url)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.cache.requests), requests)
+                self.assertIn("Cachew", result.stderr)
+                if key:
+                    subprocess.run([self.real_git, "config", "--file", str(active), "--unset-all", key], check=True)
+        requests = len(self.cache.requests)
+        self.config(active, "http.https://elsewhere.example/.sslVerify", "false")
+        self.config(active, f"http.{self.cache.url}/.sslVerify", "true")
+        self.assertEqual(self.git_result("ls-remote", url).returncode, 0)
+        self.assertGreater(len(self.cache.requests), requests)
 
 
 def load_wrapper():

@@ -750,6 +750,22 @@ class CheckoutTests(unittest.TestCase):
         with patch.object(cachew_checkout.subprocess, "run", side_effect=subprocess.TimeoutExpired("curl", 1)):
             self.assertEqual(cachew_checkout.liveness("https://cachew.example", 1, {}), "retry")
 
+    def test_a_proxy_password_stays_out_of_the_probes_command_line(self):
+        # Other users of the runner can read a process's arguments.
+        seen = []
+
+        def run(command, **options):
+            seen.append((command, options.get("input")))
+            return subprocess.CompletedProcess(command, 0, b"200", b"")
+
+        transport = {"http.proxy": 'http://user:pa"ss@proxy.example:3128'}
+        with patch.object(cachew_checkout.subprocess, "run", side_effect=run):
+            self.assertEqual(cachew_checkout.liveness("https://cache.example", 5, {}, transport), "ok")
+        (command, given), = seen
+        self.assertNotIn("ss@", " ".join(command))
+        self.assertEqual(command[command.index("--config") + 1], "-")
+        self.assertEqual(given, b'proxy = "http://user:pa\\"ss@proxy.example:3128"\n')
+
     def test_curl_configuration_cannot_add_health_auth_or_retry(self):
         (self.home / ".curlrc").write_text('header = "Authorization: unsafe-header"\nretry = 3\nlocation\n')
         self.cache.health = 503

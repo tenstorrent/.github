@@ -13,6 +13,7 @@ After a clone or fetch, partial-clone remotes are pinned upstream the same way,
 since Git's lazy fetches do not pass through this wrapper.
 """
 
+import fnmatch
 import math
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from checkout import (  # noqa: E402
@@ -33,7 +35,7 @@ from checkout import (  # noqa: E402
     TLS_OVERRIDES,
     transport_error,
 )
-from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed  # noqa: E402
+from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed, subsection  # noqa: E402
 
 OPTIONS_WITH_VALUE = {
     "-C",
@@ -419,6 +421,43 @@ def reaches_cache(real_git, arguments, index, environ, cache, repository=""):
     return result.stdout.decode(errors="replace").strip().startswith(cache.rstrip("/") + "/git/")
 
 
+GIT_TRUE = ("true", "yes", "on", "1")
+GIT_FALSE = ("false", "no", "off", "0", "")
+
+
+def weakened(real_git, arguments, index, environ, cache):
+    """The setting, if any, with which the job turns off certificate verification
+    or allows redirects for the cache's host, as this command reads its
+    configuration (files, GIT_CONFIG_COUNT, -c). A request to the cache can
+    carry a token, and Git applies the most specific http.<url>.* it finds, so
+    cachew's own settings cannot outrank one the job scoped more narrowly."""
+    listing = subprocess.run(
+        [real_git, *arguments[:index], "config", "--null", "--list"],
+        env=environ,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    target = urllib.parse.urlsplit(cache)
+    for entry in listing.stdout.decode(errors="surrogateescape").split("\0"):
+        key, separator, value = entry.partition("\n")
+        # A key with no value is true.
+        value = value.lower() if separator else "true"
+        for name, safe in ((".sslverify", GIT_TRUE), (".followredirects", GIT_FALSE)):
+            url = subsection(key, "http.", name)
+            if not url or value in safe:
+                continue
+            try:
+                scope = urllib.parse.urlsplit(url)
+                host = (scope.hostname or "").lower()
+            except ValueError:
+                return key
+            # Git's host wildcard matches one label; this match is wider, which
+            # only keeps more reads off the cache.
+            if scope.scheme.lower() == target.scheme and fnmatch.fnmatchcase(target.hostname or "", host):
+                return key
+    return None
+
+
 def cache_attempt(real_git, arguments, environ, index):
     """Run once through the cache. Returns (exit status, stderr tail)."""
     stall = seconds(environ, "CACHEW_GIT_FETCH_TIMEOUT", DEFAULT_FETCH_TIMEOUT_SECONDS, MAX_FETCH_TIMEOUT_SECONDS)
@@ -524,7 +563,7 @@ def run(arguments, environ):
             pin_env = {key: value for key, value in environ.items() if key not in REPOSITORY_ENVIRONMENT}
         cache = state.get("cache")
         if command != "submodule":
-            pin_promisor_remotes(real_git, location, pin_env, cache)
+            pin_promisor_remotes(real_git, location, pin_env, cache, session)
         if command in ("clone", "submodule"):
             # Filtered submodules are partial clones of their own. NUL-separated:
             # a path may hold a line feed.
@@ -536,7 +575,7 @@ def run(arguments, environ):
             )
             for path in filter(None, listing.stdout.decode(errors="surrogateescape").split("\0")):
                 modules = {key: value for key, value in pin_env.items() if key not in REPOSITORY_ENVIRONMENT}
-                pin_promisor_remotes(real_git, ["-C", path], modules, cache)
+                pin_promisor_remotes(real_git, ["-C", path], modules, cache, session)
         return result
 
     if disabled:
@@ -569,6 +608,11 @@ def run(arguments, environ):
     ):
         # One remote's failure could not be told from the cache's, so a fetch that
         # also reads elsewhere goes upstream once, without the cache rewrite.
+        with UpstreamView(real_git, environ, session, state) as upstream:
+            return done(subprocess.call([real_git, *arguments], env=upstream))
+    cache = state.get("cache")
+    if setting := cache and weakened(real_git, arguments, index, environ, cache):
+        print(f"Cachew is skipped for this operation: {setting} weakens requests to the cache.", file=sys.stderr)
         with UpstreamView(real_git, environ, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     result, errors = cache_attempt(real_git, arguments, environ, index)

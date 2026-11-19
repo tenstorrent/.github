@@ -390,10 +390,18 @@ def liveness(cache, timeout, env, transport=None):
     if transport is None:
         transport = job_transport(env.get("CACHEW_REAL_GIT") or "git", env, cache)
     command = ["curl", "--disable", "--silent", "--fail", "--retry", "0", "--max-time", str(timeout)]
-    command += curl_transport(transport, env)
+    options, proxy = curl_transport(transport, env), None
+    if "--proxy" in options:
+        # A proxy URL may hold a password: curl reads it from standard input, so
+        # it is in no process's arguments.
+        at = options.index("--proxy")
+        proxy = options[at + 1].replace("\\", "\\\\").replace('"', '\\"')
+        options[at : at + 2] = ["--config", "-"]
+    command += options
     command += ["--output", os.devnull, "--write-out", "%{http_code}", cache + "/_liveness"]
+    given = f'proxy = "{proxy}"\n'.encode(errors="surrogateescape") if proxy is not None else None
     try:
-        health = subprocess.run(command, env=env, capture_output=True, timeout=timeout + 0.5)
+        health = subprocess.run(command, env=env, input=given, capture_output=True, timeout=timeout + 0.5)
     except subprocess.TimeoutExpired:
         return "retry"
     if health.returncode == 0 and health.stdout == b"200":

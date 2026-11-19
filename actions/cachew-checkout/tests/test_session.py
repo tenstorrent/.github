@@ -972,6 +972,16 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.real_git("config", "--global", "--get-all", key).split(), ["git@upstream.example:"])
         self.finish()
 
+    def test_a_job_that_turns_off_certificate_verification_gets_no_cache_rewrite(self):
+        # GIT_SSL_NO_VERIFY overrides every http.sslVerify, and Git run past the
+        # wrapper would send the token to the cache unverified.
+        self.env["GIT_SSL_NO_VERIFY"] = ""
+        self.prepare()
+        self.checkout()
+        self.assertFalse(self.activate())
+        self.assertNotIn(self.fixture.cache.url, self.real_git("config", "--global", "--list"))
+        self.finish()
+
     def test_a_cleanup_that_cannot_remove_the_rewrite_keeps_its_tls_protection(self):
         # A lock held for one write: the rewrite stays, so cache requests still
         # happen. They must stay verified whatever the job's own http.sslVerify,

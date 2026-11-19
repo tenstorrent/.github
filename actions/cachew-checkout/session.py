@@ -300,11 +300,40 @@ def remove_cache_keys(real_git, session, state, environ, disable=True):
     return state
 
 
-def pin_promisor_remotes(real_git, location, environ, cache):
+def userinfo(url):
+    """The `user[:password]` of a URL's authority, or ""."""
+    authority = url.partition("://")[2].partition("/")[0]
+    return authority.rpartition("@")[0]
+
+
+def secret_pin(session, target, url):
+    """Write a pin whose target carries a credential to a file of the session
+    directory, for the owner only, and return its path (None if it cannot be
+    written exactly). The credential appears in no process's arguments."""
+
+    def quoted(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    if not session or any(character in target + url for character in "\n\r\0"):
+        return None
+    pins = Path(session) / "pins"
+    pins.mkdir(mode=0o700, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(dir=pins, suffix=".config")
+    with os.fdopen(descriptor, "w", encoding="utf-8", errors="surrogateescape") as file:
+        file.write(f"[url {quoted(target)}]\n\tinsteadOf = {quoted(url)}\n")
+    return name
+
+
+def pin_promisor_remotes(real_git, location, environ, cache, session=None):
     """Git runs a partial clone's lazy fetches itself, not through the wrapper,
     so they would follow the cache rewrite with no upstream retry. Pin each
     promisor remote the rewrite reaches to the URL Git would use without cachew:
-    a repository-local mapping of the whole URL is a longer insteadOf match."""
+    a repository-local mapping of the whole URL is a longer insteadOf match.
+
+    Where the job's own rewrite adds a credential to that URL, the pin goes to
+    a file of the session directory that the repository includes, so the
+    credential is not copied into the work tree. Without a session directory
+    such a remote is left unpinned."""
     if not cache:
         return
     prefix = cache.rstrip("/") + "/git/"
@@ -331,8 +360,17 @@ def pin_promisor_remotes(real_git, location, environ, cache):
         remote = key[len("remote.") : -len(".promisor")]
         # A filtered fetch from a URL records the URL itself as the promisor remote.
         url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
-        if value.lower() == "true" and run("ls-remote", "--get-url", remote).startswith(prefix):
-            run("config", "--local", "--add", f"url.{without_cachew(url)}.insteadOf", url)
+        if value.lower() != "true" or not run("ls-remote", "--get-url", remote).startswith(prefix):
+            continue
+        target = without_cachew(url)
+        if userinfo(target) == userinfo(url):
+            run("config", "--local", "--add", f"url.{target}.insteadOf", url)
+        elif pin := secret_pin(session, target, url):
+            read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
+            if read == f"url.{target}.insteadof\n{url}\0":
+                run("config", "--local", "--add", "include.path", pin)
+            else:
+                os.unlink(pin)
 
 
 def subsection(key, prefix, suffix):
@@ -612,7 +650,7 @@ def activate(environ):
     # Then, whatever fails below: a rewrite an earlier activation left in a
     # locked file still redirects this checkout's lazy fetches.
     if inside:
-        pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"))
+        pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"), session)
     settings = Settings(environ)
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
@@ -640,7 +678,13 @@ def activate(environ):
     cache = environ.get("CACHEW_SELECTED_URL", "")
     if cache not in (settings.caches or []):
         cache = ""
-    if not settings.valid or disabled.exists():
+    # Git lets GIT_SSL_NO_VERIFY override every http.sslVerify. The wrapper drops
+    # it from its own cache attempts, but Git run past the wrapper (by its full
+    # path, a lazy fetch) would send the token to the cache unverified.
+    unverified = [name for name in TLS_OVERRIDES if name in environ]
+    if unverified:
+        print(f"::notice::Cachew is off for later steps: {unverified[0]} is set, and cache requests carry a token.")
+    if not settings.valid or disabled.exists() or unverified:
         available = "false"
     elif available == "true" and not cache:
         available = "unknown"
@@ -691,7 +735,7 @@ def activate(environ):
         append_locked(global_config, render(entries))
         state["active"] = True
         if inside:
-            pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache)
+            pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache, session)
         write_state(session, state)
         wrapper = session / "bin"
         wrapper.mkdir(mode=0o700, exist_ok=True)

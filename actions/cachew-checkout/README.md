@@ -153,7 +153,22 @@ gc.auto = 0
 Tokens are scoped to cache URLs, and requests that can carry one always use
 verified TLS and never follow a redirect: the two `http.<cachew>/` settings
 above, with `GIT_SSL_NO_VERIFY` dropped from the cache checkout and from the
-wrapper's cache attempt. Settings that choose which certificates to trust or
+wrapper's cache attempt. Two things the job can do would get past those settings,
+so each keeps reads off the cache:
+
+- `GIT_SSL_NO_VERIFY` set for the checkout step, which is the case when the job
+  sets it. Git lets the variable override every `http.sslVerify`, and Git run
+  past the wrapper (by its full path, or for a lazy fetch) would keep it. The
+  checkout itself still uses the cache; later steps get no cache rewrite.
+- A `http.<url>.sslVerify` that is false, or a `http.<url>.followRedirects` that
+  is not false, for the cache's host, in any configuration the command reads
+  (files, `GIT_CONFIG_COUNT`, `-c`). Git applies the most specific `http.<url>.*`
+  it finds, so the job's can outrank cachew's. The wrapper sends such a clone,
+  fetch or `ls-remote` upstream. Git run past the wrapper is not checked.
+
+A step that sets `GIT_SSL_NO_VERIFY` only for itself, after the checkout, is
+covered for commands that go through the wrapper and not for Git run past it.
+Settings that choose which certificates to trust or
 which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `http.proxy`,
 `https_proxy`) are the job's own and stay in effect. The cache checkout's Git reads
 no configuration file, so it is given the job's values of those settings for the
@@ -161,7 +176,8 @@ server and for the cache (`http.proxy`, `http.noProxy`, `http.sslCAInfo`,
 `http.sslCAPath`, `http.sslCert`, `http.sslKey` and their kin, with a
 `http.<url>.` value preferred as Git prefers it). The liveness probe passes the same
 proxy and certificates to curl, which reads neither Git's configuration nor
-`GIT_SSL_CAINFO`. The `token` input itself is not in the environment of
+`GIT_SSL_CAINFO`; the proxy URL, which may hold a password, goes to curl on
+standard input. The `token` input itself is not in the environment of
 any process the action starts. During the cache checkout, Git receives it as an
 `Authorization` header in command-scoped configuration (`GIT_CONFIG_VALUE_<n>`),
 which every process Git starts inherits: the job's own hooks, filter drivers and
@@ -250,9 +266,12 @@ partial clone's lazy fetches itself, past the wrapper, so after a clone, fetch, 
 `remote` or `submodule` command, whether or not it succeeded, each promisor remote the cache rewrite reaches, in the
 repository and in its submodules, is pinned with a repository-local `insteadOf`,
 as the checkout's `origin` is. The pin maps the remote's URL to the URL Git would
-use without cachew. If the job has its own `insteadOf` for that URL, the pin
-copies its result, including a credential in it, into the repository's
-`.git/config`. A partial clone made by a shell alias is not pinned.
+use without cachew. If the job has its own `insteadOf` for that URL that adds a
+credential, the pin is written to a file under `pins/` in the session directory,
+readable by the owner only, and the repository's `.git/config` gets an
+`include.path` naming it: the credential is not copied into the work tree, and
+the pin ends when the runner empties `RUNNER_TEMP`. A partial clone made by a
+shell alias is not pinned.
 
 Native recursive clones, submodule and `remote` commands, initialized-submodule
 fetches, pushes and pulls use upstream directly. So does a shell alias (`!...`):
