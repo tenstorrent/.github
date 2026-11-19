@@ -168,7 +168,11 @@ so each keeps reads off the cache:
   `GIT_TEMPLATE_DIR`, `init.templateDir`), and every file a conditional include
   names, in the job's files or the template's, whatever its condition, since
   one keyed on the new repository's directory or remote URL applies only once
-  the clone has created it. The wrapper reads up to 30 such files; a clone
+  the clone has created it. A relative include path is read where Git will
+  resolve it: from the new repository's Git directory (`<destination>/.git`,
+  the destination of a bare clone, or `--separate-git-dir`) for the clone's
+  own options and for files copied from the template. The wrapper reads up to
+  30 such files; a clone
   with more goes upstream. Git applies the most specific `http.<url>.*`
   it finds, so the job's can outrank cachew's. The wrapper sends such a clone,
   fetch or `ls-remote` upstream.

@@ -505,41 +505,81 @@ def weakened(real_git, arguments, index, environ, cache):
         # Relative to the file that includes it.
         return os.path.join(directory, path)
 
-    def conditional(*source):
-        """The files that conditional includes name, whatever their condition:
-        the Git directory or the remote URL of a repository that does not exist yet."""
-        fields = read(*source, "--show-origin", "--get-regexp", r"^includeif\..*\.path$")
+    # Where the new repository's Git directory will be, and the template its
+    # first files are copied from.
+    homes, copied = [], None
+
+    def placed(directory):
+        """Where Git resolves the relative includes of a file in `directory`:
+        there and, for a file the clone copies from its template, in the new
+        Git directory, which does not exist yet."""
+        yield directory
+        if copied:
+            inside = os.path.relpath(os.path.realpath(directory), copied)
+            if inside.split(os.sep)[0] != os.pardir:
+                for home in homes:
+                    yield os.path.normpath(os.path.join(home, inside))
+
+    def included(*source):
+        """The files a clone's new repository includes that the listing of
+        `source` does not follow: those of conditional includes, whatever their
+        condition (the Git directory or the remote URL of a repository that does
+        not exist yet), and those a copied file names relative to itself."""
+        fields = read(*source, "--show-origin", "--get-regexp", r"^include(if\..*)?\.path$")
         for origin, entry in zip(fields[0::2], fields[1::2]):
+            key, _, path = entry.partition("\n")
             file = origin[5:] if origin.startswith("file:") else ""
-            yield located(entry.partition("\n")[2], os.path.dirname(working_directory(arguments, index) / file))
+            directory = os.path.dirname(working_directory(arguments, index) / file)
+            for copy, place in enumerate(placed(directory)):
+                if copy:
+                    # Git resolves it once that directory exists.
+                    yield os.path.normpath(located(path, place))
+                elif key.startswith("includeif."):
+                    yield located(path, place)
 
     entries = listed()
     if arguments[index] == "clone":
         # A clone gives its new repository the settings of its -c/--config
         # options and of its template directory before it fetches.
-        settings, template = clone_settings(arguments[index + 1 :])
+        tail = arguments[index + 1 :]
+        settings, template = clone_settings(tail)
         own = [setting.partition("=") for setting in settings]
         entries += own
         template = template or environ.get("GIT_TEMPLATE_DIR")
         if template is None:
             template = next((value for key, _, value in entries if key == "init.templatedir"), None)
-        pending, seen = list(conditional()), set()
+        directory = working_directory(arguments, index)
+        destination = clone_destination(arguments, index)
+        separate = option_value(tail, "--separate-git-dir", "--sep")
+        if separate:
+            homes = [os.path.realpath(directory / separate)]
+        elif destination:
+            # Itself for a bare or mirror clone: reading both only keeps more
+            # clones off the cache.
+            homes = [os.path.realpath(destination), os.path.realpath(destination / ".git")]
+        pending, seen = [], set()
         if template:
             template = located(template, "")
+            copied = os.path.realpath(directory / template)
             entries += listed("--file", os.path.join(template, "config"))
-            pending += conditional("--file", os.path.join(template, "config"))
+            pending += included("--file", os.path.join(template, "config"))
+        pending += included()
         for key, _, value in own:
             # The new repository's configuration then includes the file, from its
             # Git directory, which starts as a copy of the template.
             section, _, variable = key.lower().rpartition(".")
             if variable == "path" and section.partition(".")[0] in ("include", "includeif"):
-                pending.append(located(value, template or ""))
+                if not homes and not os.path.isabs(located(value, "")):
+                    return f"{key}, relative to a Git directory the guard cannot place"
+                pending += [os.path.normpath(located(value, home)) for home in homes or [""]]
+                if copied:
+                    pending.append(located(value, template))
         while pending and len(seen) < MAX_CONDITIONAL_INCLUDES:
             path = pending.pop()
             if path not in seen:
                 seen.add(path)
                 entries += listed("--file", path)
-                pending += conditional("--file", path)
+                pending += included("--file", path)
         if any(path not in seen for path in pending):
             # Unread files could hold anything: the guard never passes on a guess.
             return f"a conditional include past the {MAX_CONDITIONAL_INCLUDES} files read"

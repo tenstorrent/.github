@@ -897,6 +897,37 @@ class DownstreamGitTests(unittest.TestCase):
                 if key:
                     subprocess.run([self.real_git, "config", "--file", str(active), "--unset-all", key], check=True)
 
+    def test_relative_includes_of_a_clone_resolve_from_its_new_git_directory(self):
+        # Git resolves a relative include against the directory of the file that
+        # holds it: for the new repository's configuration, its Git directory,
+        # wherever the template that configuration was copied from is.
+        self.history("relative")
+        url = self.upstream.url + "/org/relative"
+        work = self.root / "relative"
+        (work / "deep" / "er" / "template" / "sub").mkdir(parents=True)
+        (work / "nested" / "x" / "template" / "sub").mkdir(parents=True)
+        (work / "separate").mkdir()
+        self.config(work / "weak.config", f"http.{self.cache.url}/git/.sslVerify", "false")
+        self.config(work / "deep" / "er" / "template" / "config", "include.path", "../../weak.config")
+        self.config(work / "nested" / "x" / "template" / "config", "include.path", "sub/more.config")
+        self.config(work / "nested" / "x" / "template" / "sub" / "more.config", "include.path", "../../../weak.config")
+        up = "include.path=../../weak.config"
+        cases = (
+            ("work tree", [], ["-c", up], str(work / "a")),
+            ("bare", [], ["--bare", "-c", "include.path=../weak.config"], str(work / "b.git")),
+            ("separate", [], ["--separate-git-dir", str(work / "separate" / "git"), "-c", up], str(work / "c")),
+            ("relative destination", ["-C", str(work)], ["-c", up], "d"),
+            ("conditional", [], ["-c", f"includeIf.gitdir:{work.resolve()}/.path=../../weak.config"], str(work / "e")),
+            ("template", [], ["--template", str(work / "deep" / "er" / "template")], str(work / "f")),
+            ("template file", [], ["--template", str(work / "nested" / "x" / "template")], str(work / "g")),
+        )
+        for name, before, options, destination in cases:
+            with self.subTest(name):
+                requests = len(self.cache.requests)
+                result = self.git_result(*before, "clone", *options, url, destination)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.cache.requests), requests)
+
     def test_conditional_includes_the_guard_does_not_read_keep_a_clone_off_the_cache(self):
         # The guard reads a bounded number of files. Past that it cannot tell
         # what the new repository inherits, so the clone goes upstream.
