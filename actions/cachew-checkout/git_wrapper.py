@@ -92,6 +92,9 @@ READ_OPTIONS_WITH_VALUE = {
     },
     "ls-remote": {"--upload-pack", "--sort", "-o", "--server-option"},
 }
+# Options without a value whose whole name starts a value-taking option's name
+# (--recurse-submodules-default): Git reads the exact name first.
+EXACT_FLAGS = ("--recurse-submodules",)
 NETWORK_COMMANDS = ("clone", "fetch", "ls-remote", "push", "pull", "submodule", "remote")
 # Git itself gives up on an alias loop; this only bounds the lookups.
 MAX_ALIAS_DEPTH = 10
@@ -259,7 +262,9 @@ def takes_next(argument, with_value):
     if argument in with_value:
         return True
     if argument.startswith("--"):
-        return len(argument) > 2 and "=" not in argument and any(option.startswith(argument) for option in with_value)
+        if argument in EXACT_FLAGS or len(argument) < 3 or "=" in argument:
+            return False
+        return any(option.startswith(argument) for option in with_value)
     if not argument.startswith("-"):
         return False
     for position, letter in enumerate(argument[1:], 1):
@@ -281,7 +286,8 @@ def clone_destination(arguments, index):
         if takes_next(arg, CLONE_OPTIONS_WITH_VALUE):
             position += 2
             continue
-        if arg in ("--bare", "--mirror"):
+        # Or the start of either name, as Git takes it (--b is not one: --branch).
+        if len(arg) > 3 and "--bare".startswith(arg) or len(arg) > 2 and "--mirror".startswith(arg):
             bare = True
         if not arg.startswith("-"):
             positional.append(arg)
@@ -302,16 +308,21 @@ def clone_destination(arguments, index):
     return working_directory(arguments, index) / name
 
 
-def option_value(arguments, name):
-    """The last value of `name <value>` or `name=<value>` in arguments, or None."""
+def option_value(arguments, name, shortest=None):
+    """The last value of `name <value>` or `name=<value>` in arguments, or None.
+    With shortest, the name may be abbreviated down to it, as Git takes a
+    command's long options."""
     value = None
     for position, arg in enumerate(arguments):
         if arg == "--":
             break
-        if arg == name and position + 1 < len(arguments):
+        given, attached, rest = arg.partition("=")
+        if given != name and not (shortest and given.startswith(shortest) and name.startswith(given)):
+            continue
+        if attached:
+            value = rest
+        elif position + 1 < len(arguments):
             value = arguments[position + 1]
-        elif arg.startswith(name + "="):
-            value = arg[len(name) + 1 :]
     return value
 
 
@@ -327,7 +338,7 @@ class CloneTarget:
             return
         directory = working_directory(arguments, index)
         extra = (
-            option_value(arguments[index + 1 :], "--separate-git-dir"),
+            option_value(arguments[index + 1 :], "--separate-git-dir", "--sep"),
             option_value(arguments[:index], "--work-tree") or environ.get("GIT_WORK_TREE"),
         )
         for path in (self.path, *(directory / value for value in extra if value)):
@@ -462,6 +473,7 @@ def clone_settings(tail):
     return settings, template
 
 
+MAX_CONDITIONAL_INCLUDES = 30
 CLONE_SHORT_WITH_VALUE = "bcjou"
 GIT_TRUE = ("true", "yes", "on", "1")
 GIT_FALSE = ("false", "no", "off", "0", "")
@@ -475,14 +487,30 @@ def weakened(real_git, arguments, index, environ, cache):
     cachew's own settings cannot outrank one the job scoped more narrowly."""
 
 
-    def listed(*source):
+    def read(*options):
         listing = subprocess.run(
-            [real_git, *arguments[:index], "config", *source, "--null", "--list"],
+            [real_git, *arguments[:index], "config", "--null", "--includes", *options],
             env=environ,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
-        return [entry.partition("\n") for entry in listing.stdout.decode(errors="surrogateescape").split("\0")]
+        return listing.stdout.decode(errors="surrogateescape").split("\0")
+
+    def listed(*source):
+        return [entry.partition("\n") for entry in read(*source, "--list")]
+
+    def conditional(*source):
+        """The files that conditional includes name, whatever their condition:
+        the Git directory or the remote URL of a repository that does not exist yet."""
+        fields = read(*source, "--show-origin", "--get-regexp", r"^includeif\..*\.path$")
+        for origin, entry in zip(fields[0::2], fields[1::2]):
+            path = entry.partition("\n")[2]
+            if path.startswith("~/"):
+                path = environ.get("HOME", "") + path[1:]
+            elif not os.path.isabs(path) and origin.startswith("file:"):
+                # Relative to the file that includes it.
+                path = os.path.join(os.path.dirname(working_directory(arguments, index) / origin[5:]), path)
+            yield path
 
     entries = listed()
     if arguments[index] == "clone":
@@ -497,6 +525,13 @@ def weakened(real_git, arguments, index, environ, cache):
             home = environ.get("HOME", "")
             template = home + template[1:] if home and template.startswith("~/") else template
             entries += listed("--file", os.path.join(template, "config"))
+        pending, seen = list(conditional()), set()
+        while pending and len(seen) < MAX_CONDITIONAL_INCLUDES:
+            path = pending.pop()
+            if path not in seen:
+                seen.add(path)
+                entries += listed("--file", path)
+                pending += conditional("--file", path)
     target = urllib.parse.urlsplit(cache)
     for key, separator, value in entries:
         # A key with no value is true.

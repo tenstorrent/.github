@@ -597,6 +597,8 @@ class DownstreamGitTests(unittest.TestCase):
             (["clone", "--", "https://h/o/repo", "--odd"], cwd / "--odd"),
             (["clone", "git@github.com:o/name.git"], cwd / "name"),
             (["clone", "--bare", "https://h/o/repo.git"], cwd / "repo.git"),
+            (["clone", "--bar", "https://h/o/repo.git"], cwd / "repo.git"),
+            (["clone", "--mirr", "--temp", "t", "https://h/o/repo"], cwd / "repo.git"),
             (["clone", "--mirror", "https://h/o/repo"], cwd / "repo.git"),
             (["clone", "--bare", "https://h/o/repo", "explicit"], cwd / "explicit"),
             (["clone", "--revision", "v1.0", "https://h/o/repo"], cwd / "repo"),
@@ -677,6 +679,10 @@ class DownstreamGitTests(unittest.TestCase):
         wrapper = load_wrapper()
         for arguments, expected in (
             (["clone", "-nb", "main", "u", "d"], "u"),
+            (["clone", "--bran", "main", "u", "d"], "u"),
+            # An option that is itself the start of a longer one's name.
+            (["fetch", "--recurse-submodules", "origin"], "origin"),
+            (["fetch", "--recurse-submodules-default", "yes", "origin"], "origin"),
             (["clone", "-bmain", "u"], "u"),
             (["clone", "-nq", "u"], "u"),
             (["fetch", "-qj", "4", "origin"], "origin"),
@@ -850,6 +856,35 @@ class DownstreamGitTests(unittest.TestCase):
         harmless = ["-c", "http.https://elsewhere.example/.sslVerify=false", "-b", "main", "-o", "c"]
         self.assertEqual(self.git_result("clone", *harmless, url, str(self.root / "cloned-cache")).returncode, 0)
         self.assertGreater(len(self.cache.requests), requests)
+
+    def test_settings_a_clone_inherits_only_at_its_destination_keep_it_off_the_cache(self):
+        # A conditional include applies once the new repository exists (its Git
+        # directory, its remote's URL), and a template's configuration may
+        # include another file: neither shows in the configuration read before.
+        self.history("inherited")
+        url = self.upstream.url + "/org/inherited"
+        weak = self.root / "weak.config"
+        self.config(weak, f"http.{self.cache.url}/git/.sslVerify", "false")
+        active = self.session / "global.config"
+        template = self.root / "including-template"
+        template.mkdir()
+        self.config(template / "config", "include.path", str(weak))
+        destination = self.root / "inherited-gitdir"
+        cases = (
+            (f"includeIf.gitdir:{destination.resolve()}/.path", str(weak), destination, []),
+            (f"includeIf.hasconfig:remote.*.url:{self.upstream.url}/**.path", str(weak), self.root / "by-url", []),
+            ("", "", self.root / "by-template", ["--template", str(template)]),
+        )
+        for key, value, target, options in cases:
+            with self.subTest(key=key, options=options):
+                if key:
+                    self.config(active, key, value)
+                requests = len(self.cache.requests)
+                result = self.git_result("clone", *options, url, str(target))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.cache.requests), requests)
+                if key:
+                    subprocess.run([self.real_git, "config", "--file", str(active), "--unset-all", key], check=True)
 
     def test_a_job_setting_that_weakens_cache_requests_keeps_the_read_off_the_cache(self):
         # A request to the cache can carry the token. Where the job's own
