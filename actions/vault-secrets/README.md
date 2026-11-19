@@ -24,7 +24,7 @@ The job needs this permission:
       id-token: write
 ```
 
-Pin the action to a full commit SHA. The current release commit is `30f687a815f9e78fd8c7460e6c20d29de7f28477`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+Pin the action to a full commit SHA. The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9a261e462179fe13`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 
 ```yaml
       - id: vault
@@ -44,6 +44,18 @@ Pin the action to a full commit SHA. The current release commit is `30f687a815f9
 
 Give values to later steps through `env:`. Do not put
 `${{ steps.vault.outputs.* }}` in `run:` text.
+
+## Releases
+
+Each release has a tag with the action name as prefix: `vault-secrets-vX.Y.Z`. The repository holds several actions, so the prefix is needed. There is no moving major tag such as `v1`.
+
+Pin the full commit SHA of a release. Put the tag in the comment. Do not pin a branch.
+
+```yaml
+uses: tenstorrent/.github/actions/vault-secrets@a697f1bb22ad8b488b0ac63f9a261e462179fe13 # vault-secrets-v1.0.0
+```
+
+Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github/releases/tag/vault-secrets-v1.0.0). New releases are listed on the [Releases page](https://github.com/tenstorrent/.github/releases).
 
 ## Inputs
 
