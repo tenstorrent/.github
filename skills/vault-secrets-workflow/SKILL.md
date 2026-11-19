@@ -126,7 +126,10 @@ The role in the grant decides. The claims of the run must match it.
    call does not join the tailnet again.
 9. Do not set `join-tailnet` or the Tailscale inputs unless OSPO asks.
 10. The action stops a Vault step that does not answer within 120 seconds
-    (`vault-timeout-seconds`) and fails. Run the job again.
+    (`vault-timeout-seconds`) and fails. Run the job again. The limit needs
+    `pgrep` on the runner. GitHub-hosted runners have it. Without `pgrep`,
+    the action writes a warning and the Vault step has no limit. For such a
+    runner, also set `timeout-minutes` on the job.
 11. Do not set `vault-url`. Only OSPO Vault URLs are allowed.
 12. The output `failed-step` names the step that failed. Use it with
     `continue-on-error: true` for an optional login.
