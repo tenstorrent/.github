@@ -583,7 +583,8 @@ LOCAL_COMMANDS = (
 
 def shim(real_git, session):
     """Only commands that can reach a remote pay for the Python wrapper: the
-    network commands, and aliases, which may expand to one."""
+    network commands, and aliases, which may expand to one. So does a command
+    that may weaken a request to the cache: see the comments in the script."""
     wrapper = f'exec {shell_quote(interpreter())} {shell_quote(str(ACTION / "git_wrapper.py"))} "$@"'
     return f"""#!/bin/sh
 export CACHEW_REAL_GIT={shell_quote(real_git)}
@@ -603,16 +604,27 @@ aliased() (
     position=$((position + 1))
   done
   [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word" 2>/dev/null)" ] ||
-    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word.command" 2>/dev/null)" ]
+    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get "alias.$word.command" 2>/dev/null)" ] ||
+    # A setting that turns off certificate verification or allows redirects for
+    # one URL (a value other than cachew's own). The wrapper reads which URL,
+    # and keeps the token off a request to the cache that the setting weakens.
+    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get-regexp '^http\\..*\\.sslverify$' '!^true$' 2>/dev/null)" ] ||
+    [ -n "$("$CACHEW_REAL_GIT" "$@" config --get-regexp '^http\\..*\\.followredirects$' '!^false$' 2>/dev/null)" ]
 )
 # Git lets GIT_SSL_NO_VERIFY override http.sslVerify, for any command that
-# reaches the cache: the wrapper then keeps the token off its requests.
-[ -z "${{GIT_SSL_NO_VERIFY+set}}" ] || {wrapper}
+# reaches the cache: the wrapper then keeps the token off its requests. So it
+# does under configuration given for one command, in the environment or with
+# -c, which may hold an http.* setting.
+[ -z "${{GIT_SSL_NO_VERIFY+set}}${{GIT_CONFIG_COUNT+set}}${{GIT_CONFIG_PARAMETERS+set}}" ] || {wrapper}
 skip=0
 options=0
 for argument in "$@"; do
-  if [ "$skip" = 1 ]; then skip=0; options=$((options + 1)); continue; fi
+  if [ "$skip" = 1 ]; then
+    case "$argument" in [Hh][Tt][Tt][Pp].*) {wrapper} ;; esac
+    skip=0; options=$((options + 1)); continue
+  fi
   case "$argument" in
+    --config-env=[Hh][Tt][Tt][Pp].*) {wrapper} ;;
     -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--attr-source) skip=1 ;;
     -*) ;;
     clone|fetch|ls-remote|push|pull|submodule|remote) {wrapper} ;;

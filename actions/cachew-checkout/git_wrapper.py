@@ -547,12 +547,16 @@ def run(arguments, environ):
         arguments, index = resolved
     command = arguments[index]
     target = CloneTarget(arguments, index, environ)
-    # For the commands that run as they are. Git lets GIT_SSL_NO_VERIFY override
-    # http.sslVerify, and any of them may reach the cache on its own (a lazy
-    # fetch, a helper such as git-lfs): those requests then carry no token. The
-    # empty values, read after the job's files, clear cachew's headers.
+    # For every route but the cache attempt, which drops GIT_SSL_NO_VERIFY and is
+    # not made under a weakening setting. Run as it is or upstream, a command may
+    # still reach the cache on its own: a lazy fetch, a helper such as git-lfs, a
+    # remote whose URL names the cache. Where Git would not verify that request
+    # or would follow its redirect, it carries no token: the empty values, read
+    # after the job's files, clear cachew's headers.
+    cache = state.get("cache")
+    setting = weakened(real_git, arguments, index, environ, cache) if cache else None
     direct = environ
-    if not disabled and any(name in environ for name in TLS_OVERRIDES):
+    if setting or any(name in environ for name in TLS_OVERRIDES):
         headers = dict.fromkeys(key for key, _ in state.get("managed", []) if key.lower().endswith(".extraheader"))
         direct = dict(environ)
         apply_git_config(direct, [(key, "") for key in headers], append=True)
@@ -595,18 +599,18 @@ def run(arguments, environ):
             # read the job file, not the upstream view, and would follow a
             # leftover rewrite to the failed cache with no retry.
             state = remove_cache_keys(real_git, session, state, environ)
-        with UpstreamView(real_git, environ, session, state) as upstream:
+        with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     if shell_alias:
         # Git runs a shell alias's commands itself, past this wrapper, so they get
         # no cache attempt and no retry: its reads and pushes all go upstream.
-        with UpstreamView(real_git, environ, session, state) as upstream:
+        with UpstreamView(real_git, direct, session, state) as upstream:
             return subprocess.call([real_git, *arguments], env=upstream)
 
     if command in NETWORK_COMMANDS and direct_network_operation(
         real_git, arguments, index, environ
     ):
-        with UpstreamView(real_git, environ, session, state) as upstream:
+        with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     if command not in ("clone", "fetch", "ls-remote"):
         return subprocess.call([real_git, *arguments], env=direct)
@@ -618,12 +622,11 @@ def run(arguments, environ):
     ):
         # One remote's failure could not be told from the cache's, so a fetch that
         # also reads elsewhere goes upstream once, without the cache rewrite.
-        with UpstreamView(real_git, environ, session, state) as upstream:
+        with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
-    cache = state.get("cache")
-    if setting := cache and weakened(real_git, arguments, index, environ, cache):
+    if setting:
         print(f"Cachew is skipped for this operation: {setting} weakens requests to the cache.", file=sys.stderr)
-        with UpstreamView(real_git, environ, session, state) as upstream:
+        with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     result, errors = cache_attempt(real_git, arguments, environ, index)
     if result == 0 or result < 0:
@@ -634,7 +637,7 @@ def run(arguments, environ):
         print("Cachew is unavailable; removed the job's cache rewrite and retrying upstream once.", file=sys.stderr)
     else:
         print("Cachew read did not succeed; retrying this operation upstream once.", file=sys.stderr)
-    with UpstreamView(real_git, environ, session, state) as upstream:
+    with UpstreamView(real_git, direct, session, state) as upstream:
         return done(subprocess.call([real_git, *arguments], env=upstream))
 
 

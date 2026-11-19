@@ -786,6 +786,32 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertGreater(len(self.cache.requests), requests)
         self.assertEqual({auth for _, _, auth in self.cache.requests[requests:]}, {None})
 
+    def test_no_route_sends_the_cache_a_token_over_a_weakened_request(self):
+        # Whichever way the wrapper runs a command, as it is or upstream, the
+        # command may still reach the cache: a lazy fetch of an unpinned clone, a
+        # remote whose URL names the cache. Unverified or redirectable, those
+        # requests carry no token.
+        self.history("routes")
+        host = urllib.parse.urlsplit(self.upstream.url).netloc
+        lazy, direct = self.root / "lazy-routes", self.root / "direct-routes"
+        clone = [self.real_git, "clone", "--quiet", "--filter=blob:none"]
+        subprocess.run([*clone, self.upstream.url + "/org/routes", str(lazy)], env=self.env, check=True)
+        subprocess.run([*clone, f"{self.cache.url}/git/{host}/org/routes", str(direct)], env=self.env, check=True)
+        weak = ["-c", f"http.{self.cache.url}/git/.followRedirects=true"]
+        unverified = dict(self.env, GIT_SSL_NO_VERIFY="")
+        for name, arguments, env in (
+            ("as it is, weak setting", [*weak, "-C", str(lazy), "show", "HEAD~1:content.txt"], self.env),
+            ("upstream view, weak setting", [*weak, "-C", str(direct), "pull"], self.env),
+            ("upstream view, unverified", ["-C", str(direct), "pull"], unverified),
+            ("push route, unverified", ["-C", str(direct), "remote", "update"], unverified),
+        ):
+            with self.subTest(name):
+                requests = len(self.cache.requests)
+                result = self.git_result(*arguments, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertGreater(len(self.cache.requests), requests)
+                self.assertEqual({auth for _, _, auth in self.cache.requests[requests:]}, {None})
+
     def test_a_job_setting_that_weakens_cache_requests_keeps_the_read_off_the_cache(self):
         # A request to the cache can carry the token. Where the job's own
         # configuration, for the cache's host, turns off certificate verification

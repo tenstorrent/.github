@@ -1238,10 +1238,30 @@ class SessionTests(unittest.TestCase):
             marker.unlink()
         # With GIT_SSL_NO_VERIFY any command may reach the cache unverified (a
         # lazy fetch, say): the wrapper keeps the token off those requests.
-        unverified = dict(self.env, GIT_SSL_NO_VERIFY="")
-        result = subprocess.run([str(shim), "status"], cwd=self.fixture.target, env=unverified, capture_output=True)
+        # So it does where command-scoped configuration could weaken them.
+        for arguments, extra in (
+            (["status"], {"GIT_SSL_NO_VERIFY": ""}),
+            (["status"], {"GIT_CONFIG_COUNT": "0"}),
+            (["status"], {"GIT_CONFIG_PARAMETERS": "'a.b=c'"}),
+            (["-c", "HTTP.https://x/.sslVerify=false", "status"], {}),
+            (["--config-env=http.https://x/.followRedirects=X", "status"], {}),
+            (["--config-env", "http.followRedirects=X", "status"], {}),
+        ):
+            env = dict(self.env, X="true", **extra)
+            result = subprocess.run([str(shim), *arguments], cwd=self.fixture.target, env=env, capture_output=True)
+            self.assertEqual(result.returncode, 99, (arguments, extra, result.stderr))
+            self.assertTrue(marker.exists(), (arguments, extra))
+            marker.unlink()
+        local = dict(cwd=self.fixture.target, env=self.env, capture_output=True)
+        # A helper the shim does not know (git lfs) goes to the wrapper when the
+        # job's files hold such a setting for any URL.
+        result = subprocess.run([str(shim), "count-objects"], **local)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+        self.real_git("config", "--global", "http.https://elsewhere.example/.sslVerify", "false")
+        result = subprocess.run([str(shim), "count-objects"], **local)
         self.assertEqual(result.returncode, 99, result.stderr)
-        self.assertTrue(marker.exists())
+        self.real_git("config", "--global", "--unset", "http.https://elsewhere.example/.sslVerify")
         shim.write_text(text)
         self.finish()
 

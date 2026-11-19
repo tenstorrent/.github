@@ -164,13 +164,24 @@ so each keeps reads off the cache:
   is not false, for the cache's host, in any configuration the command reads
   (files, `GIT_CONFIG_COUNT`, `-c`). Git applies the most specific `http.<url>.*`
   it finds, so the job's can outrank cachew's. The wrapper sends such a clone,
-  fetch or `ls-remote` upstream. Git run past the wrapper is not checked.
+  fetch or `ls-remote` upstream.
 
 A step that sets `GIT_SSL_NO_VERIFY` only for itself, after the checkout, keeps
-its cache rewrite. Every `git` command of that step goes through the wrapper,
-which sends the cache no token from the commands it does not route (a lazy fetch,
-`git lfs`): a private repository's read through the cache then fails with a 401
-and no upstream retry. Git run by its full path is not covered.
+its cache rewrite. Whichever way the wrapper then runs a command, as it is or
+upstream, the command may still reach the cache on its own: a lazy fetch,
+`git lfs`, a remote whose URL names the cache. Under the variable or under such
+a setting, the wrapper clears cachew's token headers for the command, so those
+requests carry no token; a private repository's read through the cache then
+fails with a 401 and no upstream retry.
+
+The shim on `PATH` starts the wrapper only when it has to: for the network
+commands and aliases, for any command when `GIT_SSL_NO_VERIFY`,
+`GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS` is set or a `-c`/`--config-env`
+option names an `http.*` setting, and for a command it does not know (`git lfs`)
+when the job's files hold a weakening `http.<url>.*` setting. Two cases stay
+uncovered: Git run by its full path, and a command the shim knows as local
+(`git show`, `git checkout`) that lazily fetches into an unpinned partial clone
+while the job's files hold such a setting for the cache.
 Settings that choose which certificates to trust or
 which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `http.proxy`,
 `https_proxy`) are the job's own and stay in effect. The cache checkout's Git reads
