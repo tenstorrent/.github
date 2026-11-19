@@ -897,6 +897,24 @@ class DownstreamGitTests(unittest.TestCase):
                 if key:
                     subprocess.run([self.real_git, "config", "--file", str(active), "--unset-all", key], check=True)
 
+    def test_conditional_includes_the_guard_does_not_read_keep_a_clone_off_the_cache(self):
+        # The guard reads a bounded number of files. Past that it cannot tell
+        # what the new repository inherits, so the clone goes upstream.
+        self.history("many")
+        weak = self.root / "weak-many.config"
+        self.config(weak, f"http.{self.cache.url}/git/.sslVerify", "false")
+        destination = self.root / "many-clone"
+        text = f'[includeIf "gitdir:{destination.resolve()}/"]\n\tpath = {weak}\n'
+        for number in range(load_wrapper().MAX_CONDITIONAL_INCLUDES):
+            text += f'[includeIf "gitdir:/elsewhere-{number}/"]\n\tpath = {self.root}/other-{number}.config\n'
+        with (self.session / "global.config").open("a") as config:
+            config.write(text)
+        requests = len(self.cache.requests)
+        result = self.git_result("clone", self.upstream.url + "/org/many", str(destination))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.cache.requests), requests)
+        self.assertIn("Cachew", result.stderr)
+
     def test_a_job_setting_that_weakens_cache_requests_keeps_the_read_off_the_cache(self):
         # A request to the cache can carry the token. Where the job's own
         # configuration, for the cache's host, turns off certificate verification

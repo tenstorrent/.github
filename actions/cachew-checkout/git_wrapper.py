@@ -540,6 +540,9 @@ def weakened(real_git, arguments, index, environ, cache):
                 seen.add(path)
                 entries += listed("--file", path)
                 pending += conditional("--file", path)
+        if any(path not in seen for path in pending):
+            # Unread files could hold anything: the guard never passes on a guess.
+            return f"a conditional include past the {MAX_CONDITIONAL_INCLUDES} files read"
     target = urllib.parse.urlsplit(cache)
     for key, separator, value in entries:
         # A key with no value is true.
@@ -726,7 +729,7 @@ def run(arguments, environ):
         with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     if setting:
-        print(f"Cachew is skipped for this operation: {setting} weakens requests to the cache.", file=sys.stderr)
+        print(f"Cachew is skipped for this operation: {setting} could weaken requests to the cache.", file=sys.stderr)
         with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
     result, errors = cache_attempt(real_git, arguments, environ, index)
