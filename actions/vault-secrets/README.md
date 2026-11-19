@@ -24,7 +24,7 @@ The job needs this permission:
       id-token: write
 ```
 
-Pin the action to a full commit SHA:
+Pin the action to a full commit SHA. The current release commit is `30f687a815f9e78fd8c7460e6c20d29de7f28477`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 
 ```yaml
       - id: vault

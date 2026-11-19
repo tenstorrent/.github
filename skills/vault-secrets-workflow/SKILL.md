@@ -89,6 +89,7 @@ jobs:
 ```
 
 Pin the action by the full SHA of a commit on `main` of `tenstorrent/.github`.
+The current release commit is `30f687a815f9e78fd8c7460e6c20d29de7f28477`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 Remove `secrets:` if there is no other secret. Remove `github-token:` if there
 is no token.
 
@@ -124,6 +125,14 @@ The role in the grant decides. The claims of the run must match it.
 8. A job can call the action two times. Give each call its own `id`. The second
    call does not join the tailnet again.
 9. Do not set `join-tailnet` or the Tailscale inputs unless OSPO asks.
+10. The action stops a Vault step that does not answer within 120 seconds
+    (`vault-timeout-seconds`) and fails. Run the job again. The limit needs
+    `pgrep` on the runner. GitHub-hosted Linux runners have it. Without `pgrep`,
+    the action writes a warning and the Vault step has no limit. For such a
+    runner, also set `timeout-minutes` on the job.
+11. Do not set `vault-url`. Only OSPO Vault URLs are allowed.
+12. The output `failed-step` names the step that failed. Use it with
+    `continue-on-error: true` for an optional login.
 
 ## 6. Common failures
 
@@ -138,6 +147,8 @@ The README lists every message in
 | `error validating claims` | Wrong branch, environment or event. | Failures |
 | `permission denied` on a token or `kv` path | Wrong name or path, or no access. | Failures |
 | `Vault ... is not reachable` | Runner not on the tailnet. | Failures |
+| `Vault did not answer within N seconds` | The Vault step took longer than the time limit. | Failures |
+| `input vault-url is not an OSPO Vault URL` | `vault-url` is set. Remove it. | Failures |
 
 For a role, claim or permission error, ask OSPO in the ticket. Do not change
 names to try other values.
