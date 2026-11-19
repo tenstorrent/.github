@@ -676,6 +676,9 @@ def activate(environ):
         and settings.upstream
         and settings.repository
         and checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
+        # This step also runs after a checkout that failed or was refused, which
+        # leaves no credentials: neither does this.
+        and checkout_flag(environ, "CACHEW_CHECKED_OUT", "false")
     ):
         # Cache-scoped only. Upstream credentials stay where actions/checkout put them.
         workflow = settings.repository.lower() == environ.get("GITHUB_REPOSITORY", "").lower()

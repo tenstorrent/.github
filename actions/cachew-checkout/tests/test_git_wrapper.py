@@ -953,11 +953,15 @@ class DownstreamGitTests(unittest.TestCase):
         self.history("guarded")
         url = self.upstream.url + "/org/guarded"
         active = self.session / "global.config"
+        address = urllib.parse.urlsplit(self.cache.url)
+        dotted = f"{address.scheme}://{address.hostname}.:{address.port}"
         for key, value, options in (
             (f"http.{self.cache.url}/git/.sslVerify", "false", []),
             (f"http.{self.cache.url}/git/.followRedirects", "true", []),
             (f"http.{self.cache.url}/.followRedirects", "initial", []),
             ("", "", ["-c", f"http.{self.cache.url}/.sslVerify=false"]),
+            # Git reads a host with a trailing dot as the same host.
+            (f"http.{dotted}/.sslVerify", "false", []),
         ):
             with self.subTest(key=key, options=options):
                 if key:

@@ -593,7 +593,8 @@ def weakened(real_git, arguments, index, environ, cache):
                 continue
             try:
                 scope = urllib.parse.urlsplit(url)
-                host = (scope.hostname or "").lower()
+                # Git reads a host with a trailing dot as the same host.
+                host = (scope.hostname or "").lower().removesuffix(".")
             except ValueError:
                 return key
             # Git's host wildcard matches one label; this match is wider, which

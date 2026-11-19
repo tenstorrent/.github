@@ -32,6 +32,7 @@ class SessionTests(unittest.TestCase):
         self.env["GITHUB_WORKSPACE"] = str(self.fixture.workspace.resolve())
         self.env["CACHEW_ACTION_PATH"] = str(fixtures.ACTION)
         self.env["CACHEW_PERSIST_CREDENTIALS"] = "true"
+        self.env["CACHEW_CHECKED_OUT"] = "true"
         self.posts = []
         self.prepared = False
         self.sequence = 0
@@ -451,6 +452,29 @@ class SessionTests(unittest.TestCase):
             if file.is_file():
                 self.assertNotIn(fixtures.TOKEN.encode(), file.read_bytes())
                 self.assertNotIn(encoded, file.read_bytes())
+        self.finish()
+
+    def test_a_checkout_that_did_not_succeed_leaves_no_token_for_the_cache(self):
+        # Activation also runs after a checkout that failed or was refused (a
+        # fork's pull request code, say), in a step the job lets continue.
+        # actions/checkout then leaves no credentials for later steps.
+        self.fixture.repository("dependency")
+        self.prepare()
+        for outcome in ("false", ""):
+            with self.subTest(outcome=outcome):
+                self.env["CACHEW_CHECKED_OUT"] = outcome
+                self.assertTrue(self.activate(available="true"))
+                directory = Path(self.env["CACHEW_SESSION_DIR"])
+                encoded = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode())
+                for file in directory.rglob("*"):
+                    if file.is_file():
+                        self.assertNotIn(encoded, file.read_bytes())
+        before = len(self.fixture.cache.requests)
+        self.real_git("clone", self.fixture.upstream.url + "/org/dependency", "dependency")
+        requests = self.fixture.cache.requests[before:]
+        self.assertTrue(requests)
+        self.assertEqual({auth for _, _, auth in requests}, {None})
+        self.env["CACHEW_CHECKED_OUT"] = "true"
         self.finish()
 
     def test_later_reads_without_a_token_do_not_send_inherited_headers_to_the_cache(self):

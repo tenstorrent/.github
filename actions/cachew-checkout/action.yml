@@ -245,4 +245,6 @@ runs:
         # Not for an opted-out checkout: its token must not reach the cache.
         CACHEW_TOKEN: ${{ steps.mode.outputs.cachew != 'false' && inputs.token || '' }}
         CACHEW_PERSIST_CREDENTIALS: ${{ inputs.persist-credentials }}
+        # A checkout that failed or was refused leaves no token for the cache.
+        CACHEW_CHECKED_OUT: ${{ steps.cachew.outputs.checked-out == 'true' || steps.checkout.outcome == 'success' }}
       run: '"$CACHEW_PYTHON" "$GITHUB_ACTION_PATH/session.py" activate'

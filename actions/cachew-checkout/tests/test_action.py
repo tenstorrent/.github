@@ -172,6 +172,20 @@ class RunnerGateTests(unittest.TestCase):
                 self.assertEqual(self.active_steps(context), ["mode", "session", "checkout", "configure"])
         self.assertEqual(self.active_steps(runner("self-hosted", os="macOS")), ["checkout"])
 
+    def test_only_a_checkout_that_succeeded_records_its_token_for_the_cache(self):
+        configure = next(step for step in self.steps if step.get("id") == "configure")
+        expression = re.search(r"CACHEW_CHECKED_OUT: (\$\{\{.*\}\})", configure["raw"])[1]
+        for context, expected in (
+            ({"steps.cachew.outputs.checked-out": "true", "steps.checkout.outcome": "skipped"}, True),
+            ({"steps.cachew.outputs.checked-out": "false", "steps.checkout.outcome": "success"}, True),
+            ({"steps.checkout.outcome": "success"}, True),
+            ({"steps.cachew.outputs.checked-out": "false", "steps.checkout.outcome": "failure"}, False),
+            ({"steps.checkout.outcome": "failure"}, False),
+            ({"steps.cachew.outputs.checked-out": "false", "steps.checkout.outcome": "skipped"}, False),
+        ):
+            with self.subTest(context=context):
+                self.assertIs(evaluate(expression, context), expected)
+
     def test_an_opted_out_checkout_never_hands_its_token_to_the_cache(self):
         configure = next(step for step in self.steps if step.get("id") == "configure")
         expression = re.search(r"CACHEW_TOKEN: (\$\{\{.*\}\})", configure["raw"])[1]
