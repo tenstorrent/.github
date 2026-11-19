@@ -162,7 +162,10 @@ so each keeps reads off the cache:
   checkout itself still uses the cache; later steps get no cache rewrite.
 - A `http.<url>.sslVerify` that is false, or a `http.<url>.followRedirects` that
   is not false, for the cache's host, in any configuration the command reads
-  (files, `GIT_CONFIG_COUNT`, `-c`). Git applies the most specific `http.<url>.*`
+  (files, `GIT_CONFIG_COUNT`, `-c`), and for a clone in what it gives the new
+  repository before it fetches: its own `-c`/`--config` options and the
+  `config` file of its template directory (`--template`, `GIT_TEMPLATE_DIR`,
+  `init.templateDir`). Git applies the most specific `http.<url>.*`
   it finds, so the job's can outrank cachew's. The wrapper sends such a clone,
   fetch or `ls-remote` upstream.
 

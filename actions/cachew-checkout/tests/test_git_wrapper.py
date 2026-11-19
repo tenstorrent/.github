@@ -812,6 +812,45 @@ class DownstreamGitTests(unittest.TestCase):
                 self.assertGreater(len(self.cache.requests), requests)
                 self.assertEqual({auth for _, _, auth in self.cache.requests[requests:]}, {None})
 
+    def test_a_clones_own_settings_that_weaken_cache_requests_keep_it_off_the_cache(self):
+        # git clone applies its -c/--config options, and the configuration of its
+        # template directory, to the new repository before it fetches.
+        self.history("cloned")
+        url = self.upstream.url + "/org/cloned"
+        scope = f"http.{self.cache.url}/git/"
+        template = self.root / "template"
+        template.mkdir()
+        self.config(template / "config", scope + ".sslVerify", "false")
+        configured = dict(self.env, GIT_TEMPLATE_DIR=str(template))
+        for number, (options, env) in enumerate(
+            (
+                (["-c", scope + ".sslVerify=false"], self.env),
+                (["--config", scope + ".followRedirects=true"], self.env),
+                (["--config=" + scope + ".followRedirects"], self.env),
+                (["--conf", scope + ".sslVerify=off"], self.env),
+                (["-qc" + scope + ".sslVerify=0"], self.env),
+                (["-nc", scope + ".sslVerify=no", "-b", "main"], self.env),
+                (["--template", str(template)], self.env),
+                (["--template=" + str(template)], self.env),
+                ([], configured),
+            )
+        ):
+            with self.subTest(options=options, template=env is configured):
+                requests = len(self.cache.requests)
+                result = self.git_result("clone", *options, url, str(self.root / f"cloned-{number}"), env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.cache.requests), requests)
+        with self.subTest("init.templateDir"):
+            requests = len(self.cache.requests)
+            destination = str(self.root / "cloned-configured")
+            result = self.git_result("-c", f"init.templateDir={template}", "clone", url, destination)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.cache.requests), requests)
+        requests = len(self.cache.requests)
+        harmless = ["-c", "http.https://elsewhere.example/.sslVerify=false", "-b", "main", "-o", "c"]
+        self.assertEqual(self.git_result("clone", *harmless, url, str(self.root / "cloned-cache")).returncode, 0)
+        self.assertGreater(len(self.cache.requests), requests)
+
     def test_a_job_setting_that_weakens_cache_requests_keeps_the_read_off_the_cache(self):
         # A request to the cache can carry the token. Where the job's own
         # configuration, for the cache's host, turns off certificate verification

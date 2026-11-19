@@ -252,12 +252,15 @@ def working_directory(arguments, index):
 
 
 def takes_next(argument, with_value):
-    """Whether an option's value is the next argument: one of with_value, or a
-    cluster of short options (`-nb main`) whose last letter is. A value-taking
+    """Whether an option's value is the next argument: one of with_value, the
+    start of one's name (Git takes any unambiguous abbreviation: `--conf`), or
+    a cluster of short options (`-nb main`) whose last letter is. A value-taking
     letter earlier in the cluster has the rest of it as its value (`-bmain`)."""
     if argument in with_value:
         return True
-    if argument.startswith("--") or not argument.startswith("-"):
+    if argument.startswith("--"):
+        return len(argument) > 2 and "=" not in argument and any(option.startswith(argument) for option in with_value)
+    if not argument.startswith("-"):
         return False
     for position, letter in enumerate(argument[1:], 1):
         if "-" + letter in with_value:
@@ -422,6 +425,44 @@ def reaches_cache(real_git, arguments, index, environ, cache, repository=""):
     return result.stdout.decode(errors="replace").strip().startswith(cache.rstrip("/") + "/git/")
 
 
+def clone_settings(tail):
+    """(the values of a clone's -c/--config options, its --template directory or
+    None), in every form Git accepts: `-c k=v`, `-ck=v`, a short option after
+    other flags (`-qc k=v`), `--config k=v`, `--config=k=v` and an abbreviated
+    long option (`--conf`)."""
+    settings, template, position = [], None, 0
+    while position < len(tail):
+        argument = tail[position]
+        position += 1
+        if argument == "--":
+            break
+        name, attached, value = argument.partition("=")
+        if argument.startswith("--"):
+            # Git takes any unambiguous start of a long option's name.
+            long = next((full for full in ("--config", "--template") if len(name) > 3 and full.startswith(name)), None)
+            if long is None:
+                position += takes_next(argument, CLONE_OPTIONS_WITH_VALUE)
+                continue
+            if not attached:
+                value, position = (tail[position] if position < len(tail) else ""), position + 1
+            if long == "--config":
+                settings.append(value)
+            else:
+                template = value
+        elif argument.startswith("-") and len(argument) > 1:
+            # Flags may share one dash; the first that takes a value ends them.
+            for at, flag in enumerate(argument[1:], 2):
+                if flag in CLONE_SHORT_WITH_VALUE:
+                    value = argument[at:]
+                    if not value:
+                        value, position = (tail[position] if position < len(tail) else ""), position + 1
+                    if flag == "c":
+                        settings.append(value)
+                    break
+    return settings, template
+
+
+CLONE_SHORT_WITH_VALUE = "bcjou"
 GIT_TRUE = ("true", "yes", "on", "1")
 GIT_FALSE = ("false", "no", "off", "0", "")
 
@@ -432,15 +473,32 @@ def weakened(real_git, arguments, index, environ, cache):
     configuration (files, GIT_CONFIG_COUNT, -c). A request to the cache can
     carry a token, and Git applies the most specific http.<url>.* it finds, so
     cachew's own settings cannot outrank one the job scoped more narrowly."""
-    listing = subprocess.run(
-        [real_git, *arguments[:index], "config", "--null", "--list"],
-        env=environ,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+
+
+    def listed(*source):
+        listing = subprocess.run(
+            [real_git, *arguments[:index], "config", *source, "--null", "--list"],
+            env=environ,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        return [entry.partition("\n") for entry in listing.stdout.decode(errors="surrogateescape").split("\0")]
+
+    entries = listed()
+    if arguments[index] == "clone":
+        # A clone gives its new repository the settings of its -c/--config
+        # options and of its template directory before it fetches.
+        settings, template = clone_settings(arguments[index + 1 :])
+        entries += [setting.partition("=") for setting in settings]
+        template = template or environ.get("GIT_TEMPLATE_DIR")
+        if template is None:
+            template = next((value for key, _, value in entries if key == "init.templatedir"), None)
+        if template:
+            home = environ.get("HOME", "")
+            template = home + template[1:] if home and template.startswith("~/") else template
+            entries += listed("--file", os.path.join(template, "config"))
     target = urllib.parse.urlsplit(cache)
-    for entry in listing.stdout.decode(errors="surrogateescape").split("\0"):
-        key, separator, value = entry.partition("\n")
+    for key, separator, value in entries:
         # A key with no value is true.
         value = value.lower() if separator else "true"
         for name, safe in ((".sslverify", GIT_TRUE), (".followredirects", GIT_FALSE)):
