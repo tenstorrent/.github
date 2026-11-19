@@ -14,6 +14,7 @@ import threading
 import time
 
 HOST = "vault-ospo-staging.eng-svc.aws.tenstorrent.com"
+OIDC_HOST = "oidc.fixture.invalid"
 ROOT = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "vault-secrets-proxy-fixture"
 
 
@@ -81,18 +82,25 @@ def serve():
     context.load_cert_chain(ROOT / "cert.pem", ROOT / "key.pem")
     vault.socket = context.wrap_socket(vault.socket, server_side=True)
     oidc = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+    corporate = os.environ.get("OIDC_ROUTE") == "corporate-proxy"
+    if corporate:
+        oidc.socket = context.wrap_socket(oidc.socket, server_side=True)
 
     class Proxy(http.server.BaseHTTPRequestHandler):
+        target = HOST + ":443"
+        destination = vault.server_address
+        event = "connect"
+
         def log_message(self, *_args):
             pass
 
         def do_CONNECT(self):
-            record("connect", self.path)
-            if self.path != HOST + ":443":
+            record(self.event, self.path)
+            if self.path != self.target:
                 self.send_error(403)
                 return
             # Never forward to the real Vault: only this test's loopback TLS server.
-            with socket.create_connection(vault.server_address) as peer:
+            with socket.create_connection(self.destination) as peer:
                 self.send_response(200)
                 self.end_headers()
                 streams = [self.connection, peer]
@@ -107,10 +115,16 @@ def serve():
                         (peer if source is self.connection else self.connection).sendall(data)
 
     proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
-    for server in (vault, oidc):
+    class EgressProxy(Proxy):
+        target = OIDC_HOST + ":443"
+        destination = oidc.server_address
+        event = "egress-connect"
+
+    egress = http.server.ThreadingHTTPServer(("127.0.0.1", 0), EgressProxy)
+    for server in (vault, oidc, egress):
         threading.Thread(target=server.serve_forever, daemon=True).start()
     (ROOT / "ready.json").write_text(
-        json.dumps({"proxy": proxy.server_port, "oidc": oidc.server_port})
+        json.dumps({"proxy": proxy.server_port, "oidc": oidc.server_port, "egress": egress.server_port})
     )
     proxy.serve_forever()
 
@@ -123,6 +137,8 @@ def start():
         + HOST
         + "\n[ext]\nsubjectAltName=DNS:"
         + HOST
+        + ",DNS:"
+        + OIDC_HOST
         + "\n"
     )
     subprocess.run(
@@ -168,12 +184,19 @@ def start():
         out.write("NODE_EXTRA_CA_CERTS=" + str(ROOT / "cert.pem") + "\n")
         out.write("CURL_CA_BUNDLE=" + str(ROOT / "cert.pem") + "\n")
         out.write("ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token\n")
-        out.write(
-            "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:" + str(ports["oidc"]) + "/oidc?test=1\n"
-        )
-        # Deliberately hostile inherited settings: the action must override these
-        # only for Vault, then leave the environment untouched for later steps.
-        out.write("NO_PROXY=*\nno_proxy=*\n")
+        if os.environ.get("OIDC_ROUTE") == "corporate-proxy":
+            # An unresolvable OIDC hostname forces use of the inherited egress
+            # proxy, which refuses Vault. The Vault proxy refuses OIDC.
+            out.write("ACTIONS_ID_TOKEN_REQUEST_URL=https://" + OIDC_HOST + "/oidc?test=1\n")
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                out.write(name + "=http://127.0.0.1:" + str(ports["egress"]) + "\n")
+            out.write("NO_PROXY=" + HOST + "\nno_proxy=" + HOST + "\n")
+        else:
+            out.write(
+                "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:" + str(ports["oidc"]) + "/oidc?test=1\n"
+            )
+            # Vault must still use Tailscale even with an inherited wildcard.
+            out.write("NO_PROXY=*\nno_proxy=*\n")
 
 
 def verify():
@@ -186,9 +209,17 @@ def verify():
         "/v1/kv/data/proxy-test",
     }
     assert sum(event["kind"] == "health" for event in events) == 2
-    assert os.environ["NO_PROXY"] == "*" and os.environ["no_proxy"] == "*"
+    corporate = os.environ.get("OIDC_ROUTE") == "corporate-proxy"
+    bypass = HOST if corporate else "*"
+    assert os.environ["NO_PROXY"] == bypass and os.environ["no_proxy"] == bypass
+    egress = [event["value"] for event in events if event["kind"] == "egress-connect"]
+    if corporate:
+        assert egress == [OIDC_HOST + ":443"] * 2
+    else:
+        assert not egress
     print(
-        "PASS: readiness, login, token, and KV used CONNECT; OIDC bypassed it; proxy overrides stayed step-local."
+        "PASS: Vault used its CONNECT proxy; OIDC preserved the runner route ("
+        + ("corporate proxy" if corporate else "direct") + "); inherited proxy settings stayed unchanged."
     )
 
 

@@ -90,15 +90,18 @@ This uses [Node's built-in proxy support](https://nodejs.org/docs/latest-v24.x/a
 in the Vault action's Node 24 runtime (24.5 or newer). Update the Actions runner
 on older self-hosted hosts: changing the `node` executable on PATH with
 setup-node does not replace the runtime used by `uses:` actions. The
-`--use-env-proxy` flag fails on an unsupported runtime rather than silently
-attempting direct requests. Userspace mode still needs the pinned Tailscale
+preload checks this version before making requests and fails on an unsupported
+runtime. Userspace mode still needs the pinned Tailscale
 action's normal installation privileges/tools, including sudo; it removes the
 TUN and NET_ADMIN requirements.
 
-Lowercase proxy overrides are scoped to the Vault step and take precedence over
-inherited upper- or lowercase settings, so `NO_PROXY=*` cannot bypass the route.
-Only the GitHub OIDC request host bypasses the proxy. Kernel mode passes an
-empty environment mapping and preserves the runner's original proxy settings.
+A step-local Node preload gives the Vault client's global agents an explicit
+Tailscale proxy configuration, so inherited `NO_PROXY=*` cannot bypass that route.
+The GitHub OIDC client retains the runner's original `HTTP_PROXY`, `HTTPS_PROXY`,
+and `NO_PROXY` settings, including lowercase variants. This supports CIv2 runners
+that require an outbound proxy for GitHub, as well as runners with direct access.
+The OIDC host bypasses the Vault proxy when the client uses a global agent.
+Kernel mode passes an empty environment mapping and does not load the preload.
 
 `join-tailnet` continues to control connection ownership separately from the
 network mode. With `auto`, a second call reuses the active connection; it must
@@ -111,7 +114,8 @@ under their owner's control.
 
 The `userspace-proxy` tests run the actual composite and pinned Vault action on
 Ubuntu and in an Ubuntu container with local HTTPS/OIDC/CONNECT fixtures and
-fake credentials. They exercise proxy routing, JSONata selectors, multiline
+fake credentials. They cover direct and corporate-proxied OIDC access, Vault
+proxy routing, JSONata selectors, multiline
 values, successful output propagation, denied login, empty failure outputs,
 and watchdog attachment without requiring an OSPO grant. They do not exercise
 live Tailscale bootstrap or OSPO authorization; test those on the target runner

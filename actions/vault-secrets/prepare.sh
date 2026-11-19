@@ -142,18 +142,19 @@ case "$network_mode" in
     command -v jq >/dev/null 2>&1 || fail "network-mode userspace needs jq on the runner."
     proxy_url="http://127.0.0.1:$proxy_port"
     tailscaled_args="--tun=userspace-networking --socks5-server=127.0.0.1:$proxy_port --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
-    # Only the GitHub OIDC host bypasses the proxy. Inherited NO_PROXY=* must
-    # not accidentally route Vault directly on a userspace-only runner.
+    # Vault uses a dedicated global agent. The GitHub OIDC client must retain
+    # the runner's original proxy settings (CIv2 requires an outbound proxy).
     oidc_host="${ACTIONS_ID_TOKEN_REQUEST_URL#*://}"
     oidc_host="${oidc_host%%[/?#]*}"
     oidc_host="${oidc_host%%:*}"
     [[ "$oidc_host" =~ ^[A-Za-z0-9.-]+$ ]] || fail "cannot determine the GitHub OIDC host for proxy bypass."
-    # Expression objects treat names case-insensitively: do not emit both
-    # HTTP_PROXY and http_proxy. Lowercase takes precedence in Node and the
-    # GitHub HTTP client, overriding inherited variants without duplicate keys.
+    preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"
+    # NODE_OPTIONS accepts double-quoted paths; escape quotes and backslashes.
+    preload="${preload//\\/\\\\}"
+    preload="${preload//\"/\\\"}"
     proxy_env="$(jq -cn --arg proxy "$proxy_url" --arg bypass "$oidc_host" \
-      --arg options "${NODE_OPTIONS:+$NODE_OPTIONS }--use-env-proxy" \
-      '{http_proxy:$proxy, https_proxy:$proxy, no_proxy:$bypass, NODE_OPTIONS:$options}')"
+      --arg options "${NODE_OPTIONS:+$NODE_OPTIONS }--require=\"$preload\"" \
+      '{VAULT_SECRETS_PROXY_URL:$proxy, VAULT_SECRETS_OIDC_HOST:$bypass, NODE_OPTIONS:$options}')"
     ;;
   *) fail "input network-mode must be kernel or userspace." ;;
 esac

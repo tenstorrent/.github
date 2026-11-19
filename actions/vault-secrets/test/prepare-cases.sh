@@ -187,17 +187,19 @@ if ! grep -q -x 'proxy-env={}' "$work/out" || ! grep -q -x 'proxy-url=' "$work/o
   status=1
 fi
 run_env IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT=21055 \
-  NODE_OPTIONS=--trace-warnings NO_PROXY='*' no_proxy='*'
+  NODE_OPTIONS=--trace-warnings NO_PROXY='*' no_proxy='*' HTTPS_PROXY=http://egress.invalid:3128
 if [ "$rc" -ne 0 ]; then
   cat "$work/log"
   status=1
 else
   proxy_env="$(sed -n 's/^proxy-env=//p' "$work/out")"
   if ! printf '%s' "$proxy_env" | jq -e '
-    .http_proxy == "http://127.0.0.1:21055" and .https_proxy == .http_proxy and
-    .no_proxy == "example.invalid" and
+    .VAULT_SECRETS_PROXY_URL == "http://127.0.0.1:21055" and
+    .VAULT_SECRETS_OIDC_HOST == "example.invalid" and
+    (has("http_proxy") | not) and (has("https_proxy") | not) and (has("no_proxy") | not) and
     (has("HTTP_PROXY") | not) and (has("HTTPS_PROXY") | not) and (has("NO_PROXY") | not) and
-    .NODE_OPTIONS == "--trace-warnings --use-env-proxy"' >/dev/null; then
+    (.NODE_OPTIONS | startswith("--trace-warnings --require=\"")) and
+    (.NODE_OPTIONS | endswith("/proxy-agent.cjs\""))' >/dev/null; then
     echo '::error::userspace mode did not scope proxy settings correctly'
     status=1
   fi

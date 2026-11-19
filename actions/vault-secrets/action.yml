@@ -37,7 +37,7 @@ inputs:
     description: >-
       `kernel` preserves routed networking (default). `userspace` reaches Vault
       through a local Tailscale HTTP proxy without TUN or NET_ADMIN. Userspace
-      needs Linux and a runner whose Node 24 runtime supports --use-env-proxy
+      needs Linux and a runner whose Node 24 runtime supports explicit proxy agents
       (Node 24.5 or newer). Use join-tailnet: false to reuse an existing route/proxy.
     required: false
     default: kernel
@@ -147,8 +147,8 @@ runs:
       id: vault
       uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
       # Empty in kernel mode: preserve the runner's existing environment.
-      # Node 24.5+ proxies Got's HTTPS requests through its global agent.
-      # Scope overrides to this step; GitHub OIDC bypasses the Vault proxy.
+      # Give Vault a Tailscale global agent while preserving the original
+      # outbound proxy environment for the GitHub OIDC client.
       env: ${{ fromJSON(steps.prepare.outputs.proxy-env) }}
       with:
         url: ${{ steps.prepare.outputs.url }}
