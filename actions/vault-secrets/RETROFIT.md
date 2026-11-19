@@ -22,7 +22,7 @@ Stop and go to section 4 if the job is on the list there.
 
 ## 2. Map old to new
 
-The current release commit is `30f687a815f9e78fd8c7460e6c20d29de7f28477`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9a261e462179fe13`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 
 | Old | New |
 |---|---|
