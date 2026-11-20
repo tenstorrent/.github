@@ -5,7 +5,8 @@
 # Reads:  IN_ROLE IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
 #         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
 #         ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
-# Writes: outputs url, join, spec, vault-timeout
+# Optional: IN_NETWORK_MODE IN_PROXY_PORT RUNNER_OS NODE_OPTIONS
+# Writes: outputs url, join, spec, vault-timeout, tailscaled-args, proxy-url, proxy-env
 set -euo pipefail
 
 DEFAULT_URL='https://vault-ospo.eng-svc.aws.tenstorrent.com'
@@ -127,10 +128,44 @@ if [ "$join" = true ]; then
   [ -n "${IN_TS_TAGS:-}" ] || fail "input tailscale-tags is empty. It is needed to join the tailnet."
 fi
 
+network_mode="${IN_NETWORK_MODE:-kernel}"
+proxy_port="${IN_PROXY_PORT:-1055}"
+proxy_url=""
+tailscaled_args=""
+proxy_env='{}'
+case "$network_mode" in
+  kernel) ;;
+  userspace)
+    [ "${RUNNER_OS:-}" = Linux ] || fail "network-mode userspace currently requires a Linux runner."
+    [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$proxy_port" -le 65535 ] \
+      || fail "proxy-port must be a whole number from 1 to 65535."
+    command -v jq >/dev/null 2>&1 || fail "network-mode userspace needs jq on the runner."
+    proxy_url="http://127.0.0.1:$proxy_port"
+    tailscaled_args="--tun=userspace-networking --socks5-server=127.0.0.1:$proxy_port --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
+    # Vault uses a dedicated global agent. The GitHub OIDC client must retain
+    # the runner's original proxy settings (CIv2 requires an outbound proxy).
+    oidc_host="${ACTIONS_ID_TOKEN_REQUEST_URL#*://}"
+    oidc_host="${oidc_host%%[/?#]*}"
+    oidc_host="${oidc_host%%:*}"
+    [[ "$oidc_host" =~ ^[A-Za-z0-9.-]+$ ]] || fail "cannot determine the GitHub OIDC host for proxy bypass."
+    preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"
+    # NODE_OPTIONS accepts double-quoted paths; escape quotes and backslashes.
+    preload="${preload//\\/\\\\}"
+    preload="${preload//\"/\\\"}"
+    proxy_env="$(jq -cn --arg proxy "$proxy_url" --arg bypass "$oidc_host" \
+      --arg options "${NODE_OPTIONS:+$NODE_OPTIONS }--require=\"$preload\"" \
+      '{VAULT_SECRETS_PROXY_URL:$proxy, VAULT_SECRETS_OIDC_HOST:$bypass, NODE_OPTIONS:$options}')"
+    ;;
+  *) fail "input network-mode must be kernel or userspace." ;;
+esac
+
 delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 {
   printf 'url=%s\n' "$url"
   printf 'join=%s\n' "$join"
   printf 'vault-timeout=%s\n' "$vault_timeout"
+  printf 'tailscaled-args=%s\n' "$tailscaled_args"
+  printf 'proxy-url=%s\n' "$proxy_url"
+  printf 'proxy-env=%s\n' "$proxy_env"
   printf 'spec<<%s\n%s\n%s\n' "$delimiter" "$spec" "$delimiter"
 } >>"$GITHUB_OUTPUT"
