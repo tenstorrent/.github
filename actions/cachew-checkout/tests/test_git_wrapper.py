@@ -432,6 +432,20 @@ class DownstreamGitTests(unittest.TestCase):
         remote = self.git_fixture.project_root / "org/cmake-dependency"
         self.assertEqual(fixture.git(remote, "rev-parse", "direct"), fixture.git(remote, "rev-parse", "main"))
 
+    def test_a_push_to_an_explicit_push_url_goes_upstream_through_the_wrapper(self):
+        # Git rewrites remote.<name>.pushurl with insteadOf, not pushInsteadOf, so
+        # only the wrapper's upstream view keeps this push off the cache.
+        target = self.cloned_dependency()
+        key = f"url.{self.upstream.url}/.pushInsteadOf"
+        self.config(self.session / "global.config", key, self.upstream.url + "/")
+        url = self.upstream.url + "/org/cmake-dependency"
+        self.run_git("-C", str(target), "remote", "set-url", "--push", "origin", url)
+        cache_requests = list(self.cache.requests)
+        self.run_git("-C", str(target), "push", "origin", "HEAD:refs/heads/pushurl")
+        self.assertEqual(self.cache.requests, cache_requests)
+        remote = self.git_fixture.project_root / "org/cmake-dependency"
+        self.assertEqual(fixture.git(remote, "rev-parse", "pushurl"), fixture.git(remote, "rev-parse", "main"))
+
     def test_aliased_fetch_is_retried_upstream_like_a_fetch(self):
         target = self.cloned_dependency()
         self.config(self.session / "global.config", "alias.up", "fetch --tags")

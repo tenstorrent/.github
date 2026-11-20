@@ -320,10 +320,14 @@ shell alias is not pinned.
 
 Native recursive clones, submodule and `remote` commands, initialized-submodule
 fetches, pushes and pulls use upstream directly. So does a shell alias (`!...`):
-Git runs its commands itself, past the wrapper. Pushes never go to cachew, even
-from a tool that runs Git by its full path: a `pushInsteadOf` for the upstream
-server, written with the cache rewrite, stops Git applying the rewrite to push
-URLs.
+Git runs its commands itself, past the wrapper. A push through the wrapper never
+goes to cachew. Past it (a tool that runs Git by its full path, or the submodule
+pushes of `git push --recurse-submodules`), a `pushInsteadOf` for the upstream
+server, written with the cache rewrite, stops Git applying the rewrite to a
+remote's URL when it pushes. Git does not apply `pushInsteadOf` to an explicit
+`remote.<name>.pushurl`, though, and does apply the cache rewrite to it, so such
+a push goes to the read-only cache instead of upstream. Run those pushes through `git` on
+`PATH`, or give the remote no separate push URL.
 
 Commands sent upstream directly, and every network command once caching is off,
 run with a private copy of the job's global file without the cache rewrite. A

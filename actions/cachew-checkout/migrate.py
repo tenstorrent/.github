@@ -402,8 +402,10 @@ def uses_values(text):
                 yield start, start + match.end(), match[1], None
         else:
             # A plain scalar ends at a comment (` #`) and, in a flow mapping, at , or }.
+            # Only spaces and tabs around it are not part of it: str.rstrip() would also
+            # drop Unicode spaces (U+00A0, U+2028, ...), which Git allows in branch names.
             end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
-            value = line[: end.start() if end else len(line)].rstrip()
+            value = line[: end.start() if end else len(line)].rstrip(" \t")
             yield start, start + len(value), value, None
 
 
@@ -450,7 +452,7 @@ def verify_pins(root, action_sha, exclude=()):
         if excluded(path, exclude):
             continue
         try:
-            text = (root / path).read_text()
+            text = (root / path).read_text(encoding="utf-8")
         except (OSError, ValueError) as error:
             problems.append(f"{path}: cannot be read ({error})")
             continue

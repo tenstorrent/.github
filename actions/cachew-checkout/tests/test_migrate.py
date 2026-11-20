@@ -364,6 +364,9 @@ class RepositoryTests(unittest.TestCase):
             f"- uses: >-\n          {action}@main",
             f"- uses: *pin",
             f"- uses: \"{action}@\\\n          main\"",
+            # YAML ends a plain scalar's line at spaces and tabs only; these are
+            # part of the ref, and Git allows them in branch names.
+            *(f"- uses: {action}@{SHA}{space}" for space in ("\u00a0", "\u3000", "\u2028", "\x85")),
         ):
             with self.subTest(bad=bad):
                 workflow.write_text(good.replace(line, bad))
