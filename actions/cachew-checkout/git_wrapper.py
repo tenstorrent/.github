@@ -36,7 +36,7 @@ from checkout import (  # noqa: E402
     apply_git_config,
     transport_error,
 )
-from session import pin_promisor_remotes, read_state, remove_cache_keys, remove_managed, subsection  # noqa: E402
+from session import LEGACY_CONFIG, pin_promisor_remotes, read_state, remove_cache_keys, remove_managed, subsection  # noqa: E402
 
 OPTIONS_WITH_VALUE = {
     "-C",
@@ -686,7 +686,10 @@ def run(arguments, environ):
         return subprocess.call([real_git, *arguments], env=environ)
     # Before any route is chosen, so that each one, the disabled session's
     # included, sees the command that really runs and a clone's destination.
-    resolved = resolve_alias(real_git, arguments, index, environ)
+    # The wrapper's own `git config` lookups read every file, as the command
+    # does: GIT_CONFIG would have them read one file only.
+    reading = {key: value for key, value in environ.items() if key != LEGACY_CONFIG}
+    resolved = resolve_alias(real_git, arguments, index, reading)
     shell_alias = resolved is SHELL_ALIAS
     if not shell_alias and resolved[1] is not None:
         # Run the expansion, which is what Git would run: every check below then
@@ -701,7 +704,7 @@ def run(arguments, environ):
     # or would follow its redirect, it carries no token: the empty values, read
     # after the job's files, clear cachew's headers.
     cache = state.get("cache")
-    setting = weakened(real_git, arguments, index, environ, cache) if cache else None
+    setting = weakened(real_git, arguments, index, reading, cache) if cache else None
     direct = environ
     if setting or any(name in environ for name in TLS_OVERRIDES):
         headers = dict.fromkeys(key for key, _ in state.get("managed", []) if key.lower().endswith(".extraheader"))
@@ -761,7 +764,7 @@ def run(arguments, environ):
             return done(subprocess.call([real_git, *arguments], env=upstream))
     if command not in ("clone", "fetch", "ls-remote"):
         return subprocess.call([real_git, *arguments], env=direct)
-    remotes = fetch_remotes(real_git, arguments, index, environ) if command == "fetch" else None
+    remotes = fetch_remotes(real_git, arguments, index, reading) if command == "fetch" else None
     if remotes is None and not reaches_cache(real_git, arguments, index, environ, state.get("cache")):
         return subprocess.call([real_git, *arguments], env=direct)
     if remotes is not None and not all(

@@ -11,7 +11,7 @@ servers on free ports, so they run side by side safely.
 
 usage: python3 run_parallel.py [-j JOBS] [tests directory]
 Exit status 1 if any test fails or errors, a shard does not run all its tests,
-or a shard exits with a non-zero status.
+a shard exits with a non-zero status, or the directory holds no test.
 """
 
 import argparse
@@ -34,15 +34,22 @@ def test_ids(suite):
             yield item.id()
 
 
+def job_count(value):
+    jobs = int(value)
+    if jobs < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return jobs
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-j", "--jobs", type=int, default=4, help="parallel processes (default: 4)")
+    parser.add_argument("-j", "--jobs", type=job_count, default=4, help="parallel processes (default: 4)")
     parser.add_argument("directory", nargs="?", type=Path, default=Path(__file__).resolve().parent)
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
     sys.path.insert(0, str(directory))
     tests = list(test_ids(unittest.defaultTestLoader.discover(str(directory), top_level_dir=str(directory))))
-    shards = [shard for shard in (tests[index :: args.jobs] for index in range(max(1, args.jobs))) if shard]
+    shards = [shard for shard in (tests[index :: args.jobs] for index in range(args.jobs)) if shard]
     start = time.monotonic()
     processes = [
         subprocess.Popen(
@@ -60,8 +67,10 @@ def main(argv=None):
     exited_nonzero = 0
     for shard, process in zip(shards, processes):
         output = process.communicate()[0]
-        ran = re.search(r"^Ran (\d+) tests? in", output, re.MULTILINE)
-        counts = dict(re.findall(r"(failures|errors|skipped)=(\d+)", output))
+        # unittest's own summary ends the output; a test may print lines like it.
+        summary = output.rstrip().rsplit("\n", 3)[-3:]
+        ran = re.fullmatch(r"Ran (\d+) tests? in \S+", summary[0]) if len(summary) == 3 else None
+        counts = dict(re.findall(r"\b(failures|errors|skipped)=(\d+)", summary[-1])) if ran else {}
         totals["ran"] += int(ran[1]) if ran else 0
         for key, value in counts.items():
             totals[key] += int(value)
@@ -73,6 +82,8 @@ def main(argv=None):
             exited_nonzero += 1
             print(output)
             print(f"shard exited with status {process.returncode}")
+    # No test at all is a wrong directory, not a pass.
+    complete = complete and totals["ran"] == len(tests) > 0
     failed = totals["failures"] or totals["errors"] or not complete or exited_nonzero
     print(
         f"Ran {totals['ran']} of {len(tests)} tests on {len(processes)} processes in "

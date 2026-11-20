@@ -83,12 +83,18 @@ MAX_INCLUDED_FILES = 30
 MAX_INCLUDE_DEPTH = 10
 
 
+# The one file `git config` reads and writes when no option names another. No
+# other Git command reads this variable, so a `git config` run with it does not
+# see the settings the job's commands get.
+LEGACY_CONFIG = "GIT_CONFIG"
+
+
 def config_environment(environ):
     """The environment for Git commands that must see only the named file."""
     return {
         key: value
         for key, value in environ.items()
-        if not key.startswith(("GIT_CONFIG_", "GIT_TRACE")) and key not in SECRET_ENVIRONMENT
+        if not key.startswith(("GIT_CONFIG_", "GIT_TRACE")) and key not in (LEGACY_CONFIG, *SECRET_ENVIRONMENT)
     }
 
 
@@ -337,6 +343,7 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
     if not cache:
         return
     prefix = cache.rstrip("/") + "/git/"
+    environ = {key: value for key, value in environ.items() if key != LEGACY_CONFIG}
 
     def run(*arguments):
         result = subprocess.run(
@@ -595,6 +602,9 @@ export CACHEW_SESSION_DIR={shell_quote(str(session))}
 # the cache. Read with the first $1 of the arguments that follow (the options
 # before the command, which can select or define either).
 wrapped() (
+  # Only `git config` reads this variable, as the one file to read: with it,
+  # these lookups would miss what the command itself gets from every file.
+  unset GIT_CONFIG
   keep=$1 word=$2
   shift 2
   position=0 total=$#

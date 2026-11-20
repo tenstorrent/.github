@@ -588,6 +588,23 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual((self.target / "deps/child/deep/grand/content.txt").read_text(), "grand")
         self.assertEqual(self.upstream.requests, [])
 
+    def test_the_legacy_git_config_variable_does_not_redirect_the_checkouts_settings(self):
+        # GIT_CONFIG names the one file `git config` reads and writes when no
+        # option names another; no other Git command reads it. The settings of
+        # a checkout belong in its repository, as actions/checkout writes them.
+        legacy = self.root / "legacy.config"
+        legacy.write_text("")
+        self.env.update(
+            GIT_CONFIG=str(legacy),
+            CACHEW_SUBMODULES="false",
+            CACHEW_SPARSE_CHECKOUT="/content.txt",
+            CACHEW_SPARSE_CHECKOUT_CONE_MODE="false",
+        )
+        self.assertTrue(self.attempt())
+        self.assertEqual(legacy.read_text(), "")
+        self.assertEqual(git(self.target, "config", "--local", "core.sparseCheckout"), "true")
+        self.assertEqual(git(self.target, "config", "--local", "core.bare"), "false")
+
     def test_success_checks_out_recursively_from_the_cache_only(self):
         self.assertTrue(self.attempt())
         self.assert_cache_attempts(["main", "child", "grand"])

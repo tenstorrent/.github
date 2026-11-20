@@ -981,6 +981,20 @@ class DownstreamGitTests(unittest.TestCase):
                 self.assertIn("Cachew", result.stderr)
                 if key:
                     subprocess.run([self.real_git, "config", "--file", str(active), "--unset-all", key], check=True)
+        # GIT_CONFIG names the one file `git config` reads, and no other Git
+        # command reads it: it hides no setting from the guard, and no alias.
+        legacy = dict(self.env, GIT_CONFIG=os.devnull)
+        key = f"http.{self.cache.url}/git/.sslVerify"
+        self.config(active, key, "false")
+        self.config(active, "alias.look", "ls-remote")
+        for command in ("ls-remote", "look"):
+            with self.subTest(command=command, GIT_CONFIG=os.devnull):
+                requests = len(self.cache.requests)
+                result = self.git_result(command, url, env=legacy)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.cache.requests), requests)
+                self.assertIn("Cachew", result.stderr)
+        subprocess.run([self.real_git, "config", "--file", str(active), "--unset-all", key], check=True)
         requests = len(self.cache.requests)
         self.config(active, "http.https://elsewhere.example/.sslVerify", "false")
         self.config(active, f"http.{self.cache.url}/.sslVerify", "true")

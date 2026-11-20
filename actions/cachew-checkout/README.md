@@ -200,6 +200,9 @@ option names an `http.*` setting or an include, and for any other command
 `http.<url>.*` setting. To find that out, the shim runs one `git config` before
 each command it would otherwise pass straight to Git. One case stays
 uncovered: Git run by its full path.
+The action's own `git config` calls ignore the legacy `GIT_CONFIG` variable,
+which names one file for `git config` alone to read and write: the job's
+commands keep it.
 Settings that choose which certificates to trust or
 which proxy to use (`GIT_SSL_CAINFO`, `http.sslCAInfo`, `http.proxy`,
 `https_proxy`) are the job's own and stay in effect. The cache checkout's Git reads

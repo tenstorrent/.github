@@ -66,5 +66,7 @@ jobs:
           # itself clears this variable, so it cannot affect real checkouts.
           CACHEW_TEST_ALLOW_LOOPBACK_HTTP: '1'
         run: |
+          # Without this file the tests that compare with actions/checkout skip.
+          test -f "$CHECKOUT_ACTION_JS"
           cmake --version
           python3 -m unittest discover -s actions/cachew-checkout/tests -v

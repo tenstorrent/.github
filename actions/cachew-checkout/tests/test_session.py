@@ -1297,7 +1297,18 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(result.returncode, 99, (arguments, result.stderr))
             self.assertTrue(marker.exists(), arguments)
             marker.unlink()
+        # GIT_CONFIG names the one file `git config` reads, and no other Git
+        # command reads it: it hides neither that setting nor an alias.
+        legacy = dict(local, env=dict(self.env, GIT_CONFIG=os.devnull))
+        result = subprocess.run([str(shim), "status"], **legacy)
+        self.assertEqual(result.returncode, 99, result.stderr)
+        marker.unlink()
         self.real_git("config", "--global", "--unset", "http.https://elsewhere.example/.sslVerify")
+        self.real_git("config", "--global", "alias.up", "fetch")
+        result = subprocess.run([str(shim), "up"], **legacy)
+        self.assertEqual(result.returncode, 99, result.stderr)
+        marker.unlink()
+        self.real_git("config", "--global", "--unset", "alias.up")
         self.real_git("config", "--global", "http.https://elsewhere.example/.followRedirects", "true")
         result = subprocess.run([str(shim), "status"], **local)
         self.assertEqual(result.returncode, 99, result.stderr)

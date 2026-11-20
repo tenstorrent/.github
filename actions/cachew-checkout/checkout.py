@@ -332,7 +332,7 @@ def job_transport(git, environ, url):
     """The job's TRANSPORT_KEYS settings for a URL, as Git selects them
     (`http.<url>.*` over `http.*`), read outside any repository."""
     with tempfile.TemporaryDirectory(prefix="cachew-config-") as empty:
-        env = {key: value for key, value in environ.items() if key not in ("GIT_DIR", "GIT_WORK_TREE")}
+        env = {key: value for key, value in environ.items() if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_CONFIG")}
         env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(empty)
         command = [git, "config", "--null", "--get-urlmatch", "http", url.rstrip("/") + "/"]
         try:
@@ -583,7 +583,10 @@ class Checkout:
             raise Bypass("existing checkout uses upstream directly")
         # Worktree commands see the caller's Git configuration, as actions/checkout's do,
         # but can never reach the network: a missing object fails the attempt instead.
-        dropped = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", *SECRET_ENVIRONMENT, *TLS_OVERRIDES)
+        # GIT_CONFIG names the one file `git config` reads and writes when no
+        # option names another, and no other Git command reads it: with it, the
+        # settings of this checkout would land in that file.
+        dropped = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG", *SECRET_ENVIRONMENT, *TLS_OVERRIDES)
         self.local_env = {key: value for key, value in environ.items() if key not in dropped}
         self.local_env.update(GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never", GIT_LFS_SKIP_SMUDGE="1")
         self.env = dict(environ)
