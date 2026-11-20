@@ -120,7 +120,8 @@ for it at that time. It maps the whole remote URL, so it outranks any rewrite th
 job adds later for that remote, such as a mirror or a token in a URL: while
 caching is on, a later rewrite does not apply to that repository's lazy fetches.
 Once caching is off for the job and cachew's rewrite is gone, cachew removes its
-pins, so later rewrites apply as they would without cachew. A pin also ends with
+pins and writes no more, even for a command that read the configuration before
+caching was turned off, so later rewrites apply as they would without cachew. A pin also ends with
 the job (see below), so a later job in a workspace the runner kept is not
 affected. A job that rewrites
 a filtered checkout's remote should do so before the checkout. Submodules are fetched unfiltered, as standard checkout fetches them.

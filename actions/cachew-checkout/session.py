@@ -16,10 +16,10 @@ Files in the action-owned session directory under RUNNER_TEMP:
                    (submodule auth, its transient safe.directory) stay here.
   state.json       Session state, including cache-scoped auth headers.
   cache-disabled   Present once caching is off for the rest of the job.
-  pins.list        The promisor-remote pins written into repositories, removed
-                   once caching is off and cachew's rewrite is gone.
-  pins/            Pins whose target carries a job credential, included by
-                   their repository.
+  pins/            Promisor-remote pins, each included by its repository.
+  pins.lock        Held while pins are written or removed.
+  pins-off         Present once caching is off and its rewrite gone: the pins
+                   are removed and no more are written.
 
 Upstream authentication is never added to the global file: actions/checkout
 already persists repository-scoped credentials, and a job-wide Authorization
@@ -36,6 +36,8 @@ if sys.version_info < (3, 10):
     sys.exit("Python 3.10 or newer is required")
 
 import base64  # noqa: E402
+import contextlib  # noqa: E402
+import fcntl  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -313,7 +315,7 @@ def remove_cache_keys(real_git, session, state, environ, disable=True):
         # Nothing reads a recorded token once caching is off for the job.
         state.update(tokens={}, defaults={}, paths={})
         if not any(key.lower().endswith(".insteadof") for key in remaining):
-            remove_pins(real_git, session, environ)
+            remove_pins(session)
     write_state(session, state)
     return state
 
@@ -371,64 +373,51 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
                 best = (base, value)
         return best[0] + url[len(best[1]) :]
 
-    config = None
-
-    def record(key, value):
-        """Note the pin before writing it, so that turning caching off removes
-        it, wherever this stops: it outranks every rewrite the job writes."""
-        nonlocal config
-        if not session:
-            return
-        if config is None:
-            common = run("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
-            config = os.path.join(common, "config") if common else ""
-        if config:
-            line = json.dumps([config, key, value]) + "\n"
-            descriptor = os.open(Path(session) / "pins.list", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-            with os.fdopen(descriptor, "a", encoding="utf-8", errors="surrogateescape") as stream:
-                stream.write(line)
-
-    for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
-        key, _, value = line.partition(" ")
-        remote = key[len("remote.") : -len(".promisor")]
-        # A filtered fetch from a URL records the URL itself as the promisor remote.
-        url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
-        if value.lower() != "true" or not run("ls-remote", "--get-url", remote).startswith(prefix):
-            continue
-        target = without_cachew(url)
-        if pin := session_pin(session, target, url):
-            read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
-            if read == f"url.{target}.insteadof\n{url}\0":
-                record("include.path", pin)
-                run("config", "--local", "--add", "include.path", pin)
-            else:
-                os.unlink(pin)
-
-
-def remove_pins(real_git, session, environ):
-    """Remove the pins pin_promisor_remotes wrote, once no cache rewrite is left
-    for them to outrank. Kept, a pin would send lazy fetches past any rewrite the
-    job writes later (a mirror, a credential), which plain Git would apply."""
-    listing = Path(session) / "pins.list"
-    try:
-        lines = listing.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
-    except FileNotFoundError:
+    if not session or not Path(session).is_dir():
         return
-    kept = []
-    for line in lines:
-        try:
-            config, key, value = json.loads(line)
-        except ValueError:
-            continue
-        if os.path.exists(config):
-            unset = ("config", "--file", config, "--fixed-value", "--unset-all", key, value)
-            result = git(real_git, environ, *unset, allowed=range(256))
-            if result.returncode not in (0, 5):  # 5: already gone
-                kept.append(line)
+    with pins_lock(session):
+        # Once caching is off and its rewrite gone, no pin is needed, whatever
+        # this command read before: one written now would never be removed.
+        if (Path(session) / "pins-off").exists():
+            return
+        for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
+            key, _, value = line.partition(" ")
+            remote = key[len("remote.") : -len(".promisor")]
+            # A filtered fetch from a URL records the URL itself as the promisor remote.
+            url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
+            if value.lower() != "true" or not run("ls-remote", "--get-url", remote).startswith(prefix):
                 continue
-        if key == "include.path" and Path(value).parent == Path(session) / "pins":
-            Path(value).unlink(missing_ok=True)
-    write_private(listing, "".join(line + "\n" for line in kept))
+            target = without_cachew(url)
+            if pin := session_pin(session, target, url):
+                read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
+                if read == f"url.{target}.insteadof\n{url}\0":
+                    run("config", "--local", "--add", "include.path", pin)
+                else:
+                    os.unlink(pin)
+
+
+@contextlib.contextmanager
+def pins_lock(session):
+    """Held while pins are written or removed, so that a command that read the
+    configuration before caching was turned off cannot pin after the removal."""
+    with open(Path(session) / "pins.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def remove_pins(session):
+    """Remove the pins pin_promisor_remotes wrote, once no cache rewrite is left
+    for them to outrank, and stop any more being written. Kept, a pin would send
+    lazy fetches past any rewrite the job writes later (a mirror, a credential),
+    which plain Git would apply. Each repository's include then names a file
+    that is gone, which Git ignores, as it does once the job completes."""
+    with pins_lock(session):
+        (Path(session) / "pins-off").touch(mode=0o600, exist_ok=True)
+        for pin in (Path(session) / "pins").glob("*.config"):
+            pin.unlink(missing_ok=True)
 
 
 def subsection(key, prefix, suffix):

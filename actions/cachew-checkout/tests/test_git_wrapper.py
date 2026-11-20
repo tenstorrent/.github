@@ -820,6 +820,33 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(Path(included).is_relative_to(self.session), included)
         self.assertEqual(Path(included).stat().st_mode & 0o077, 0)
 
+    def test_a_pin_decided_before_caching_turned_off_is_not_left_behind(self):
+        # A command that read the configuration while the cache rewrite was still
+        # there pins after another has turned caching off and removed the pins.
+        # Nothing would remove that pin, and it would outrank the job's later
+        # mirror or credential rewrites for the rest of the job.
+        self.history("priv")
+        destination = self.root / "private"
+        url = self.upstream.url + "/org/priv"
+        self.run_git("clone", "--filter=blob:none", url, str(destination))
+        before = self.root / "before.config"
+        shutil.copy(self.session / "global.config", before)
+        self.dependency("cmake-dependency")
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("clone", self.upstream.url + "/org/cmake-dependency", str(self.root / "failed"))
+        self.assert_disabled()
+        late = dict(self.env, GIT_CONFIG_GLOBAL=str(before))
+        load_wrapper().pin_promisor_remotes(
+            self.real_git, ["-C", str(destination)], late, self.cache.url, self.session
+        )
+        listing = subprocess.run(
+            [self.real_git, "-C", str(destination), "config", "--get-regexp", r"^url\..*\.insteadof$"],
+            env=dict(self.env, GIT_CONFIG_GLOBAL=os.devnull),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(listing.stdout, "")
+
     def test_a_pin_ends_with_the_session(self):
         # A self-hosted runner keeps the workspace for the next job, which has no
         # cache rewrite for the pin to outrank, but may have a mirror or credential
