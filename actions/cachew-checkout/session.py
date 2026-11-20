@@ -318,16 +318,13 @@ def remove_cache_keys(real_git, session, state, environ, disable=True):
     return state
 
 
-def userinfo(url):
-    """The `user[:password]` of a URL's authority, or ""."""
-    authority = url.partition("://")[2].partition("/")[0]
-    return authority.rpartition("@")[0]
-
-
-def secret_pin(session, target, url):
-    """Write a pin whose target carries a credential to a file of the session
-    directory, for the owner only, and return its path (None if it cannot be
-    written exactly). The credential appears in no process's arguments."""
+def session_pin(session, target, url):
+    """Write a pin to a file of the session directory, for the owner only, and
+    return its path (None if it cannot be written exactly). A credential in the
+    target appears in no process's arguments, and the pin ends with the session:
+    the runner empties RUNNER_TEMP when the job completes, and Git ignores an
+    include whose file is gone, so a later job in a workspace the runner kept
+    has no pin outranking its own rewrites."""
 
     def quoted(value):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -348,10 +345,10 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
     promisor remote the rewrite reaches to the URL Git would use without cachew:
     a repository-local mapping of the whole URL is a longer insteadOf match.
 
-    Where the job's own rewrite adds a credential to that URL, the pin goes to
-    a file of the session directory that the repository includes, so the
-    credential is not copied into the work tree. Without a session directory
-    such a remote is left unpinned."""
+    The pin is a file of the session directory that the repository includes
+    (see session_pin), so a credential the job's own rewrite adds is not copied
+    into the work tree, and the pin does not outlive the job. Without a session
+    directory a remote is left unpinned."""
     if not cache:
         return
     prefix = cache.rstrip("/") + "/git/"
@@ -399,10 +396,7 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
         if value.lower() != "true" or not run("ls-remote", "--get-url", remote).startswith(prefix):
             continue
         target = without_cachew(url)
-        if userinfo(target) == userinfo(url):
-            record(f"url.{target}.insteadOf", url)
-            run("config", "--local", "--add", f"url.{target}.insteadOf", url)
-        elif pin := secret_pin(session, target, url):
+        if pin := session_pin(session, target, url):
             read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
             if read == f"url.{target}.insteadof\n{url}\0":
                 record("include.path", pin)

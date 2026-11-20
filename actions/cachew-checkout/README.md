@@ -111,8 +111,8 @@ official checkout well within the step's `timeout-minutes`. Retries share this b
 With `filter`, the main repository needs two cache fetches: the complete tip
 commit, then the filtered history at the requested depth. The worktree
 therefore needs no lazy fetches. `origin` is recorded as the promisor remote with
-the same filter, as standard checkout does, and a repository-local `insteadOf`
-pins it upstream, so objects missing later are fetched lazily from upstream
+the same filter, as standard checkout does, and an `insteadOf` the repository
+includes pins it upstream, so objects missing later are fetched lazily from upstream
 rather than through the job's cache rewrite. The same applies to sparse
 checkouts and to partial clones the Git wrapper makes. The pin is the URL Git
 would use without cachew when it is written, applying the job's own `insteadOf`
@@ -120,7 +120,9 @@ for it at that time. It maps the whole remote URL, so it outranks any rewrite th
 job adds later for that remote, such as a mirror or a token in a URL: while
 caching is on, a later rewrite does not apply to that repository's lazy fetches.
 Once caching is off for the job and cachew's rewrite is gone, cachew removes its
-pins, so later rewrites apply as they would without cachew. A job that rewrites
+pins, so later rewrites apply as they would without cachew. A pin also ends with
+the job (see below), so a later job in a workspace the runner kept is not
+affected. A job that rewrites
 a filtered checkout's remote should do so before the checkout. Submodules are fetched unfiltered, as standard checkout fetches them.
 
 `sparse-checkout` works like standard checkout: it implies `filter: blob:none`,
@@ -313,13 +315,15 @@ missing ref, `ls-remote --exit-code` finding nothing) keep caching on. A failed
 cache clone's partial destination is removed before the upstream retry. Git runs a
 partial clone's lazy fetches itself, past the wrapper, so after a clone, fetch, pull,
 `remote` or `submodule` command, whether or not it succeeded, each promisor remote the cache rewrite reaches, in the
-repository and in its submodules, is pinned with a repository-local `insteadOf`,
+repository and in its submodules, is pinned,
 as the checkout's `origin` is. The pin maps the remote's URL to the URL Git would
-use without cachew. If the job has its own `insteadOf` for that URL that adds a
-credential, the pin is written to a file under `pins/` in the session directory,
-readable by the owner only, and the repository's `.git/config` gets an
-`include.path` naming it: the credential is not copied into the work tree, and
-the pin ends when the runner empties `RUNNER_TEMP`. A partial clone made by a
+use without cachew. It is written to a file under `pins/` in the session
+directory, readable by the owner only, and the repository's `.git/config` gets an
+`include.path` naming it. A credential the job's own `insteadOf` adds to that URL
+is not copied into the work tree, and the pin ends when the runner empties
+`RUNNER_TEMP`: Git ignores an include whose file is gone, so a later job on a
+runner that keeps its workspace (self-hosted) gets no pin outranking its own
+mirror or credential rewrites. A partial clone made by a
 shell alias is not pinned.
 
 Native recursive clones, submodule and `remote` commands, initialized-submodule

@@ -820,6 +820,26 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(Path(included).is_relative_to(self.session), included)
         self.assertEqual(Path(included).stat().st_mode & 0o077, 0)
 
+    def test_a_pin_ends_with_the_session(self):
+        # A self-hosted runner keeps the workspace for the next job, which has no
+        # cache rewrite for the pin to outrank, but may have a mirror or credential
+        # rewrite of its own. The pin lives in the session directory, which the
+        # runner empties when the job completes; the repository only includes it.
+        self.history("priv")
+        destination = self.root / "private"
+        url = self.upstream.url + "/org/priv"
+        self.run_git("clone", "--filter=blob:none", url, str(destination))
+        self.assertEqual(self.run_git("-C", str(destination), "config", "--get-all", f"url.{url}.insteadOf"), url)
+        shutil.rmtree(self.session)
+        later = dict(self.env, GIT_CONFIG_GLOBAL=os.devnull)
+        listing = subprocess.run(
+            [self.real_git, "-C", str(destination), "config", "--get-regexp", r"^url\..*\.insteadof$"],
+            env=later,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(listing.stdout, "")
+
     def test_turning_caching_off_removes_the_pins_so_later_rewrites_apply(self):
         # A pin is longer than any rewrite the job writes. Once cachew's rewrite
         # is gone it has nothing left to outrank, and kept, it would send lazy
