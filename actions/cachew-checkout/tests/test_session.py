@@ -551,6 +551,15 @@ class SessionTests(unittest.TestCase):
                 self.assertNotIn(fixtures.TOKEN.encode(), content, file)
         self.finish()
 
+    def test_a_whitespace_only_persist_credentials_records_no_token(self):
+        # actions/checkout reads (getInput('persist-credentials') || 'false'):
+        # an input that trims to nothing is false, whatever action.yml's default.
+        self.env["CACHEW_PERSIST_CREDENTIALS"] = " \n"
+        self.assertEqual(self.flow(), (True, True))
+        header = base64.b64encode(f"x-access-token:{fixtures.TOKEN}".encode()).decode()
+        self.assertNotIn(header, (Path(self.env["CACHEW_SESSION_DIR"]) / "state.json").read_text())
+        self.finish()
+
     def recorded(self):
         return json.loads((Path(self.env["CACHEW_SESSION_DIR"]) / "state.json").read_text())
 

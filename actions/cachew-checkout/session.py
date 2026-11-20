@@ -693,7 +693,7 @@ def activate(environ):
         and token
         and settings.upstream
         and settings.repository
-        and checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
+        and checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "false")
         # This step also runs after a checkout that failed or was refused, which
         # leaves no credentials: neither does this.
         and checkout_flag(environ, "CACHEW_CHECKED_OUT", "false")

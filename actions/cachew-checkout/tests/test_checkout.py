@@ -543,6 +543,9 @@ class CheckoutTests(unittest.TestCase):
             "inputs with surrounding whitespace": dict(
                 CACHEW_REF="", CACHEW_SUBMODULES=" recursive\n", CACHEW_PATH="checkout\n"
             ),
+            # Empty after the trim: actions/checkout then reads the flag as false,
+            # not as action.yml's default.
+            "whitespace-only persist-credentials": dict(CACHEW_REF="", CACHEW_PERSIST_CREDENTIALS=" \n"),
             "filtered history": dict(CACHEW_REF="", CACHEW_FILTER="tree:0"),
             "filtered full history": dict(CACHEW_REF="main", CACHEW_FILTER="blob:none", CACHEW_FETCH_DEPTH="0"),
             "sparse cone": dict(
@@ -883,6 +886,15 @@ class CheckoutTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.env = dict(ordinary, **change)
                 self.assertFalse(self.violation())
+
+    def test_a_whitespace_only_token_falls_back_to_the_standard_checkout(self):
+        # actions/checkout reads the token with required: true, so one that trims
+        # to nothing fails that checkout; cachew must not check out without it.
+        self.env["CACHEW_TOKEN"] = " \n"
+        self.assertFalse(self.attempt())
+        self.assertFalse(self.violation())
+        self.assertEqual(self.cache.requests, [])
+        self.assertFalse((self.target / "content.txt").exists())
 
     def test_server_origins_with_shell_or_config_metacharacters_are_rejected(self):
         # The origin reaches `git submodule foreach` shell commands and Git configuration keys.

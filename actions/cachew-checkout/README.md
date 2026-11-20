@@ -224,7 +224,9 @@ name or IP literal, and a submodule URL exactly `<origin>/<owner>/<name>`;
 anything else uses the standard checkout. Upstream credentials stay exactly where
 `actions/checkout` puts them (repository-local), so later steps can use other
 credentials for other repositories. With `persist-credentials: false` the token
-is used only for the checkout itself. A checkout that fails or is refused, in
+is used only for the checkout itself. Inputs are read as `actions/checkout`
+reads them: a `persist-credentials` that is empty after trimming is false, and an
+empty `token` uses the standard checkout, which reports it. A checkout that fails or is refused, in
 a step the job lets continue, records no token for the cache either. Steps may write the global
 configuration (`git config --global ...`); cachew only adds and removes its own
 keys, so those writes survive cache fallback and later checkouts.

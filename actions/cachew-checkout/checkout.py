@@ -190,7 +190,9 @@ def checkout_input(environ, name, default=""):
 
 
 def checkout_flag(environ, name, default):
-    """A boolean input as actions/checkout reads it: true only for TRUE in any case."""
+    """A boolean input as actions/checkout reads it: true only for TRUE in any case.
+    default is the fallback in its input-helper (getInput(name) || default), which
+    can differ from the action.yml default: an input that trims to nothing gets it."""
     return checkout_input(environ, name, default).upper() == "TRUE"
 
 
@@ -492,6 +494,9 @@ class Checkout:
             value = checkout_input(environ, f"CACHEW_{key}")
             if value and value.lower() != "false":
                 raise Bypass("checkout mode uses upstream directly")
+        # Required by actions/checkout, which fails without one: that checkout reports it.
+        if not checkout_input(environ, "CACHEW_TOKEN"):
+            raise Bypass("no token")
         # actions/checkout's getMultilineInput: trim the input, drop empty lines, trim each.
         sparse = checkout_input(environ, "CACHEW_SPARSE_CHECKOUT")
         self.sparse = [JS_TRIM.sub("", line) for line in sparse.split("\n") if line] if sparse else []
@@ -554,7 +559,7 @@ class Checkout:
         self.submodules = checkout_input(environ, "CACHEW_SUBMODULES", "false").lower()
         if self.sparse and self.submodules in ("true", "recursive"):
             raise Bypass("sparse checkout with submodules uses upstream directly")
-        self.persist = checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "true")
+        self.persist = checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "false")
         self.safe_directory = checkout_flag(environ, "CACHEW_SET_SAFE_DIRECTORY", "true")
         self.runner_temp = environ.get("RUNNER_TEMP", "")
         if self.persist and not self.runner_temp:
