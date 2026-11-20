@@ -560,6 +560,32 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn(header, (Path(self.env["CACHEW_SESSION_DIR"]) / "state.json").read_text())
         self.finish()
 
+    def test_a_deleted_checkout_no_longer_gives_the_cache_its_token(self):
+        # actions/checkout keeps a path's credentials in that repository, so they
+        # go with it: a checkout at the root cleans away a nested one, a step
+        # removes it. A later activation must not write its token again.
+        self.fixture.repository("secondary")
+        self.assertEqual(self.flow(), (True, True))
+        inputs = ("CACHEW_REPOSITORY", "CACHEW_PATH", "CACHEW_REF", "CACHEW_TOKEN")
+        primary = {name: self.env.get(name, "") for name in inputs}
+        self.env.update(
+            CACHEW_REPOSITORY="org/secondary",
+            CACHEW_PATH="removed",
+            CACHEW_REF="main",
+            CACHEW_TOKEN="secondary-token",
+        )
+        self.assertEqual(self.flow(), (True, True))
+        header = base64.b64encode(b"x-access-token:secondary-token").decode()
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        self.assertIn(header, (session / "state.json").read_text())
+        shutil.rmtree(self.fixture.workspace / "removed")
+        self.env.update(primary)
+        # Into the existing checkout, so the standard checkout runs.
+        self.assertEqual(self.flow(), (False, True))
+        self.assertNotIn(header, (session / "state.json").read_text())
+        self.assertNotIn(header, (session / "global.config").read_text())
+        self.finish()
+
     def recorded(self):
         return json.loads((Path(self.env["CACHEW_SESSION_DIR"]) / "state.json").read_text())
 

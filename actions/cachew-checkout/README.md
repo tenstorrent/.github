@@ -234,7 +234,9 @@ credentials for other repositories. With `persist-credentials: false` the token
 is used only for the checkout itself. Inputs are read as `actions/checkout`
 reads them: a `persist-credentials` that is empty after trimming is false, and an
 empty `token` uses the standard checkout, which reports it. A checkout that fails or is refused, in
-a step the job lets continue, records no token for the cache either. Steps may write the global
+a step the job lets continue, records no token for the cache either. A checkout
+whose repository is gone at a later checkout (a step deleted it, or a checkout
+at a parent path cleaned it away) no longer gives the cache its token. Steps may write the global
 configuration (`git config --global ...`); cachew only adds and removes its own
 keys, so those writes survive cache fallback and later checkouts.
 
@@ -321,10 +323,14 @@ shell alias is not pinned.
 Native recursive clones, submodule and `remote` commands, initialized-submodule
 fetches, pushes and pulls use upstream directly. So does a shell alias (`!...`):
 Git runs its commands itself, past the wrapper. A push through the wrapper never
-goes to cachew. Past it (a tool that runs Git by its full path, or the submodule
+goes to cachew, and runs without any of cachew's rewrites, so the job's own
+`insteadOf` (a token in a URL) and `pushInsteadOf` (to SSH) apply as they would
+without cachew. Past it (a tool that runs Git by its full path, or the submodule
 pushes of `git push --recurse-submodules`), a `pushInsteadOf` for the upstream
 server, written with the cache rewrite, stops Git applying the rewrite to a
-remote's URL when it pushes. Git does not apply `pushInsteadOf` to an explicit
+remote's URL when it pushes. That guard also keeps Git from applying the job's
+own `insteadOf` to those push URLs, and outranks a `pushInsteadOf` for the same
+URLs that the job writes after it. Git does not apply `pushInsteadOf` to an explicit
 `remote.<name>.pushurl`, though, and does apply the cache rewrite to it, so such
 a push goes to the read-only cache instead of upstream. Run those pushes through `git` on
 `PATH`, or give the remote no separate push URL.

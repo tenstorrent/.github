@@ -46,6 +46,7 @@ class DownstreamGitTests(unittest.TestCase):
         host = urllib.parse.urlsplit(self.upstream.url).netloc
         self.managed = [
             [f"url.{self.cache.url}/git/{host}/.insteadOf", self.upstream.url + "/"],
+            [f"url.{self.upstream.url}/.pushInsteadOf", self.upstream.url + "/"],
             [f"http.{self.cache.url}/.extraHeader", ""],
             [f"http.{self.cache.url}/.extraHeader", self.authorization()],
         ]
@@ -413,6 +414,22 @@ class DownstreamGitTests(unittest.TestCase):
         remote = self.git_fixture.project_root / "org/cmake-dependency"
         for branch in ("aliased", "nested", "inline"):
             self.assertEqual(fixture.git(remote, "rev-parse", branch), fixture.git(remote, "rev-parse", "main"))
+
+    def test_a_push_through_the_wrapper_follows_the_jobs_own_rewrites(self):
+        # cachew's pushInsteadOf matches every upstream push URL, and Git applies
+        # no insteadOf to a URL a pushInsteadOf matched: kept, it would drop a
+        # credential the job adds with insteadOf, or outrank a pushInsteadOf
+        # (to SSH, say) the job writes after it. The wrapper pushes without it.
+        target = self.cloned_dependency()
+        required = "Basic " + base64.b64encode(b"x:JOBPAT").decode()
+        self.upstream.required_auth["cmake-dependency"] = required
+        authed = self.upstream.url.replace("http://", "http://x:JOBPAT@")
+        self.config(self.session / "global.config", f"url.{authed}/.insteadOf", self.upstream.url + "/")
+        env = dict(self.env, GIT_TERMINAL_PROMPT="0")
+        result = self.git_result("-C", str(target), "push", "origin", "HEAD:refs/heads/credential", env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        remote = self.git_fixture.project_root / "org/cmake-dependency"
+        self.assertEqual(fixture.git(remote, "rev-parse", "credential"), fixture.git(remote, "rev-parse", "main"))
 
     def test_push_past_the_wrapper_goes_upstream(self):
         """The pushInsteadOf that session.py writes keeps a push off the cache even

@@ -276,6 +276,12 @@ def remove_managed(real_git, config, state, environ, rewrites_only=False):
         if key.lower().endswith(".insteadof") and not unset("--fixed-value", "--unset-all", key, value):
             remaining.add(key)
     if rewrites_only:
+        # A view without the cache rewrite needs no push guard either. Kept, it
+        # would stop Git applying the job's own insteadOf (a credential) to push
+        # URLs, and outrank a pushInsteadOf (to SSH) the job wrote after it.
+        for key, value in entries if not remaining else ():
+            if key.lower().endswith(".pushinsteadof") and not unset("--fixed-value", "--unset-all", key, value):
+                remaining.add(key)
         return remaining
     rewrites_left = bool(remaining)
     headers = dict.fromkeys(key for key, value in entries if key.lower().endswith(".extraheader") and value)
@@ -728,6 +734,10 @@ def activate(environ):
     paths = state.setdefault("paths", {})
     if inside:
         paths.pop(str(checkout), None)
+    # A repository removed since its checkout (a step deleted it, or a checkout
+    # at a parent path cleaned it away) took its credentials with it.
+    for path in [path for path in paths if not os.path.lexists(os.path.join(path, ".git"))]:
+        paths.pop(path)
     own_tokens(state)
     write_state(session, state)
     view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
