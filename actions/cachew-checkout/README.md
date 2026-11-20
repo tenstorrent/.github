@@ -114,7 +114,14 @@ therefore needs no lazy fetches. `origin` is recorded as the promisor remote wit
 the same filter, as standard checkout does, and a repository-local `insteadOf`
 pins it upstream, so objects missing later are fetched lazily from upstream
 rather than through the job's cache rewrite. The same applies to sparse
-checkouts. Submodules are fetched unfiltered, as standard checkout fetches them.
+checkouts and to partial clones the Git wrapper makes. The pin is the URL Git
+would use without cachew when it is written, applying the job's own `insteadOf`
+for it at that time. It maps the whole remote URL, so it outranks any rewrite the
+job adds later for that remote, such as a mirror or a token in a URL: while
+caching is on, a later rewrite does not apply to that repository's lazy fetches.
+Once caching is off for the job and cachew's rewrite is gone, cachew removes its
+pins, so later rewrites apply as they would without cachew. A job that rewrites
+a filtered checkout's remote should do so before the checkout. Submodules are fetched unfiltered, as standard checkout fetches them.
 
 `sparse-checkout` works like standard checkout: it implies `filter: blob:none`,
 applies the patterns (`sparse-checkout set`, or `info/sparse-checkout` without

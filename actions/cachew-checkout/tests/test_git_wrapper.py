@@ -789,6 +789,32 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(Path(included).is_relative_to(self.session), included)
         self.assertEqual(Path(included).stat().st_mode & 0o077, 0)
 
+    def test_turning_caching_off_removes_the_pins_so_later_rewrites_apply(self):
+        # A pin is longer than any rewrite the job writes. Once cachew's rewrite
+        # is gone it has nothing left to outrank, and kept, it would send lazy
+        # fetches past a mirror or credential rewrite the job adds later.
+        self.history("priv")
+        destination = self.root / "private"
+        url = self.upstream.url + "/org/priv"
+        self.run_git("clone", "--filter=blob:none", url, str(destination))
+        self.assertEqual(self.run_git("-C", str(destination), "config", "--get-all", f"url.{url}.insteadOf"), url)
+        self.dependency("cmake-dependency")
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("clone", self.upstream.url + "/org/cmake-dependency", str(self.root / "failed"))
+        self.assert_disabled()
+        self.assertNotIn("insteadof", (destination / ".git/config").read_text().lower())
+        required = "Basic " + base64.b64encode(b"x:JOBPAT").decode()
+        self.upstream.required_auth["priv"] = required
+        env = dict(self.env, GIT_TERMINAL_PROMPT="0")
+        authed = self.upstream.url.replace("http://", "http://x:JOBPAT@")
+        subprocess.run(
+            [self.real_git, "config", "--global", f"url.{authed}/.insteadOf", self.upstream.url + "/"],
+            env=env,
+            check=True,
+        )
+        lazy = self.git_result("-C", str(destination), "show", "HEAD~1:content.txt", env=env)
+        self.assertEqual(lazy.returncode, 0, lazy.stderr)
+
     def test_a_command_that_turns_off_verification_sends_the_cache_no_token(self):
         # GIT_SSL_NO_VERIFY overrides http.sslVerify. A command the wrapper does
         # not route (here a lazy fetch of a clone Git made by its full path, so

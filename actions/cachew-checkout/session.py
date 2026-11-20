@@ -16,6 +16,10 @@ Files in the action-owned session directory under RUNNER_TEMP:
                    (submodule auth, its transient safe.directory) stay here.
   state.json       Session state, including cache-scoped auth headers.
   cache-disabled   Present once caching is off for the rest of the job.
+  pins.list        The promisor-remote pins written into repositories, removed
+                   once caching is off and cachew's rewrite is gone.
+  pins/            Pins whose target carries a job credential, included by
+                   their repository.
 
 Upstream authentication is never added to the global file: actions/checkout
 already persists repository-scoped credentials, and a job-wide Authorization
@@ -302,6 +306,8 @@ def remove_cache_keys(real_git, session, state, environ, disable=True):
     if marker.exists():
         # Nothing reads a recorded token once caching is off for the job.
         state.update(tokens={}, defaults={}, paths={})
+        if not any(key.lower().endswith(".insteadof") for key in remaining):
+            remove_pins(real_git, session, environ)
     write_state(session, state)
     return state
 
@@ -362,6 +368,23 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
                 best = (base, value)
         return best[0] + url[len(best[1]) :]
 
+    config = None
+
+    def record(key, value):
+        """Note the pin before writing it, so that turning caching off removes
+        it, wherever this stops: it outranks every rewrite the job writes."""
+        nonlocal config
+        if not session:
+            return
+        if config is None:
+            common = run("rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+            config = os.path.join(common, "config") if common else ""
+        if config:
+            line = json.dumps([config, key, value]) + "\n"
+            descriptor = os.open(Path(session) / "pins.list", os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(descriptor, "a", encoding="utf-8", errors="surrogateescape") as stream:
+                stream.write(line)
+
     for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
         key, _, value = line.partition(" ")
         remote = key[len("remote.") : -len(".promisor")]
@@ -371,13 +394,41 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
             continue
         target = without_cachew(url)
         if userinfo(target) == userinfo(url):
+            record(f"url.{target}.insteadOf", url)
             run("config", "--local", "--add", f"url.{target}.insteadOf", url)
         elif pin := secret_pin(session, target, url):
             read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
             if read == f"url.{target}.insteadof\n{url}\0":
+                record("include.path", pin)
                 run("config", "--local", "--add", "include.path", pin)
             else:
                 os.unlink(pin)
+
+
+def remove_pins(real_git, session, environ):
+    """Remove the pins pin_promisor_remotes wrote, once no cache rewrite is left
+    for them to outrank. Kept, a pin would send lazy fetches past any rewrite the
+    job writes later (a mirror, a credential), which plain Git would apply."""
+    listing = Path(session) / "pins.list"
+    try:
+        lines = listing.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+    except FileNotFoundError:
+        return
+    kept = []
+    for line in lines:
+        try:
+            config, key, value = json.loads(line)
+        except ValueError:
+            continue
+        if os.path.exists(config):
+            unset = ("config", "--file", config, "--fixed-value", "--unset-all", key, value)
+            result = git(real_git, environ, *unset, allowed=range(256))
+            if result.returncode not in (0, 5):  # 5: already gone
+                kept.append(line)
+                continue
+        if key == "include.path" and Path(value).parent == Path(session) / "pins":
+            Path(value).unlink(missing_ok=True)
+    write_private(listing, "".join(line + "\n" for line in kept))
 
 
 def subsection(key, prefix, suffix):
