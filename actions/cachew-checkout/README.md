@@ -276,8 +276,10 @@ sense as an attack and have no fallback: the action posts an error annotation
 titled `cachew-checkout: possible security compromise attempt` and fails before
 any checkout runs. They are:
 
-- a `github-server-url` whose host contains shell or Git configuration
-  metacharacters;
+- a `github-server-url` (or `cachew-url`) whose host contains shell or Git
+  configuration metacharacters, whatever else the URL holds: the standard
+  checkout reads only its origin, so a path, query or userinfo does not keep
+  that host out of its shell commands;
 - an HTTPS `cachew-url` that is not in `trusted_caches.json`, which would have
   received the checkout token;
 - a `path` that leaves the workspace (also through a symlink), or a `repository`,

@@ -915,6 +915,23 @@ class CheckoutTests(unittest.TestCase):
         self.assertFalse(self.attempt())
         self.assertEqual(self.cache.requests, [])
 
+    def test_a_metacharacter_host_is_refused_whatever_else_the_url_holds(self):
+        # The standard checkout reads only the URL's origin, so a path, query,
+        # fragment or userinfo does not stop the host reaching its shell commands.
+        for url in (
+            "https://x$(id)/path",
+            "https://a`id`.example/?q",
+            "https://user@exa$(id)mple.com",
+            "https://exa$(id)mple.com#f",
+            "http://a`id`.example",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(cachew_checkout.SecurityViolation):
+                    cachew_checkout.origin(url, {})
+                self.env["CACHEW_GITHUB_SERVER_URL"] = url
+                self.assertTrue(self.violation())
+        self.assertEqual(self.cache.requests, [])
+
     def test_child_processes_inherit_neither_the_token_nor_a_tls_override(self):
         self.env["GIT_SSL_NO_VERIFY"] = "1"
         attempt = cachew_checkout.Checkout(self.env)

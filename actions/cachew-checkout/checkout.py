@@ -143,6 +143,13 @@ TLS_OVERRIDES = ("GIT_SSL_NO_VERIFY",)
 
 def origin(value, environ):
     url = urllib.parse.urlsplit(value)
+    # First, whatever else the URL holds: the standard checkout this would fall
+    # back to reads only the URL's origin, so a path, query, fragment, userinfo
+    # or scheme that cachew does not support does not keep the host from its
+    # `git submodule foreach` shell commands.
+    host = url.netloc.rpartition("@")[2]
+    if host and not re.fullmatch(r"[A-Za-z0-9.:\[\]-]+", host):
+        raise SecurityViolation("server URL host contains shell or configuration metacharacters")
     # Never weaken TLS for cachew or upstream outside the test fixtures.
     local_http = (
         loopback_http_allowed(environ) and url.scheme == "http" and url.hostname in ("127.0.0.1", "localhost", "::1")
@@ -157,8 +164,6 @@ def origin(value, environ):
         or url.fragment
     ):
         raise Bypass("unsupported server URL")
-    if not re.fullmatch(r"[A-Za-z0-9.:\[\]-]+", url.netloc):
-        raise SecurityViolation("server URL host contains shell or configuration metacharacters")
     if not HOST.fullmatch(url.netloc):
         raise Bypass("unsupported server URL")
     # The origin as actions/checkout reads it (URL.origin): the host in lower case
