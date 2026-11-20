@@ -84,6 +84,36 @@ class RewriteTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertEqual(migrate.rewrite(before, SHA), after)
 
+    def test_a_hosted_job_is_recognized_however_its_runs_on_is_written(self):
+        def workflow(runs_on, indent="  ", jobs="jobs", step=PLAIN):
+            body = f"build:\n{indent}{runs_on}\n{indent}steps:\n{indent}{indent}- uses: {step}\n"
+            return f"on: push\n{jobs}:\n" + "".join(indent + line + "\n" for line in body.splitlines())
+
+        hosted = {
+            "flow sequence": workflow("runs-on: [ubuntu-latest]"),
+            "spaced flow sequence": workflow("runs-on: [ 'ubuntu-latest' ]  # hosted"),
+            "block sequence": workflow("runs-on:\n    - ubuntu-latest  # hosted"),
+            "block sequence at the key's indentation": workflow("runs-on:\n  - macos-14"),
+            "four-space indentation": workflow("runs-on: ubuntu-latest", indent="    "),
+            "another case": workflow("runs-on: Ubuntu-Latest"),
+            "quoted keys": workflow('"runs-on": windows-2022', jobs='"jobs"'),
+        }
+        for name, before in hosted.items():
+            with self.subTest(hosted=name):
+                self.assertEqual(migrate.rewrite(before, SHA), before)
+                self.assertEqual(migrate.rewrite(before.replace(PLAIN, STALE), SHA), before)
+        self_hosted = {
+            "a hosted label among others": workflow("runs-on: [self-hosted, ubuntu-22.04]"),
+            "a block sequence with another label": workflow("runs-on:\n    - ubuntu-22.04\n    - gpu"),
+            "an expression": workflow("runs-on: ${{ matrix.os }}"),
+            "an empty sequence": workflow("runs-on: []"),
+            "a runner group": workflow("runs-on:\n    group: large\n    labels: ubuntu-latest"),
+            "a deeper runs-on key": workflow("runs-on: tt-large\n  env:\n    runs-on: ubuntu-latest"),
+        }
+        for name, before in self_hosted.items():
+            with self.subTest(self_hosted=name):
+                self.assertEqual(migrate.rewrite(before, SHA), before.replace(PLAIN, PINNED))
+
     def test_self_hosted_jobs_move_to_the_pinned_action_and_hosted_jobs_keep_checkout(self):
         before = f"""on: push
 jobs:

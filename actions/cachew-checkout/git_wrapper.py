@@ -413,7 +413,13 @@ def fetch_remotes(real_git, arguments, index, environ):
             names.append(tail[position])
         position += 1
     if "--multiple" not in tail:
-        if not names or len(words("config", "--get-all", f"remotes.{names[0]}")) < 2:
+        if not names:
+            # fetch.all (Git 2.44) makes a fetch that names no remote one of
+            # every remote, unless --no-all is given.
+            if "--no-all" not in tail and words("config", "--type=bool", "--get", "fetch.all") == ["true"]:
+                return words("remote")
+            return None
+        if len(words("config", "--get-all", f"remotes.{names[0]}")) < 2:
             return None
         names = names[:1]
     return [remote for name in names for remote in words("config", "--get-all", f"remotes.{name}") or [name]]

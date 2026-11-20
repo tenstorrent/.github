@@ -393,8 +393,9 @@ plain `actions/checkout` where cachew can never serve the checkout:
   composite action whose callers run on GitHub-hosted runners or in an
   already populated workspace);
 - jobs whose `runs-on` is a literal GitHub-hosted label (`ubuntu-*`,
-  `windows-*`, `macos-*`), where cachew is a no-op; cachew pins there are
-  turned back into `actions/checkout`. Labels behind expressions or
+  `windows-*`, `macos-*`, in any case), or a list of only such labels, where
+  cachew is a no-op; cachew pins there are turned back into
+  `actions/checkout`. Labels behind expressions or
   reusable-workflow inputs cannot be seen;
 - `uses:` lines that are text, not steps: the content of a block scalar (`run: |`)
   and the later lines of a quoted scalar that spans lines. A pin to this action

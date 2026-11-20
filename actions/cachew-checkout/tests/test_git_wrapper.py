@@ -188,6 +188,20 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(len(self.cache.requests), requests)
         self.assertFalse((self.session / "cache-disabled").exists())
 
+    def test_fetch_all_set_in_configuration_is_a_fetch_of_every_remote(self):
+        # fetch.all (Git 2.44) makes a plain `git fetch` read every remote.
+        target = self.cloned_dependency()
+        self.run_git("-C", str(target), "remote", "add", "elsewhere", "http://127.0.0.1:1/org/missing")
+        self.run_git("-C", str(target), "config", "fetch.all", "true")
+        requests = len(self.cache.requests)
+        subprocess.run(["git", "-C", str(target), "fetch"], env=self.env, capture_output=True, timeout=30)
+        self.assertEqual(len(self.cache.requests), requests)
+        self.assertFalse((self.session / "cache-disabled").exists())
+        # --no-all and a named remote read one remote, as Git does.
+        self.run_git("-C", str(target), "fetch", "--no-all")
+        self.run_git("-C", str(target), "fetch", "origin")
+        self.assertEqual(len(self.cache.discoveries()), 3)
+
     def test_fetch_all_of_cached_remotes_uses_the_cache(self):
         target = self.cloned_dependency()
         requests = len(self.cache.requests)

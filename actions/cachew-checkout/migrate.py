@@ -31,8 +31,8 @@ as plain actions/checkout on purpose:
     there is still moved to action_sha, never turned back into actions/checkout;
   * steps with a trailing `# cachew: keep` comment;
   * jobs whose runs-on is a literal GitHub-hosted label (ubuntu-*, windows-*,
-    macos-*), where cachew is a no-op; --write turns cachew pins there back
-    into actions/checkout;
+    macos-*, in any case) or a list of only such labels, where cachew is a
+    no-op; --write turns cachew pins there back into actions/checkout;
   * gh-aw generated lock files (*.lock.yml) and their .md sources, which pin
     their own checkout version and run on GitHub-hosted runners;
   * paths under a configured "exclude" prefix (e.g. vendored trees whose
@@ -85,12 +85,12 @@ ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})
 # (`{uses: ...}`), its key optionally quoted.
 USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
-HOSTED_LABEL = re.compile(r"(?:ubuntu|windows|macos)-[\w.-]+")
-TOP_LEVEL = re.compile(r"^(?P<key>[\w-]+):")
-# Any key at the jobs' indentation starts a job, however it is written (quoted,
-# anchored): a job that is not seen would take the next job's runs-on.
-JOB = re.compile(r"^  [^\s#]")
-RUNS_ON = re.compile(r"^    runs-on:[ \t]*(?P<quote>['\"]?)(?P<label>[^'\"#\s]+)(?P=quote)[ \t]*(?:#.*)?$")
+# GitHub matches runner labels in any case.
+HOSTED_LABEL = re.compile(r"(?i:ubuntu|windows|macos)-[\w.-]+")
+TOP_LEVEL = re.compile(r"^(?P<quote>['\"]?)(?P<key>[\w-]+)(?P=quote)[ \t]*:")
+# A job's runs-on key, with the value on its line (empty before a block sequence).
+RUNS_ON = re.compile(r"(?P<quote>['\"]?)runs-on(?P=quote)[ \t]*:(?:[ \t]+(?P<value>.*))?")
+TRAILING_COMMENT = re.compile(r"(?:^|[ \t]+)#.*$")
 
 
 # A line whose value is a block scalar: `key: |`, `- >-`, `key: !!str |2`, with
@@ -155,26 +155,55 @@ def excluded(path, prefixes=()):
     return path.suffix == ".md"
 
 
+def scalar(text):
+    """A label as written: without its comment and its quotes."""
+    text = TRAILING_COMMENT.sub("", text).strip()
+    return text[1:-1] if len(text) > 1 and text[0] in "'\"" and text[-1] == text[0] else text
+
+
 def hosted_jobs(text):
-    """Character ranges of the workflow jobs whose runs-on is a literal GitHub-hosted label."""
-    spans, start, hosted, in_jobs, offset = [], None, False, False, 0
+    """Character ranges of the workflow jobs whose runs-on is one or more literal
+    GitHub-hosted labels: a scalar, a flow sequence (`[ubuntu-latest]`) or a block
+    sequence of them. Jobs and their keys are found by their indentation, whatever
+    its width; any key at the jobs' indentation starts a job, however it is
+    written (quoted, anchored), since a job that is not seen would take the next
+    job's runs-on."""
+    spans, start, labels, in_jobs, offset = [], None, None, False, 0
+    job_indent = key_indent = None
+    listing = False
 
     def close(end):
-        if start is not None and hosted:
+        if start is not None and labels and all(HOSTED_LABEL.fullmatch(label) for label in labels):
             spans.append((start, end))
 
     for line in lines(text):
+        content = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
         top = TOP_LEVEL.match(line)
         if top:
             close(offset)
-            start, hosted, in_jobs = None, False, top["key"] == "jobs"
-        elif in_jobs and JOB.match(line):
+            start, labels, in_jobs, job_indent = None, None, top["key"] == "jobs", None
+        elif not in_jobs or not content or content.startswith("#") or not indent:
+            pass
+        elif job_indent is None or indent == job_indent:
             close(offset)
-            start, hosted = offset, False
-        elif start is not None:
-            runs_on = RUNS_ON.match(line)
-            if runs_on:
-                hosted = bool(HOSTED_LABEL.fullmatch(runs_on["label"]))
+            start, labels, job_indent, key_indent, listing = offset, None, indent, None, False
+        elif start is not None and indent > job_indent:
+            if key_indent is None:
+                key_indent = indent
+            if listing and indent >= key_indent and (content == "-" or content.startswith("- ")):
+                labels.append(scalar(content[1:]))
+            elif indent == key_indent:
+                listing = False
+                runs_on = RUNS_ON.fullmatch(content)
+                if runs_on:
+                    value = TRAILING_COMMENT.sub("", runs_on["value"] or "").strip()
+                    if not value:
+                        labels, listing = [], True
+                    elif value.startswith("[") and value.endswith("]"):
+                        labels = [scalar(item) for item in value[1:-1].split(",")]
+                    else:
+                        labels = [scalar(value)]
         offset += len(line)
     close(offset)
     return spans
