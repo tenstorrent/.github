@@ -698,6 +698,25 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_lazy_fetch_skips_dead_cache(updated / "deps/kid", "kid")
 
+    def test_a_submodules_own_weakening_setting_keeps_its_fetch_tokenless(self):
+        # The submodule's own configuration turns off verification for the
+        # cache, and its remote names the cache: a recursive fetch from the
+        # superproject reaches it with no token.
+        kid = self.history("kid")
+        self.git_fixture.repository("top", [("kid-name", "deps/kid", "../kid", kid)])
+        recursive = self.root / "recursive"
+        result = self.git_result("clone", "--recurse-submodules", self.upstream.url + "/org/top", str(recursive))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        submodule = recursive / "deps/kid"
+        self.assertEqual(self.git_result("-C", str(submodule), "remote", "set-url", "origin", self.cache.url + "/git/" + self.upstream.url.split("://", 1)[1] + "/org/kid").returncode, 0)
+        self.assertEqual(self.git_result("-C", str(submodule), "config", f"http.{self.cache.url}/git/.sslVerify", "false").returncode, 0)
+        before = len(self.cache.requests)
+        result = self.git_result("-C", str(recursive), "fetch", "--recurse-submodules=yes", "origin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        tokens = [auth for _, _, auth in self.cache.requests[before:] if auth]
+        self.assertTrue(len(self.cache.requests) > before, "the submodule fetch did not reach the cache")
+        self.assertEqual(tokens, [])
+
     def test_clone_under_an_inherited_git_dir_pins_the_clone(self):
         # git clone ignores GIT_DIR; the pin must not read that other repository.
         self.history("hist")

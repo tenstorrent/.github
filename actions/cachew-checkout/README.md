@@ -88,10 +88,13 @@ branch, pull or tag ref, checked-out branch or detached `HEAD`, shallow depth,
 `gc.auto = 0`, submodule configuration, persisted credentials (a
 `RUNNER_TEMP/git-credentials-<uuid>.config` file with host and container
 `includeIf` entries, plus `insteadOf` rewrites in submodules), the
-`safe.directory` entry and the `ref` and `commit` outputs. One difference
-remains: checkout clones each submodule's default branch, which adds a local
+`safe.directory` entry and the `ref` and `commit` outputs. Two differences
+remain. Checkout clones each submodule's default branch, which adds a local
 tracking branch and, when shallow, a single-branch refspec; cachew fetches only
-the gitlink commit and keeps the default refspec.
+the gitlink commit and keeps the default refspec. And checkout writes the
+`safe.directory` entry to a temporary global file it deletes when the step
+ends; with cachew, whichever checkout ran, the entry stays in the job's global
+file for later steps (unless `set-safe-directory: false`).
 
 A shallow checkout of a commit SHA, including the event's `GITHUB_SHA`, never
 contacts upstream. A branch, tag or other ref name, the default branch of another
@@ -304,9 +307,10 @@ anything that still runs in the job.
 
 For later Git reads, a small `git` wrapper on `PATH` sends `clone`, `fetch` and
 `ls-remote` through cachew once when their effective URL is the cache. Python
-starts only for commands that can reach a remote (`clone`, `fetch`, `ls-remote`,
+starts for commands that can reach a remote (`clone`, `fetch`, `ls-remote`,
 `push`, `pull`, `submodule`, `remote`) and for Git aliases, which are expanded
-first and then handled as the command they run; the rest go straight to Git. If
+first and then handled as the command they run; other commands go straight to
+Git unless a setting could weaken the cache's requests (see the shim, above). If
 the cache attempt fails, the same operation is retried once upstream. Reads of other
 remotes (other hosts, token-in-URL or SSH URLs) run unchanged and never affect
 the cache. Only failures of the cache endpoint itself (connection, TLS, 3xx/5xx,
@@ -314,9 +318,10 @@ a stall longer than `cachew-fetch-timeout`, or the one-hour hard deadline) remov
 the job's cache rewrite; answers about one repository or ref (401/403/404, a
 missing ref, `ls-remote --exit-code` finding nothing) keep caching on. A failed
 cache clone's partial destination is removed before the upstream retry. Git runs a
-partial clone's lazy fetches itself, past the wrapper, so after a clone, fetch, pull,
-`remote` or `submodule` command, whether or not it succeeded, each promisor remote the cache rewrite reaches, in the
-repository and in its submodules, is pinned,
+partial clone's lazy fetches itself, past the wrapper, so whether or not the
+command succeeded, each promisor remote the cache rewrite reaches is pinned: the
+repository's after a clone, fetch, pull or `remote` command, and its submodules'
+after a clone or `submodule` command,
 as the checkout's `origin` is. The pin maps the remote's URL to the URL Git would
 use without cachew. It is written to a file under `pins/` in the session
 directory, readable by the owner only, and the repository's `.git/config` gets an
@@ -367,10 +372,14 @@ CHECKOUT_ACTION_JS=/absolute/path/to/checkout/dist/index.js \
 `CHECKOUT_ACTION_JS` is the `dist/index.js` of the `actions/checkout` commit
 this action forwards to; the tests compare cachew's checkouts with it. Tests
 that need CMake are skipped without it. The `Test cachew-checkout` workflow
-runs the suite on pull requests that touch this directory. A live checkout
-through a real cachew endpoint needs a self-hosted runner on the CI VLAN, so
-that check stays in the consumer repository (tt-metal's
-`test-cachew-checkout` workflow).
+runs the suite on pull requests that touch this directory. The fixtures cannot
+reach the production boundary (cachew's certificate, restricted DNS, the real
+cache), so before consumers pin a commit, run that workflow by hand on it with
+`live-smoke` (and a self-hosted runner label on the CI VLAN). It checks out this
+repository through cachew, full and filtered, from the action at that exact
+commit, and checks the trusted origin, verified TLS without redirects, no token
+in the work trees, an upstream push URL, reads through the wrapper, lazy fetches
+through the pin, and that an untrusted `cachew-url` is refused.
 
 ## Pins and releases
 
@@ -427,7 +436,10 @@ plain `actions/checkout` where cachew can never serve the checkout:
   and the later lines of a quoted scalar that spans lines. A pin to this action
   there is still moved to `action_sha`, since `--verify-pins` holds every mention
   to it;
-- gh-aw generated `*.lock.yml` files and their `.md` sources;
+- gh-aw generated `*.lock.yml` files and their `.md` sources. GitHub runs a
+  lock file, so `--verify-pins` still holds its pins to this action to
+  `action_sha`: set the pin in the `.md` source and recompile with
+  `gh aw compile`;
 - paths under an `exclude` prefix.
 
 Other `actions/checkout` versions are never touched, so no step changes

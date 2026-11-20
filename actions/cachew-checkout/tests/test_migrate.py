@@ -332,7 +332,7 @@ class RepositoryTests(unittest.TestCase):
         self.run_main("--write")
         code, out = self.run_main("--verify-pins", "--action-sha", "c" * 40)
         self.assertEqual(code, 1)
-        self.assertIn("expected only action_sha", out)
+        self.assertIn("expected action_sha", out)
         # Without --write, --action-sha does not touch the config.
         self.assertEqual(json.loads(self.read(".github/cachew-checkout.json"))["action_sha"], SHA)
 
@@ -452,13 +452,36 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn("main", out)
 
-    def test_files_write_leaves_alone_are_not_held_to_its_pin(self):
+    def test_a_lock_file_is_left_alone_but_held_to_the_pin(self):
+        # GitHub runs gh-aw lock files: --write leaves them to gh-aw, but a pin
+        # in one is still checked, since it runs in this repository's jobs.
         lock = self.root / ".github/workflows/agent.lock.yml"
         lock.write_text(lock.read_text().replace(PLAIN, f"tenstorrent/.github/actions/cachew-checkout@{'d' * 40}"))
         self.assertEqual(self.run_main("--write", "--action-sha", "b" * 40)[0], 0)
         self.assertIn("@" + "d" * 40, lock.read_text())
         code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("agent.lock.yml", out)
+        self.assertIn("recompile", out)
+        lock.write_text(lock.read_text().replace("d" * 40, "b" * 40))
+        code, out = self.run_main("--verify-pins")
         self.assertEqual(code, 0, out)
+
+    def test_an_excluded_prefix_is_not_held_to_the_pin(self):
+        vendored = self.root / "vendored/.github/workflows/ci.yml"
+        vendored.write_text(vendored.read_text().replace(PLAIN, f"tenstorrent/.github/actions/cachew-checkout@{'d' * 40}"))
+        self.assertEqual(self.run_main("--write")[0], 0)
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 0, out)
+
+    def test_verify_pins_reads_workflow_suffixes_in_any_case(self):
+        upper = self.root / ".github/workflows/upper.YML"
+        upper.write_text(f"jobs:\n  a:\n    runs-on: self-hosted\n    steps:\n      - uses: tenstorrent/.github/actions/cachew-checkout@main\n")
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        self.run_main("--write")
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("upper.YML", out)
 
     def test_a_path_argument_is_read_from_the_current_directory(self):
         nested = self.root / "sub"

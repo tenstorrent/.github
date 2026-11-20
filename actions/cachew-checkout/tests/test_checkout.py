@@ -1498,6 +1498,20 @@ class CheckoutTests(unittest.TestCase):
         self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
         self.assertFalse((self.target / ".git/modules").exists())
 
+    def test_gitmodules_entry_without_a_gitlink_is_skipped(self):
+        # git submodule update skips a .gitmodules entry the tree has no gitlink
+        # for (a removed submodule left in the file), so the cache does too.
+        repository = self.project_root / "org/main"
+        with (repository / ".gitmodules").open("a") as modules:
+            modules.write('[submodule "removed"]\n\tpath = deps/removed\n\turl = ../grand\n')
+        git(repository, "add", ".gitmodules", env=self.env)
+        git(repository, "commit", "-m", "stale entry", env=self.env)
+        self.sha = git(repository, "rev-parse", "HEAD")
+        self.env["GITHUB_SHA"] = self.sha
+        self.assertTrue(self.attempt())
+        self.assertEqual(git(self.target, "rev-parse", "HEAD"), self.sha)
+        self.assertFalse((self.target / "deps/removed").exists())
+
     def test_unsafe_module_path_discards_seed_and_never_escapes_target(self):
         repository = self.project_root / "org/main"
         git(repository, "config", "-f", ".gitmodules", "submodule.child-name.path", "../escape")

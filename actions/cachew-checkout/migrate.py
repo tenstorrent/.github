@@ -34,7 +34,9 @@ as plain actions/checkout on purpose:
     macos-*, in any case) or a list of only such labels, where cachew is a
     no-op; --write turns cachew pins there back into actions/checkout;
   * gh-aw generated lock files (*.lock.yml) and their .md sources, which pin
-    their own checkout version and run on GitHub-hosted runners;
+    their own checkout version and run on GitHub-hosted runners. --verify-pins
+    still holds a lock file's pins to this action to action_sha, since GitHub
+    runs it: set the pin in the .md source and recompile;
   * paths under a configured "exclude" prefix (e.g. vendored trees whose
     workflows run in another repository).
 """
@@ -150,9 +152,14 @@ def repository_root(start=None):
 
 def excluded(path, prefixes=()):
     relative = path.as_posix()
-    if relative.startswith(tuple(prefixes)) or relative.endswith(".lock.yml"):
+    if relative.startswith(tuple(prefixes)) or generated(path):
         return True
-    return path.suffix == ".md"
+    return path.suffix.lower() == ".md"
+
+
+def generated(path):
+    """A gh-aw lock file, which gh-aw writes from its .md source."""
+    return path.name.lower().endswith(".lock.yml")
 
 
 def scalar(text):
@@ -356,7 +363,7 @@ def tracked_consumers(root, exclude=()):
         github = parts.index(".github")
         if len(parts) <= github + 1 or parts[github + 1] not in ("actions", "workflows"):
             continue
-        if path.suffix in (".yml", ".yaml"):
+        if path.suffix.lower() in (".yml", ".yaml"):
             yield path
 
 
@@ -447,10 +454,9 @@ def verify_pins(root, action_sha, exclude=()):
     Whether action_sha exists there is for the caller's CI to check."""
     problems = []
     pins = {}
+    # Excluded prefixes are left out; gh-aw lock files are not, since GitHub
+    # runs them here although --write leaves them to gh-aw.
     for path in pinned_files(root, exclude):
-        # Files --write leaves alone (gh-aw lock files) are not held to its pin.
-        if excluded(path, exclude):
-            continue
         try:
             text = (root / path).read_text(encoding="utf-8")
         except (OSError, ValueError) as error:
@@ -486,8 +492,10 @@ def verify_pins(root, action_sha, exclude=()):
         # (\x65 for e), under a key the reader above does not take for uses:.
         if len(ANY_PIN.findall(unescaped(text))) != len(ANY_PIN.findall(text)):
             problems.append(f"{path} names the action through escape sequences; write it as one plain line")
-    if set(pins) - {action_sha}:
-        problems.append(f"references pin {sorted(pins)}, expected only action_sha {action_sha}")
+    for ref in sorted(set(pins) - {action_sha}):
+        for name in sorted(set(pins[ref])):
+            fix = "set the pin in its .md source and recompile it with gh aw compile" if generated(Path(name)) else "run --write"
+            problems.append(f"{name} pins {ref}, expected action_sha {action_sha}; {fix}")
     for problem in problems:
         print(problem)
     print("Pins verified." if not problems else f"{len(problems)} pin problem(s).")

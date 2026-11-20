@@ -917,6 +917,10 @@ class Checkout:
             relative_path(name)
             relative_path(path)
             tree = self.git(gitdir, "ls-tree", "-z", commit, "--", path)
+            if not tree:
+                # A .gitmodules entry with nothing at its path (a removed
+                # submodule left in the file): git submodule update skips it.
+                continue
             metadata, tree_path = tree.rstrip(b"\0").split(b"\t", 1)
             mode, kind, sha = metadata.split()
             if mode != b"160000" or kind != b"commit" or tree_path.decode() != path:

@@ -364,7 +364,9 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
 
     def without_cachew(url):
         """The URL as Git rewrites it when cachew's rewrite is absent: the job's
-        own insteadOf for it, which ties with cachew's and loses, still applies."""
+        own longest insteadOf for it. (Where the job's rewrite matches as much as
+        cachew's, Git uses whichever is defined first; when that is the job's,
+        the remote never reaches the cache and is not pinned.)"""
         best = ("", "")
         for entry in run("config", "--null", "--get-regexp", r"^url\..*\.insteadof$").split("\0"):
             key, _, value = entry.partition("\n")

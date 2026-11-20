@@ -485,10 +485,30 @@ GIT_TRUE = ("true", "yes", "on", "1")
 GIT_FALSE = ("false", "no", "off", "0", "")
 
 
+def submodule_configs(real_git, location, environ):
+    """The configuration files of the repository's submodules, at any depth:
+    each Git directory under <git dir>/modules."""
+    result = subprocess.run(
+        [real_git, *location, "rev-parse", "--path-format=absolute", "--git-path", "modules"],
+        env=environ,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    modules = result.stdout.decode(errors="surrogateescape").strip()
+    if result.returncode or not os.path.isdir(modules):
+        return []
+    found = []
+    for directory, _, files in os.walk(modules):
+        if "config" in files and "HEAD" in files:
+            found.append(os.path.join(directory, "config"))
+    return sorted(found)
+
+
 def weakened(real_git, arguments, index, environ, cache):
     """The setting, if any, with which the job turns off certificate verification
     or allows redirects for the cache's host, as this command reads its
-    configuration (files, GIT_CONFIG_COUNT, -c). A request to the cache can
+    configuration (files, GIT_CONFIG_COUNT, -c, and for a command that can
+    recurse, the files of the repository's submodules). A request to the cache can
     carry a token, and Git applies the most specific http.<url>.* it finds, so
     cachew's own settings cannot outrank one the job scoped more narrowly."""
 
@@ -544,6 +564,10 @@ def weakened(real_git, arguments, index, environ, cache):
                     yield located(path, place)
 
     entries = listed()
+    if arguments[index] in ("fetch", "pull", "submodule"):
+        # These may recurse into submodules, whose own files Git then reads.
+        for path in submodule_configs(real_git, arguments[:index], environ):
+            entries += listed("--file", path)
     if arguments[index] == "clone":
         # A clone gives its new repository the settings of its -c/--config
         # options and of its template directory before it fetches.
