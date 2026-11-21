@@ -260,8 +260,9 @@ def remove_managed(real_git, config, state, environ, rewrites_only=False):
     In an order that is safe wherever it stops. The cache rewrites go first:
     without them no request reaches the cache. Then the tokens. The settings
     that protect a cache request (verified TLS, no redirects, no inherited
-    header) go last, and only once every rewrite is gone: a rewrite left behind
-    with its token would otherwise follow the job's own http.sslVerify.
+    header) go last, and only once every rewrite and every token is gone: a
+    rewrite left behind would otherwise follow the job's own http.sslVerify, and
+    a token left behind still goes with any request that names the cache.
 
     A rewrite is removed by its own value, so a value the job gave the same key
     stays. A token never is, since it must not appear in a process's arguments:
@@ -285,15 +286,15 @@ def remove_managed(real_git, config, state, environ, rewrites_only=False):
             if key.lower().endswith(".pushinsteadof") and not unset("--fixed-value", "--unset-all", key, value):
                 remaining.add(key)
         return remaining
-    rewrites_left = bool(remaining)
     headers = dict.fromkeys(key for key, value in entries if key.lower().endswith(".extraheader") and value)
     for key in headers:
         if not unset("--unset-all", key, "^AUTHORIZATION: basic "):
             remaining.add(key)
+    exposed = bool(remaining)
     for key, value in entries:
         if key.lower().endswith(".insteadof") or (key in headers and value):
             continue
-        if rewrites_left or not unset("--fixed-value", "--unset-all", key, value):
+        if exposed or not unset("--fixed-value", "--unset-all", key, value):
             remaining.add(key)
     return remaining
 

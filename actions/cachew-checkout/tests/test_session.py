@@ -1068,6 +1068,33 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn("AUTHORIZATION", content)
         self.finish()
 
+    def test_a_cleanup_that_cannot_remove_a_token_keeps_its_tls_protection(self):
+        # The rewrites go, but a token header stays (a lock held for that one
+        # write). A request can still reach the cache by a URL that names it, and
+        # would carry the token: it must stay verified and never be redirected.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        cache = self.fixture.cache.url
+        state = json.loads((session / "state.json").read_text())
+        failing = self.fixture.root / "failing-git"
+        failing.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *--unset-all*.extraHeader*AUTHORIZATION*) exit 255 ;; esac\n'
+            f'exec "{state["real_git"]}" "$@"\n'
+        )
+        failing.chmod(0o700)
+        spec = importlib.util.spec_from_file_location("cachew_session", fixtures.ACTION / "session.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        remaining = module.remove_managed(str(failing), session / "global.config", state, self.env)
+        content = (session / "global.config").read_text()
+        self.assertIn("AUTHORIZATION", content)
+        self.assertNotIn(f"url.{cache}/git/", " ".join(remaining))
+        self.assertEqual(self.real_git("config", "--global", "--get", f"http.{cache}/.sslVerify"), "true")
+        self.assertEqual(self.real_git("config", "--global", "--get", f"http.{cache}/.followRedirects"), "false")
+        self.assertIn(f"http.{cache}/.sslVerify", remaining)
+        self.finish()
+
     def test_prepare_refuses_a_path_or_ref_that_has_no_fallback(self):
         # checkout.py does not run for `cachew: false` in a job with a session.
         outside = self.fixture.root / "outside"
