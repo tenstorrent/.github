@@ -128,8 +128,12 @@ def load_config(root, path=None):
         data = json.loads(file.read_text())
     except FileNotFoundError:
         raise ConfigError(f"{file} not found; create it with an action_sha (see --help)")
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise ConfigError(f"{file}: invalid JSON: {error}")
+    except OSError as error:
+        raise ConfigError(f"{file}: cannot be read: {error}")
+    if not isinstance(data, dict):
+        raise ConfigError(f"{file}: must be a JSON object with an action_sha")
     sha = data.get("action_sha", "")
     if not isinstance(sha, str) or not SHA.fullmatch(sha):
         raise ConfigError(f"{file}: action_sha must be a full 40-character commit SHA, got {sha!r}")

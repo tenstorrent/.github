@@ -1426,3 +1426,41 @@ def load_wrapper():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PromisorTests(unittest.TestCase):
+    """pin_promisor_remotes reads remote.<name>.promisor as Git reads a boolean."""
+
+    def test_every_git_spelling_of_true_is_pinned(self):
+        spec = importlib.util.spec_from_file_location("cachew_session", fixtures.ACTION / "session.py")
+        session = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(session)
+        real_git = shutil.which("git")
+        cache = "https://cachew.example"
+        upstream = "https://github.com"
+        with __import__("tempfile").TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "home"
+            home.mkdir()
+            global_config = root / "global.config"
+            subprocess.run(
+                [real_git, "config", "--file", str(global_config), f"url.{cache}/git/github.com/.insteadOf", upstream + "/"],
+                check=True,
+            )
+            environ = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": "1"}
+            for value, pinned in (("true", True), ("yes", True), ("On", True), ("1", True), ("2", True), ("1k", True), (None, True), ("false", False), ("off", False), ("0", False)):
+                with self.subTest(value=value):
+                    work = root / f"repo-{value}"
+                    subprocess.run([real_git, "init", "-q", str(work)], check=True, env=environ)
+                    subprocess.run([real_git, "-C", str(work), "remote", "add", "origin", upstream + "/org/main"], check=True, env=environ)
+                    config = work / ".git/config"
+                    with config.open("a") as stream:
+                        stream.write('[remote "origin"]\n\tpromisor' + ("" if value is None else f" = {value}") + "\n")
+                    session_dir = root / f"session-{value}"
+                    session_dir.mkdir()
+                    self.assertTrue(session.pin_promisor_remotes(real_git, ["-C", str(work)], environ, cache, str(session_dir)))
+                    includes = subprocess.run(
+                        [real_git, "-C", str(work), "config", "--local", "--get-all", "include.path"],
+                        env=environ, capture_output=True, text=True,
+                    ).stdout
+                    self.assertEqual(bool(includes), pinned)

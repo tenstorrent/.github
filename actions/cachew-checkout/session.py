@@ -342,6 +342,22 @@ def session_pin(session, target, url):
     return name
 
 
+def git_true(value):
+    """Whether Git reads a boolean setting as true: a key with no value (None),
+    true/yes/on in any case, or a nonzero integer with an optional k/m/g unit.
+    An empty value is false. A value Git cannot read counts as true here, so
+    anything Git might take for a promisor remote is pinned."""
+    if value is None:
+        return True
+    value = value.strip().lower()
+    if value in ("false", "no", "off", ""):
+        return False
+    if value in ("true", "yes", "on"):
+        return True
+    number = re.fullmatch(r"[+-]?([0-9]+)[kmg]?", value)
+    return not number or int(number[1]) != 0
+
+
 def pin_promisor_remotes(real_git, location, environ, cache, session=None):
     """Git runs a partial clone's lazy fetches itself, not through the wrapper,
     so they would follow the cache rewrite with no upstream retry. Pin each
@@ -402,11 +418,11 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
     def reached():
         """The URLs of the promisor remotes the cache rewrite reaches."""
         for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
-            key, _, value = line.partition(" ")
+            key, separator, value = line.partition(" ")
             remote = key[len("remote.") : -len(".promisor")]
             # A filtered fetch from a URL records the URL itself as the promisor remote.
             url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
-            if value.lower() == "true" and run("ls-remote", "--get-url", remote).startswith(prefix):
+            if git_true(value if separator else None) and run("ls-remote", "--get-url", remote).startswith(prefix):
                 yield url
 
     if not session or not Path(session).is_dir():

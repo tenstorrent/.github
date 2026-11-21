@@ -320,6 +320,15 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(self.run_main("--check")[0], 0)
         self.assertEqual(self.run_main("--verify-pins")[0], 0)
 
+    def test_a_config_that_is_not_an_object_is_reported_in_every_mode(self):
+        for text in ("[]", "5", "null", '"x"', "\udcff"):
+            for mode in ("--check", "--write", "--verify-pins"):
+                with self.subTest(text=text, mode=mode):
+                    (self.root / ".github/cachew-checkout.json").write_text(text, errors="surrogateescape")
+                    code, out = self.run_main(mode)
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("cachew-checkout.json", out)
+
     def test_action_sha_with_write_repins_and_saves_the_config(self):
         self.run_main("--write")
         new = "b" * 40
