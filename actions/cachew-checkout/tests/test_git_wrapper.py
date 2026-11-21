@@ -717,6 +717,23 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(len(self.cache.requests) > before, "the submodule fetch did not reach the cache")
         self.assertEqual(tokens, [])
 
+    def test_a_pin_that_cannot_be_installed_turns_caching_off(self):
+        # Without its pin, a partial clone's lazy fetches would follow the cache
+        # rewrite with no upstream retry: caching goes off instead, which
+        # removes the rewrite, and the clone itself still succeeds.
+        self.history("hist")
+        pins = self.session / "pins"
+        pins.mkdir(mode=0o700, exist_ok=True)
+        pins.chmod(0o500)
+        self.addCleanup(pins.chmod, 0o700)
+        destination = self.root / "unpinned"
+        result = self.git_result("clone", "--filter=blob:none", self.upstream.url + "/org/hist", str(destination))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(self.git_result("-C", str(destination), "config", "--get-all", "include.path").stdout, "")
+        self.assert_disabled()
+        self.assert_lazy_fetch_skips_dead_cache(destination, "hist")
+
     def test_clone_under_an_inherited_git_dir_pins_the_clone(self):
         # git clone ignores GIT_DIR; the pin must not read that other repository.
         self.history("hist")

@@ -937,6 +937,27 @@ class SessionTests(unittest.TestCase):
         self.assertIn("POST", [method for method, _, _ in self.fixture.upstream.requests])
         self.finish()
 
+    def test_a_checkout_that_cannot_be_pinned_leaves_caching_off(self):
+        # The repository's configuration is locked, so its include of the pin
+        # cannot be written: rather than leave the partial clone's lazy fetches
+        # on the cache rewrite with no upstream retry, activation turns caching
+        # off and the rewrite goes.
+        self.fixture.update_main()
+        old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")
+        self.env.update(CACHEW_FILTER="blob:none", CACHEW_SUBMODULES="false")
+        self.prepare()
+        self.assertTrue(self.fixture.attempt())
+        lock = self.fixture.target / ".git/config.lock"
+        lock.touch()
+        self.assertFalse(self.activate())
+        lock.unlink()
+        self.assertNotIn("include.path", self.real_git("-C", str(self.fixture.target), "config", "--local", "--list"))
+        self.assertNotIn(self.fixture.cache.url, self.real_git("config", "--global", "--list"))
+        cache_before = list(self.fixture.cache.requests)
+        self.assertEqual(self.real_git("-C", str(self.fixture.target), "cat-file", "-p", old_blob), "main")
+        self.assertEqual(self.fixture.cache.requests, cache_before)
+        self.finish()
+
     def test_cachew_filtered_checkout_lazy_fetches_stay_upstream(self):
         self.assert_lazy_fetches_stay_upstream(cached=True)
 

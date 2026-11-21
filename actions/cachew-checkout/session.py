@@ -350,10 +350,13 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
 
     The pin is a file of the session directory that the repository includes
     (see session_pin), so a credential the job's own rewrite adds is not copied
-    into the work tree, and the pin does not outlive the job. Without a session
-    directory a remote is left unpinned."""
+    into the work tree, and the pin does not outlive the job.
+
+    Returns False when a remote the rewrite reaches is left unpinned (no session
+    directory, a pin file or include that cannot be written): the caller then
+    turns caching off, which removes the rewrite those lazy fetches follow."""
     if not cache:
-        return
+        return True
     prefix = cache.rstrip("/") + "/git/"
     environ = {key: value for key, value in environ.items() if key != LEGACY_CONFIG}
 
@@ -376,27 +379,55 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
                 best = (base, value)
         return best[0] + url[len(best[1]) :]
 
-    if not session or not Path(session).is_dir():
-        return
-    with pins_lock(session):
-        # Once caching is off and its rewrite gone, no pin is needed, whatever
-        # this command read before: one written now would never be removed.
-        if (Path(session) / "pins-off").exists():
-            return
+    def pinned(url, target):
+        try:
+            pin = session_pin(session, target, url)
+        except OSError:
+            return False
+        if not pin:
+            return False
+        read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
+        if read == f"url.{target}.insteadof\n{url}\0":
+            added = subprocess.run(
+                [real_git, *location, "config", "--local", "--add", "include.path", pin],
+                env=environ,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if added.returncode == 0:
+                return True
+        os.unlink(pin)
+        return False
+
+    def reached():
+        """The URLs of the promisor remotes the cache rewrite reaches."""
         for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
             key, _, value = line.partition(" ")
             remote = key[len("remote.") : -len(".promisor")]
             # A filtered fetch from a URL records the URL itself as the promisor remote.
             url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
-            if value.lower() != "true" or not run("ls-remote", "--get-url", remote).startswith(prefix):
-                continue
-            target = without_cachew(url)
-            if pin := session_pin(session, target, url):
-                read = run("config", "--file", pin, "--null", "--get-regexp", r"^url\..*\.insteadof$")
-                if read == f"url.{target}.insteadof\n{url}\0":
-                    run("config", "--local", "--add", "include.path", pin)
-                else:
-                    os.unlink(pin)
+            if value.lower() == "true" and run("ls-remote", "--get-url", remote).startswith(prefix):
+                yield url
+
+    if not session or not Path(session).is_dir():
+        return not any(True for _ in reached())
+    try:
+        with pins_lock(session):
+            # Once caching is off and its rewrite gone, no pin is needed, whatever
+            # this command read before: one written now would never be removed.
+            if (Path(session) / "pins-off").exists():
+                return True
+            # Every remote is tried, whichever fails.
+            return all([pinned(url, without_cachew(url)) for url in reached()])
+    except OSError:
+        return False
+
+
+def unpinned(real_git, session, state, environ):
+    """Turn caching off after a partial clone could not be pinned: its lazy
+    fetches would follow the rewrite with no upstream retry."""
+    print("::warning::Cachew could not pin a partial clone to upstream; caching is off for the rest of the job.")
+    return remove_cache_keys(real_git, session, state, environ)
 
 
 @contextlib.contextmanager
@@ -729,8 +760,8 @@ def activate(environ):
     view = dict(config_environment(environ), GIT_CONFIG_GLOBAL=str(global_config))
     # Then, whatever fails below: a rewrite an earlier activation left in a
     # locked file still redirects this checkout's lazy fetches.
-    if inside:
-        pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"), session)
+    if inside and not pin_promisor_remotes(real_git, ["-C", str(checkout)], view, state.get("cache"), session):
+        state = unpinned(real_git, session, state, environ)
     settings = Settings(environ)
     encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     mask(token)
@@ -817,8 +848,8 @@ def activate(environ):
         write_state(session, state)
         append_locked(global_config, render(entries))
         state["active"] = True
-        if inside:
-            pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache, session)
+        if inside and not pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache, session):
+            state = unpinned(real_git, session, state, environ)
         write_state(session, state)
         wrapper = session / "bin"
         wrapper.mkdir(mode=0o700, exist_ok=True)

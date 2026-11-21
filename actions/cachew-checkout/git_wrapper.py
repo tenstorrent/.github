@@ -756,8 +756,9 @@ def run(arguments, environ):
             location = ["-C", str(target.path)]
             pin_env = {key: value for key, value in environ.items() if key not in REPOSITORY_ENVIRONMENT}
         cache = state.get("cache")
+        complete = True
         if command != "submodule":
-            pin_promisor_remotes(real_git, location, pin_env, cache, session)
+            complete = pin_promisor_remotes(real_git, location, pin_env, cache, session)
         if command in ("clone", "submodule"):
             # Filtered submodules are partial clones of their own. NUL-separated:
             # a path may hold a line feed.
@@ -769,7 +770,12 @@ def run(arguments, environ):
             )
             for path in filter(None, listing.stdout.decode(errors="surrogateescape").split("\0")):
                 modules = {key: value for key, value in pin_env.items() if key not in REPOSITORY_ENVIRONMENT}
-                pin_promisor_remotes(real_git, ["-C", path], modules, cache, session)
+                complete = pin_promisor_remotes(real_git, ["-C", path], modules, cache, session) and complete
+        if not complete:
+            # Its lazy fetches would follow the rewrite with no upstream retry:
+            # removing the rewrite sends them upstream.
+            print("Cachew could not pin a partial clone to upstream; caching is off for the rest of the job.", file=sys.stderr)
+            remove_cache_keys(real_git, session, read_state(session), environ)
         return result
 
     if disabled:
