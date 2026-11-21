@@ -98,6 +98,11 @@ jobs:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 20
     steps:
+      # A self-hosted runner keeps the workspace between runs. Cachew skips a
+      # non-empty destination, and a leftover smoke-untrusted would read as a
+      # refused checkout that ran.
+      - name: Remove an earlier run's smoke checkouts
+        run: rm -rf -- "$GITHUB_WORKSPACE/smoke-full" "$GITHUB_WORKSPACE/smoke-filtered" "$GITHUB_WORKSPACE/smoke-untrusted"
       - name: Bootstrap this commit's action
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
