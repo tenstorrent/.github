@@ -924,6 +924,16 @@ class CheckoutTests(unittest.TestCase):
             "https://user@exa$(id)mple.com",
             "https://exa$(id)mple.com#f",
             "http://a`id`.example",
+            # Forms Python's URL parser rejects outright: the host is still
+            # read as written and refused, not passed over as unparsable.
+            "https://[::1;id]",
+            "https://[::1]`id`",
+            "https://a[;id]",
+            "https://x]$(id)",
+            "https://a\u2100b;id",
+            # Git and WHATWG URL parsers end the host at a backslash: the part
+            # before it is the host the standard checkout uses.
+            "https://a$(id)\\.github.com",
         ):
             with self.subTest(url=url):
                 with self.assertRaises(cachew_checkout.SecurityViolation):
