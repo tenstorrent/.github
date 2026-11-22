@@ -317,11 +317,38 @@ def cache_candidates(value, upstream, environ):
     certificate, and off-VLAN runners fail DNS immediately."""
     if (value or "auto").strip().lower() == "auto":
         return list(TRUSTED_CACHES)
-    cache = origin(value, environ)
-    loopback_fixture = loopback_http_allowed(environ) and upstream.startswith("http://") and cache.startswith("http://")
+    try:
+        cache = origin(value, environ)
+    except SecurityViolation:
+        raise
+    except Bypass:
+        # A spelling cachew does not use (a path, userinfo, a trailing dot) is
+        # only a fallback for a trusted cache; for any other HTTPS host it is still
+        # an attempt to point the token elsewhere.
+        if untrusted_https(value):
+            raise SecurityViolation("cachew-url is not a trusted cache origin and would have received the checkout token")
+        raise
+    # upstream is None when the server URL cannot be read: the refusal check then
+    # only asks whether the cache could be the test fixture.
+    loopback_fixture = (
+        loopback_http_allowed(environ) and (upstream is None or upstream.startswith("http://")) and cache.startswith("http://")
+    )
     if cache not in TRUSTED_CACHES and not loopback_fixture:
         raise SecurityViolation("cachew-url is not a trusted cache origin and would have received the checkout token")
     return [cache]
+
+
+def untrusted_https(value):
+    """Whether a URL cachew cannot read is an HTTPS URL whose host, read loosely
+    (any case, without userinfo, port or a trailing dot), is no trusted cache's."""
+    written = re.sub(r"[\t\n\r]", "", value).strip("".join(map(chr, range(0x21))))
+    scheme = re.match(r"(?i)https:[/\\]*([^/?#\\]*)", written)
+    if not scheme:
+        return False
+    host = scheme[1].rpartition("@")[2]
+    host = host[: host.index("]") + 1] if host.startswith("[") and "]" in host else host.partition(":")[0]
+    trusted = {urllib.parse.urlsplit(cache).hostname for cache in TRUSTED_CACHES}
+    return host.lower().rstrip(".") not in trusted
 
 
 # curl exits that a retry cannot change, although curl reports HTTP status 000 for
@@ -501,13 +528,21 @@ def refuse_attack_inputs(environ):
         if checkout_input(environ, "CACHEW_REF").startswith("-"):
             raise SecurityViolation("ref starts with '-' and would be read as a Git option")
 
-    def server():
-        return origin(checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
+    def cache():
+        # Whatever the server URL: one cachew cannot use still leaves the cache
+        # URL an attempt to send the token elsewhere, and must not skip this check.
+        try:
+            upstream = origin(checkout_input(environ, "CACHEW_GITHUB_SERVER_URL") or environ["GITHUB_SERVER_URL"], environ)
+        except SecurityViolation:
+            raise
+        except (Bypass, KeyError, ValueError):
+            upstream = None
+        cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), upstream, environ)
 
     check(path)
     check(ref)
     check(lambda: repository_name(checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]))
-    check(lambda: cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), server(), environ))
+    check(cache)
 
 
 class Checkout:
