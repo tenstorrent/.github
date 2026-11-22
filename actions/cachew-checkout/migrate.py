@@ -20,8 +20,8 @@ Modes:
 With no paths, --write and --check inspect every tracked .yml/.yaml under a
 .github/actions or .github/workflows directory. --verify-pins also reads every
 tracked action.yml/action.yaml, wherever a composite action lives, and accepts
-only a reference written as a plain or quoted value on its own `uses:` line,
-since that is the only form whose ref it can read exactly.
+only a reference written as a plain or quoted value that starts and ends on
+its `uses:` line, since that is the only form whose ref it can read exactly.
 
 Only checkouts of the exact version the action forwards to (actions/checkout
 v7.0.1, by commit or tag) are migrated, so no step changes checkout version. Left
@@ -464,7 +464,29 @@ def uses_values(text):
             # drop Unicode spaces (U+00A0, U+2028, ...), which Git allows in branch names.
             end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
             value = line[: end.start() if end else len(line)].rstrip(" \t")
-            yield start, start + len(value), value, None
+            if not end and plain_continues(text, line_end, key):
+                yield start, start, None, "its plain value goes on past the uses: line"
+            else:
+                yield start, start + len(value), value, None
+
+
+def plain_continues(text, line_end, key):
+    """Whether a plain scalar that runs to the end of its uses: line goes on over
+    the next line that is not blank, as YAML reads it: a more deeply indented line
+    in a block mapping, any line in a flow mapping, unless that line is a comment
+    or, in a flow mapping, starts with , } or ]. YAML joins the lines with a space,
+    so the value GitHub runs is not the one on the uses: line."""
+    key_column = key.start("q") - (text.rfind("\n", 0, key.start("q")) + 1)
+    for line in text[line_end + 1 :].split("\n"):
+        content = line.strip(" \t\r")
+        if not content:
+            continue
+        if content.startswith("#"):
+            return False
+        if key["flow"]:
+            return content[0] not in ",}]"
+        return len(line) - len(line.lstrip(" ")) > key_column
+    return False
 
 
 def action_reference(value):

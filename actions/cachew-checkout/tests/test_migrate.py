@@ -432,6 +432,12 @@ class RepositoryTests(unittest.TestCase):
             f"- uses: >-\n          {action}@main",
             f"- uses: *pin",
             f"- uses: \"{action}@\\\n          main\"",
+            # A plain scalar goes on over more deeply indented lines, blank lines
+            # between them included; YAML joins them with a space.
+            f"- uses: {action}@{SHA}\n          x",
+            f"- uses: {action}@{SHA}\n\n          x",
+            f"- uses: {action}@{SHA}\n  \t\n          \tx",
+            f"- {{uses: {action}@{SHA}\n          x}}",
             # YAML ends a plain scalar's line at spaces and tabs only; these are
             # part of the ref, and Git allows them in branch names.
             *(f"- uses: {action}@{SHA}{space}" for space in ("\u00a0", "\u3000", "\u2028", "\x85")),
@@ -440,7 +446,14 @@ class RepositoryTests(unittest.TestCase):
                 workflow.write_text(good.replace(line, bad))
                 code, out = self.run_main("--verify-pins")
                 self.assertEqual(code, 1, out)
-        for fine in (f"- uses: '{action}@{SHA}'", f'- uses: "{action}@{SHA}"', f"- {{uses: {action}@{SHA}}}"):
+        for fine in (
+            f"- uses: '{action}@{SHA}'",
+            f'- uses: "{action}@{SHA}"',
+            f"- {{uses: {action}@{SHA}}}",
+            # A comment ends a plain scalar, so lines after it do not continue it.
+            f"- uses: {action}@{SHA} # pinned\n          # x",
+            f"- uses: {action}@{SHA}\n          # x",
+        ):
             with self.subTest(fine=fine):
                 workflow.write_text(good.replace(line, fine))
                 code, out = self.run_main("--verify-pins")
