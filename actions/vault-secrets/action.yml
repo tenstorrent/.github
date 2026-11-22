@@ -57,7 +57,8 @@ inputs:
     description: >-
       Time limit of the Vault read, in seconds (10 to 600). After this time the
       action stops the Vault step and fails with failed-step `vault`. Each request
-      of the Vault login has its own limit of 15 seconds.
+      of the Vault login has its own limit of 15 seconds; the OIDC token request
+      is tried up to 3 times.
     required: false
     default: "120"
 
@@ -126,7 +127,8 @@ runs:
 
     # login.sh masks the OIDC JWT and the Vault token at once. The Vault token
     # goes to the step output vault-token, which only the read step below uses.
-    # No composite output exposes it. Each request has a limit of 15 seconds.
+    # No composite output exposes it. Each request has a limit of 15 seconds;
+    # the OIDC token request is tried up to 3 times, the Vault login one time.
     - name: Log in to Vault
       id: login
       shell: bash

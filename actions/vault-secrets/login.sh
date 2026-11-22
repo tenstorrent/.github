@@ -58,10 +58,12 @@ split_response() {
 # ── OIDC token ──────────────────────────────────────────────────────────────
 # Audience: the Vault URL, as in vault-secrets 1.0 (jwtGithubAudience).
 # The request token goes in a header read from a pipe, never in argv.
+# Up to 3 tries of REQUEST_TIMEOUT seconds each, 2 seconds apart: about 50
+# seconds in the worst case. The Vault login below is one request, no retry.
 audience="$(printf '%s' "$url" | jq -sRr @uri)"
 rc=0
 response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
-  --retry 2 --retry-delay 2 --retry-max-time 40 \
+  --retry 2 --retry-delay 2 --retry-max-time 50 \
   -w '\n%{http_code}' \
   -H @<(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}")" || rc=$?
@@ -76,7 +78,7 @@ if [ -n "$jwt" ]; then
   printf '::add-mask::%s\n' "$jwt"
 fi
 if [ "$rc" -eq 28 ]; then
-  fail "GitHub did not give the OIDC token within $REQUEST_TIMEOUT seconds. Run the job again."
+  fail "GitHub did not give the OIDC token in 3 tries of $REQUEST_TIMEOUT seconds each. Run the job again."
 elif [ "$rc" -ne 0 ]; then
   fail "the action could not get the OIDC token from GitHub (curl exit $rc). Run the job again."
 elif [ -z "$jwt" ]; then

@@ -237,7 +237,7 @@ refused 'login timeout' \
   'Vault did not answer the login within 15 seconds.' \
   FAKE_LOGIN=timeout
 refused 'OIDC timeout' \
-  'GitHub did not give the OIDC token within 15 seconds.' \
+  'GitHub did not give the OIDC token in 3 tries of 15 seconds each.' \
   FAKE_OIDC=timeout
 refused 'OIDC refused' \
   'GitHub did not give an OIDC token (HTTP 403).' \

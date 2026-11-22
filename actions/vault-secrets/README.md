@@ -70,7 +70,7 @@ Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github
 | `tailscale-client-id` | no | value of org variable `TS_VAULT_OSPO_CLIENT_ID` | Tailscale OAuth client ID. Not a secret. |
 | `tailscale-audience` | no | value of org variable `TS_VAULT_OSPO_AUDIENCE` | Tailscale OIDC audience. Not a secret. |
 | `tailscale-tags` | no | `tag:tt-gha-vault-ospo` | Tags of the runner node. |
-| `vault-timeout-seconds` | no | `120` | Time limit of the Vault read, in seconds (10 to 600). After this time the action stops the Vault step and fails. Each request of the Vault login has its own limit of 15 seconds. |
+| `vault-timeout-seconds` | no | `120` | Time limit of the Vault read, in seconds (10 to 600). After this time the action stops the Vault step and fails. Each request of the Vault login has its own limit of 15 seconds; the OIDC token request is tried up to 3 times. |
 
 Set `github-token`, `secrets`, or both. If both are empty, the action fails.
 
@@ -120,6 +120,8 @@ just before the step that needs the values. For a longer job, call it again
 later in the job.
 
 Each request of the Vault login (OIDC token, login) stops after 15 seconds.
+The OIDC token request is tried up to 3 times (about 50 seconds in the worst
+case). The Vault login is one request with no retry.
 The Vault read stops after `vault-timeout-seconds` (default 120).
 Without this limit, one stalled network connection can hold the step for
 about 16 minutes. A composite action step cannot have `timeout-minutes`, so
