@@ -122,6 +122,9 @@ would use without cachew when it is written, applying the job's own `insteadOf`
 for it at that time. It maps the whole remote URL, so it outranks any rewrite the
 job adds later for that remote, such as a mirror or a token in a URL: while
 caching is on, a later rewrite does not apply to that repository's lazy fetches.
+Those upstream lazy fetches authenticate as they do after a standard checkout:
+with the persisted credentials, so with `persist-credentials: false` a private
+repository's lazy fetches fail. The cache's token never reaches them.
 Once caching is off for the job and cachew's rewrite is gone, cachew removes its
 pins and writes no more, even for a command that read the configuration before
 caching was turned off, so later rewrites apply as they would without cachew. A pin also ends with
@@ -378,8 +381,9 @@ cache), so before consumers pin a commit, run that workflow by hand on it with
 `live-smoke` (and a self-hosted runner label on the CI VLAN). It checks out this
 repository through cachew, full and filtered, from the action at that exact
 commit, and checks the trusted origin, verified TLS without redirects, no token
-in the work trees, an upstream push URL, reads through the wrapper, lazy fetches
-through the pin, and that an untrusted `cachew-url` is refused.
+in the work trees, an upstream push URL, reads through the wrapper, that a
+missing blob of the filtered checkout is fetched lazily from upstream only, with
+the persisted credentials, and that an untrusted `cachew-url` is refused.
 
 ## Pins and releases
 
@@ -432,10 +436,11 @@ plain `actions/checkout` where cachew can never serve the checkout:
   cachew is a no-op; cachew pins there are turned back into
   `actions/checkout`. Labels behind expressions or
   reusable-workflow inputs cannot be seen;
-- `uses:` lines that are text, not steps: the content of a block scalar (`run: |`)
-  and the later lines of a quoted scalar that spans lines. A pin to this action
-  there is still moved to `action_sha`, since `--verify-pins` holds every mention
-  to it;
+- `uses:` lines that are not steps: the content of a block scalar (`run: |`),
+  the later lines of a quoted scalar that spans lines, and any `uses:` key that
+  is not in an item of a `steps:` sequence (a step input, an environment
+  variable, a matrix entry, a data file). A pin to this action there is still
+  moved to `action_sha`, since `--verify-pins` holds every mention to it;
 - gh-aw generated `*.lock.yml` files and their `.md` sources. GitHub runs a
   lock file, so `--verify-pins` still holds its pins to this action to
   `action_sha`: set the pin in the `.md` source and recompile with

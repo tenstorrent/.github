@@ -127,7 +127,6 @@ jobs:
           path: smoke-filtered
           fetch-depth: 0
           filter: blob:none
-          persist-credentials: false
       - name: Verify the checkouts, the cache boundary and the job configuration
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -166,9 +165,20 @@ jobs:
           # A later read through the job-global rewrite and the wrapper.
           git ls-remote "$SERVER/$REPOSITORY" "$EXPECTED_SHA" >/dev/null
           git -C smoke-full fetch --quiet origin
-          # The filtered checkout's lazy fetches go upstream through the pin.
+          # The filtered checkout's lazy fetches go upstream through the pin, with
+          # its persisted credentials. A blob of the history that is not checked
+          # out is missing, so reading it must fetch it.
           [ -n "$(git -C smoke-filtered config --get-all include.path)" ] || fail "filtered checkout is not pinned"
-          git -C smoke-filtered show "HEAD~1:actions/cachew-checkout/README.md" >/dev/null
+          missing=$(git -C smoke-filtered rev-list --objects --missing=print HEAD | awk '/^\?/ && !m { m = substr($0, 2) } END { print m }')
+          [ -n "$missing" ] || fail "the filtered checkout has no missing blob to fetch"
+          trace="$RUNNER_TEMP/cachew-smoke-trace"
+          # Git redacts the Authorization value in this trace.
+          GIT_TRACE_CURL="$trace" GIT_TRACE_CURL_NO_DATA=1 git -C smoke-filtered cat-file -e "$missing"
+          hosts=$(sed -n 's/.*Send header: [Hh]ost: \([^[:space:]]*\).*/\1/p' "$trace" | sort -u)
+          authorized=$(grep -ci 'Send header: authorization: basic <redacted>' "$trace" || true)
+          rm -f -- "$trace"
+          [ "$hosts" = "${SERVER#https://}" ] || fail "the lazy fetch reached ${hosts:-no host}, not ${SERVER#https://}"
+          [ "$authorized" -gt 0 ] || fail "the lazy fetch carried no persisted credentials"
       - name: An untrusted cachew-url is refused
         id: untrusted
         continue-on-error: true

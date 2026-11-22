@@ -316,21 +316,68 @@ def block_scalars(text):
     return spans
 
 
+# A steps: key that opens a block sequence, optionally quoted, anchored or commented.
+STEPS_KEY = re.compile(r"""[ \t]*(?:-[ \t]+)?(?P<q>['"]?)steps(?P=q)[ \t]*:[ \t]*(?:[!&]\S*[ \t]*)*(?:#.*)?""")
+
+
+def step_lines(text, embedded):
+    """Offsets of the lines whose block `uses:` key belongs to a step: a key of a
+    mapping that is an item of a block sequence under a `steps:` key. A uses:
+    key anywhere else (an input, a variable, a matrix entry, a data file) is
+    data, not a step. Lines of block and multi-line quoted scalars, blank lines
+    and comments are passed over."""
+    rows, offset = [], 0
+    for line in lines(text):
+        content = line.strip()
+        inside = any(start <= offset < end for start, end in embedded)
+        if content and not content.startswith("#") and not inside:
+            rows.append((offset, line.rstrip("\r\n"), len(line) - len(line.lstrip(" "))))
+        offset += len(line)
+    steps = set()
+    for index, (offset, line, indent) in enumerate(rows):
+        entries = ENTRIES.match(line)[0]
+        if not line[len(entries):].startswith("uses:") and not re.match(r"""(['"])uses\1[ \t]*:""", line[len(entries):]):
+            continue
+        if entries.count("-") > 1:
+            continue
+        key = len(entries)
+        at = index
+        if "-" not in entries:
+            # The item that holds this key: the nearest line indented less, which
+            # must be a `- ` entry whose first key is at this key's column.
+            at = next((i for i in range(index - 1, -1, -1) if rows[i][2] < key), None)
+            if at is None:
+                continue
+            item = ENTRIES.match(rows[at][1])[0]
+            if item.count("-") != 1 or len(item) != key:
+                continue
+        dash = rows[at][2]
+        # The sequence's key: the nearest earlier line that is not an item of it.
+        parent = next(
+            (i for i in range(at - 1, -1, -1) if rows[i][2] < dash or (rows[i][2] == dash and not rows[i][1].lstrip().startswith("-"))),
+            None,
+        )
+        if parent is not None and STEPS_KEY.fullmatch(rows[parent][1]):
+            steps.add(offset)
+    return steps
+
+
 def rewrite(text, action_sha):
     if not SHA.fullmatch(action_sha):
         raise ValueError(f"action_sha must be a full commit SHA, got {action_sha!r}")
     action = f"{ACTION_REPO}@{action_sha}"
     hosted = hosted_jobs(text)
     embedded = block_scalars(text)
+    steps = step_lines(text, embedded)
 
     def replace(match):
         if "cachew: keep" in match[0]:
             return match[0]
         pinned = "cachew-checkout@" in match[0].lower()
-        if any(start <= match.start() < end for start, end in embedded):
-            # Text a script writes or prints, not a step of this file: a checkout
-            # there is not migrated. A pin to the action is still moved to the
-            # current commit, as --verify-pins holds every mention to it.
+        if match.start() not in steps:
+            # Text a script writes or prints, or data that is not a step of this
+            # file: a checkout there is not migrated. A pin to the action is still
+            # moved to the current commit, as --verify-pins holds every mention to it.
             return f"{match['prefix']}{action} # cachew checkout" if pinned else match[0]
         if any(start <= match.start() < end for start, end in hosted):
             return f"{match['prefix']}{PLAIN_CHECKOUT}" if pinned else match[0]

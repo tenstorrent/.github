@@ -219,6 +219,45 @@ jobs:
 
         self.assertEqual(migrate.rewrite(workflow(PLAIN, STALE, STALE), SHA), workflow(PINNED, PINNED, PINNED))
 
+    def test_uses_keys_outside_a_steps_sequence_are_data_not_steps(self):
+        # Only an item of a steps: sequence is a step. A uses: key elsewhere (an
+        # input, an environment variable, a matrix entry, a data file) is data
+        # the workflow reads: its checkout is left alone, and a pin to this
+        # action there still moves to the current commit, as in a script.
+        def workflow(value, pin):
+            return (
+                f"uses: {value}\n"
+                "jobs:\n  build:\n    runs-on: [self-hosted]\n"
+                "    strategy:\n      matrix:\n        include:\n"
+                f"          - uses: {value}\n"
+                f"            pin: x\n"
+                f"          - uses: {pin}\n"
+                "    env:\n"
+                f"      uses: {value}\n"
+                "    steps:\n"
+                "      - uses: ./local\n"
+                "        with:\n"
+                f"          uses: {value}\n"
+                "\n"
+                "          # a comment\n"
+                f"          also: {value}\n"
+                "      - name: step\n"
+                "        # the step's own key\n"
+                f"        uses: {step}\n"
+                "    outputs:\n"
+                "      list:\n"
+                f"      - uses: {value}\n"
+            )
+
+        step = PLAIN
+        before = workflow(PLAIN, STALE)
+        step = PINNED
+        self.assertEqual(migrate.rewrite(before, SHA), workflow(PLAIN, PINNED))
+
+    def test_a_steps_sequence_at_its_keys_indentation_holds_steps(self):
+        before = f"jobs:\n  build:\n    runs-on: [self-hosted]\n    'steps':  # comment\n    - name: x\n      uses: {PLAIN}\n    - uses: {PLAIN}\n"
+        self.assertEqual(migrate.rewrite(before, SHA), before.replace(PLAIN, PINNED))
+
     def test_the_exact_version_is_migrated_however_its_owner_and_name_are_cased(self):
         # GitHub resolves Actions/Checkout as actions/checkout.
         before = "runs:\n  steps:\n    - uses: Actions/Checkout@v7.0.1\n    - uses: actions/checkout@v7.0.10\n"
