@@ -174,7 +174,8 @@ jobs:
           trace="$RUNNER_TEMP/cachew-smoke-trace"
           # Git redacts the Authorization value in this trace.
           GIT_TRACE_CURL="$trace" GIT_TRACE_CURL_NO_DATA=1 git -C smoke-filtered cat-file -e "$missing"
-          hosts=$(sed -n 's/.*Send header: [Hh]ost: \([^[:space:]]*\).*/\1/p' "$trace" | sort -u)
+          # A proxy CONNECT sends the host with its port (github.com:443).
+          hosts=$(sed -n 's/.*Send header: [Hh]ost: \([^[:space:]]*\).*/\1/p' "$trace" | sed 's/:443$//' | sort -u)
           authorized=$(grep -ci 'Send header: authorization: basic <redacted>' "$trace" || true)
           rm -f -- "$trace"
           [ "$hosts" = "${SERVER#https://}" ] || fail "the lazy fetch reached ${hosts:-no host}, not ${SERVER#https://}"
