@@ -605,8 +605,10 @@ def weakened(real_git, arguments, index, environ, cache):
                     yield located(path, place)
 
     entries = listed()
-    if arguments[index] in ("fetch", "pull", "submodule"):
-        # These may recurse into submodules, whose own files Git then reads.
+    if arguments[index] in ("fetch", "pull", "submodule", "push", "remote"):
+        # These may recurse into submodules, whose own files Git then reads: a
+        # push with --recurse-submodules or push.recurseSubmodules, and a remote
+        # update, which fetches as `git fetch` does.
         directories = submodule_git_dirs(real_git, arguments[:index], environ)
         if directories is None:
             return f"more than {MAX_SUBMODULE_REPOSITORIES} submodule repositories"

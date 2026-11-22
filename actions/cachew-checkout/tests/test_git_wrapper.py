@@ -717,6 +717,41 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(len(self.cache.requests) > before, "the submodule fetch did not reach the cache")
         self.assertEqual(tokens, [])
 
+    def test_a_submodules_weakening_setting_keeps_push_and_remote_update_tokenless(self):
+        # A push that recurses into submodules and a remote update that fetches
+        # them reach the submodule's remote too, under its own settings.
+        kid = self.history("kid")
+        self.git_fixture.repository("top", [("kid-name", "deps/kid", "../kid", kid)])
+        cache_kid = self.cache.url + "/git/" + self.upstream.url.split("://", 1)[1] + "/org/kid"
+        identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+        for name, command in (
+            ("push", ["push", "--recurse-submodules=on-demand", "origin", "HEAD:refs/heads/pushed"]),
+            ("remote update", ["-c", "fetch.recurseSubmodules=true", "remote", "update"]),
+        ):
+            with self.subTest(command=name):
+                recursive = self.root / f"recursive-{name.replace(' ', '-')}"
+                result = self.git_result("clone", "--recurse-submodules", self.upstream.url + "/org/top", str(recursive))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                submodule = recursive / "deps/kid"
+                for arguments in (
+                    ["-C", str(submodule), "remote", "set-url", "origin", cache_kid],
+                    ["-C", str(submodule), "config", f"http.{self.cache.url}/git/.sslVerify", "false"],
+                    # Git pushes a submodule on the superproject's branch.
+                    ["-C", str(recursive), "checkout", "-b", "work"],
+                    ["-C", str(submodule), "checkout", "-b", "work"],
+                    # A commit only the submodule has, for the push to send.
+                    [*identity, "-C", str(submodule), "commit", "--allow-empty", "-m", "new"],
+                    ["-C", str(recursive), "add", "deps/kid"],
+                    [*identity, "-C", str(recursive), "commit", "-m", "bump"],
+                ):
+                    result = self.git_result(*arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                before = len(self.cache.requests)
+                # Whether the cache accepts it does not matter: no request may carry the token.
+                result = self.git_result("-C", str(recursive), *command)
+                self.assertTrue(len(self.cache.requests) > before, "the command did not reach the submodule's remote: " + result.stderr)
+                self.assertEqual([auth for _, _, auth in self.cache.requests[before:] if auth], [])
+
     def test_a_weakening_setting_in_a_submodule_kept_outside_modules_is_read(self):
         # Git also reads a submodule whose Git directory is in its work tree
         # (one added from an existing clone) or reached through a symbolic link
