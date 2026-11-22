@@ -3,7 +3,8 @@
 # Runs prepare.sh directly, without Vault or the network. Checks that each
 # pre-check refuses its case with its own message, and checks the reserved
 # output name rule: prepare.sh accepts a `secrets` value that only contains the
-# reserved name, and refuses a value that uses it as an output name.
+# reserved name, and refuses a value that uses it as an output name. Checks
+# the role resolution (default, short and full names) and its refusals.
 # Uses no token and no secret.
 set -euo pipefail
 
@@ -25,6 +26,7 @@ run_env() {
   env -i PATH="$PATH" \
     ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/not-used \
     EVENT_NAME=workflow_dispatch \
+    REPOSITORY=tenstorrent/.github \
     IN_ROLE=test-role \
     IN_SECRETS= \
     IN_GITHUB_TOKEN=test-token \
@@ -99,11 +101,24 @@ refuses_with 'pull_request_target' 'refused on pull_request_target' \
   EVENT_NAME=pull_request_target
 refuses_with 'no OIDC token' 'job needs permissions: id-token: write' \
   ACTIONS_ID_TOKEN_REQUEST_URL=
-refuses_with 'empty role' 'input role is empty' IN_ROLE=
-refuses_with 'role with a space' 'input role has characters that a Vault role name cannot have' \
-  'IN_ROLE=test role'
-refuses_with 'role with a /' 'input role has characters that a Vault role name cannot have' \
-  IN_ROLE=test/role
+refuses_with 'empty REPOSITORY' 'github.repository is empty' REPOSITORY=
+refuses_with 'REPOSITORY without owner' "github.repository '.github' is not in the form" \
+  REPOSITORY=.github
+chars='input role has characters that a Vault role name cannot have'
+refuses_with 'role with a space' "$chars" 'IN_ROLE=test role'
+refuses_with 'role with a /' "$chars" IN_ROLE=test/role
+refuses_with 'role with a ;' "$chars" 'IN_ROLE=x;y'
+refuses_with 'role that starts with -' "$chars" IN_ROLE=-x
+refuses_with 'role that starts with .' "$chars" IN_ROLE=.x
+refuses_with 'role of another repository' \
+  "input role 'tenstorrent--other--x' is not a role of tenstorrent/.github" \
+  IN_ROLE=tenstorrent--other--x
+refuses_with 'role with -- but without the prefix' \
+  "input role 'a--b' is not a role of tenstorrent/.github" IN_ROLE=a--b
+refuses_with 'full role with an empty name' 'does not give a valid Vault role name' \
+  IN_ROLE=tenstorrent--.github--
+refuses_with 'short role that ends with -' 'does not give a valid Vault role name' \
+  IN_ROLE=x-
 refuses_with 'nothing to get' 'nothing to get' IN_GITHUB_TOKEN= IN_SECRETS=
 refuses_with 'nothing to get, secrets only blanks and ;' 'nothing to get' \
   IN_GITHUB_TOKEN= "IN_SECRETS= ;${nl} ;"
@@ -148,6 +163,51 @@ accepts 'output name that only starts with the reserved name' \
 accepts 'default name with a dash is not the reserved name' \
   'kv/data/app VAULT-SECRETS_GITHUB_TOKEN' test-token \
   "kv/data/app VAULT-SECRETS_GITHUB_TOKEN ;${nl}${token_line}"
+
+# Fails unless prepare.sh, in repository $2 with IN_ROLE=$3, writes role=$4
+# and role-source=$5.
+role_is() {
+  local title="$1" repo="$2" in="$3" want_role="$4" want_source="$5"
+  run_env REPOSITORY="$repo" IN_ROLE="$in"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::role $title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x -F -- "role=$want_role" "$work/out" \
+    || ! grep -q -x -F -- "role-source=$want_source" "$work/out"; then
+    echo "::error::role $title: expected role=$want_role role-source=$want_source"
+    grep -E '^(role|role-source|prefix)=' "$work/out" || true
+    status=1
+  else
+    echo "OK: role $title gives $want_role ($want_source)"
+  fi
+}
+role_is 'empty' tenstorrent/.member-history '' tenstorrent--.member-history default
+role_is 'only blanks' tenstorrent/.member-history '  ' tenstorrent--.member-history default
+role_is 'short name' tenstorrent/.member-history nightly tenstorrent--.member-history--nightly short
+role_is 'short name with blanks' tenstorrent/.member-history ' saml ' tenstorrent--.member-history--saml short
+role_is 'short name in upper case' tenstorrent/.github Vault-Action-Test tenstorrent--.github--vault-action-test short
+role_is 'index form' tenstorrent/.github 2 tenstorrent--.github--2 short
+role_is 'full name' tenstorrent/.github tenstorrent--.github--vault-action-test \
+  tenstorrent--.github--vault-action-test full
+role_is 'full default name' tenstorrent/.github tenstorrent--.github tenstorrent--.github full
+role_is 'full name in mixed case' tenstorrent/.github Tenstorrent--.GitHub--X tenstorrent--.github--x full
+role_is 'repository in upper case' tenstorrent/LLM_Perf '' tenstorrent--llm_perf default
+
+# Fails unless prepare.sh refuses to run without $1 on PATH. The PATH holds
+# links to the other tools that prepare.sh and this test need.
+refuses_without_tool() {
+  local missing="$1" bin="$work/bin-no-$1" tool path
+  mkdir -p "$bin"
+  for tool in bash env od tr curl jq; do
+    [ "$tool" = "$missing" ] && continue
+    path="$(command -v "$tool")"
+    ln -sf "$path" "$bin/$tool"
+  done
+  refuses_with "runner without $missing" "this runner has no $missing" PATH="$bin"
+}
+refuses_without_tool jq
+refuses_without_tool curl
 
 # Fails unless prepare.sh, with IN_VAULT_TIMEOUT=$1, writes vault-timeout=$2.
 timeout_is() {

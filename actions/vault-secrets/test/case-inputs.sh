@@ -15,7 +15,9 @@ join=auto
 case "$CASE" in
   # Pre-checks: fail before any network call.
   no-inputs) token="" ;;
-  empty-role) role="" ;;
+  # A role of another repository: Vault binds the claim repository, so it
+  # can never work. Refused before any network call.
+  foreign-role) role="${VAULT_ROLE%%--*}--no-such-repo--x" ;;
   bad-token-name) token="bad;name" ;;
   bad-join-value) join=maybe ;;
   http-url) url="http://${VAULT_URL#https://}" ;;

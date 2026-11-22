@@ -4,8 +4,8 @@
 #
 # Reads:  IN_ROLE IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
 #         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
-#         ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
-# Writes: outputs url, join, spec, vault-timeout
+#         REPOSITORY (github.repository) ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
+# Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix
 set -euo pipefail
 
 DEFAULT_URL='https://vault-ospo.eng-svc.aws.tenstorrent.com'
@@ -24,9 +24,51 @@ if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
   fail "job needs permissions: id-token: write (not available on fork pull requests)"
 fi
 
-role="${IN_ROLE:-}"
-[ -n "$role" ] || fail "input role is empty. Set it to the Vault role of this workflow, for example <org>--<repo>."
-[[ "$role" =~ ^[A-Za-z0-9._-]+$ ]] || fail "input role has characters that a Vault role name cannot have. Allowed: letters, digits, '.', '_', '-'."
+for tool in curl jq; do
+  command -v "$tool" >/dev/null 2>&1 || fail "this runner has no $tool; the action needs bash, curl and jq."
+done
+
+lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# Vault role (jwt-github). The grant module names roles
+#   <org>--<repo>          first workflow entry without a name (default role)
+#   <org>--<repo>--<name>  entry with a name (or --<i+1> for a later entry without one)
+# always in lower case. Vault binds the OIDC claim `repository`, which is
+# github.repository (also in a called reusable workflow), so only roles with
+# this prefix can work. The action builds one name and tries one login.
+repository="${REPOSITORY:-}"
+[ -n "$repository" ] || fail "github.repository is empty. The action needs it to build the Vault role name."
+[[ "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] \
+  || fail "github.repository '$repository' is not in the form <owner>/<repo>."
+prefix="$(lower "${repository/\//--}")"
+
+role_in="${IN_ROLE:-}"
+role_in="${role_in#"${role_in%%[![:space:]]*}"}"
+role_in="${role_in%"${role_in##*[![:space:]]}"}"
+role_lower="$(lower "$role_in")"
+if [ -z "$role_in" ]; then
+  role="$prefix"
+  role_source=default
+elif ! [[ "$role_in" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$role_in" == [-.]* ]]; then
+  fail "input role has characters that a Vault role name cannot have. Allowed: letters, digits, '.', '_', '-'. Use the short name of your workflow entry (for example nightly) or leave role empty."
+elif [ "$role_lower" = "$prefix" ] || [[ "$role_lower" == "$prefix--"* ]]; then
+  role="$role_lower"
+  role_source=full
+elif [[ "$role_in" == *--* ]]; then
+  fail "input role '$role_in' is not a role of $repository. Its roles start with $prefix. Use the short name, the part after '$prefix--'."
+else
+  role="$prefix--$role_lower"
+  role_source=short
+fi
+# Strict check of the result: the prefix, optionally '--' and a name that
+# starts and ends with a letter, digit or '_'.
+suffix="${role#"$prefix"}"
+if [ -n "$suffix" ] && ! [[ "$suffix" =~ ^--[a-z0-9_]([a-z0-9._-]*[a-z0-9_])?$ ]]; then
+  fail "input role '$role_in' does not give a valid Vault role name ($role). Use the short name of your workflow entry (for example nightly) or leave role empty."
+fi
+[ "${#role}" -le 255 ] || fail "input role is too long for a Vault role name."
 
 # Trim trailing blanks and ';' so that the token line can be appended.
 secrets="${IN_SECRETS:-}"
@@ -132,5 +174,8 @@ delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   printf 'url=%s\n' "$url"
   printf 'join=%s\n' "$join"
   printf 'vault-timeout=%s\n' "$vault_timeout"
+  printf 'role=%s\n' "$role"
+  printf 'role-source=%s\n' "$role_source"
+  printf 'prefix=%s\n' "$prefix"
   printf 'spec<<%s\n%s\n%s\n' "$delimiter" "$spec" "$delimiter"
 } >>"$GITHUB_OUTPUT"
