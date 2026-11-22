@@ -979,6 +979,23 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(len(self.fixture.cache.discoveries()), before)
         self.finish()
 
+    def test_global_includes_of_files_written_later_still_apply(self):
+        # Git reads an include whose file is missing as empty, and reads the file
+        # once a later step writes it. The session's copy must keep the directive.
+        subprocess.run(["git", "init", "-q", str(self.fixture.workspace)], check=True)
+        later = self.fixture.home / "later.config"
+        conditional = self.fixture.home / "later-if.config"
+        with (self.fixture.home / ".gitconfig").open("a") as config:
+            config.write("[include]\n\tpath = later.config\n")
+            config.write(f'[includeIf "gitdir:{self.fixture.workspace.resolve()}/"]\n\tpath = ~/later-if.config\n')
+        self.original_global = (self.fixture.home / ".gitconfig").read_bytes()
+        self.assertEqual(self.flow(), (True, True))
+        later.write_text("[fixture]\n\tlater = written-later\n")
+        conditional.write_text("[fixture]\n\tconditional = written-later\n")
+        self.assertEqual(self.real_git("config", "--get", "fixture.later"), "written-later")
+        self.assertEqual(self.real_git("config", "--get", "fixture.conditional"), "written-later")
+        self.finish()
+
     def test_global_include_files_are_copied_and_originals_stay_unchanged(self):
         include = self.fixture.home / "preferences.config"
         include.write_text(

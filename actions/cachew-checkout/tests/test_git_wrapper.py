@@ -882,6 +882,35 @@ class DownstreamGitTests(unittest.TestCase):
             self.assert_lazy_fetch_skips_dead_cache(repo, "hist", spec)
             self.cache.fail_repo = None
 
+    def test_a_promisor_remote_set_outside_the_local_file_is_pinned(self):
+        # Git takes a remote for a promisor from any file it reads: one the
+        # repository includes, or its worktree configuration.
+        self.history("hist")
+        shared = self.root / "shared.config"
+        shared.write_text('[remote "origin"]\n\tpromisor = true\n\tpartialclonefilter = blob:none\n')
+        for name, setup in (
+            ("included", [["config", "include.path", str(shared)]]),
+            (
+                "worktree",
+                [
+                    ["config", "extensions.worktreeConfig", "true"],
+                    ["config", "--worktree", "remote.origin.promisor", "true"],
+                    ["config", "--worktree", "remote.origin.partialclonefilter", "blob:none"],
+                ],
+            ),
+        ):
+            with self.subTest(name):
+                repo = self.root / name
+                self.git_result("init", "-b", "main", str(repo))
+                self.git_result("-C", str(repo), "remote", "add", "origin", self.upstream.url + "/org/hist")
+                for arguments in setup:
+                    result = self.git_result("-C", str(repo), *arguments)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                result = self.git_result("-C", str(repo), "pull", "origin", "main")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_lazy_fetch_skips_dead_cache(repo, "hist")
+                self.cache.fail_repo = None
+
     def test_a_submodule_path_with_a_line_break_is_pinned(self):
         kid = self.history("kid")
         path = "deps/k\nid\u2028x"

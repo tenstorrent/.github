@@ -418,13 +418,19 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
     def reached():
         """The URLs of the promisor remotes the cache rewrite reaches."""
         # NUL-separated: a remote's name may hold a space (or a tab), which the
-        # line listing would read as the end of the key.
-        for entry in filter(None, run("config", "--local", "--null", "--get-regexp", r"^remote\..*\.promisor$").split("\0")):
+        # line listing would read as the end of the key. Every file Git reads,
+        # with includes: Git takes a promisor from any of them (an included file,
+        # the worktree's configuration), and `--local` reads .git/config alone.
+        seen = set()
+        for entry in filter(None, run("config", "--null", "--get-regexp", r"^remote\..*\.promisor$").split("\0")):
             key, separator, value = entry.partition("\n")
             remote = key[len("remote.") : -len(".promisor")]
             # A filtered fetch from a URL records the URL itself as the promisor remote.
-            url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
+            url = run("config", "--get", f"remote.{remote}.url").strip() or remote
+            if url in seen:
+                continue
             if git_true(value if separator else None) and run("ls-remote", "--get-url", remote).startswith(prefix):
+                seen.add(url)
                 yield url
 
     if not session or not Path(session).is_dir():
@@ -543,9 +549,10 @@ def copy_globals(session, real_git, environ, caches):
             if header is not None and cache_host(header, caches):
                 continue
             if key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower()):
-                if not (copied := copy(include_target(value, source, environ))):
-                    continue
-                key, value = anchored_condition(key, source, environ), str(copied)
+                # A file that does not exist yet is read once a later step writes it,
+                # as Git does: the directive keeps its absolute path.
+                target = include_target(value, source, environ)
+                key, value = anchored_condition(key, source, environ), str(copy(target) or target)
             entries.append((key, value))
         write_private(destination, render(entries))
         return destination
