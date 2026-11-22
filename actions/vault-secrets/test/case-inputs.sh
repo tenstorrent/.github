@@ -36,6 +36,12 @@ case "$CASE" in
     token=""
     secrets="${VAULT_KV_PATH}-no-such-path $VAULT_KV_FIELD | KV_TEST"
     ;;
+  # No role: the default role has no metadata-read token. Proves the default
+  # role is used, not the named role (which has this token).
+  default-role-denied)
+    role=""
+    token="${VAULT_ROLE%--vault-action-test}--metadata-read"
+    ;;
   wrong-kv-field)
     token=""
     secrets="$VAULT_KV_PATH no_such_field | KV_TEST"
