@@ -72,11 +72,11 @@ CHECKOUT = re.compile(
 )
 # The pin itself in a CHECKOUT match: the action, at either location, and its commit.
 PIN = re.compile(r"(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")@[0-9a-f]{40}")
-# A uses: key of a flow mapping (`- {uses: actions/checkout@v7.0.1, ...}`, on
-# one line or several), which --write does not rewrite; to the end of its line.
+# A flow mapping's uses: key whose value is a checkout --write would migrate,
+# matched where the key starts.
 FLOW_CHECKOUT = re.compile(
-    r"[{,][ \t\r\n]*(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*(?P<quote>['\"]?)"
-    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=[ \t]*(?:[,}\r\n]|$))[^\n]*"
+    r"(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t\r\n]*(?P<quote>['\"]?)"
+    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=[ \t\r\n]*[,}])"
 )
 # Any mention of the action with a ref, wherever it appears in a file and however
 # its path is spelled: one word that starts at the owner, names the action and
@@ -334,13 +334,7 @@ def step_lines(text, embedded):
     key anywhere else (an input, a variable, a matrix entry, a data file) is
     data, not a step. Lines of block and multi-line quoted scalars, blank lines
     and comments are passed over."""
-    rows, offset = [], 0
-    for line in lines(text):
-        content = line.strip()
-        inside = any(start <= offset < end for start, end in embedded)
-        if content and not content.startswith("#") and not inside:
-            rows.append((offset, line.rstrip("\r\n"), len(line) - len(line.lstrip(" "))))
-        offset += len(line)
+    rows = content_rows(text, embedded)
     steps = set()
     for index, (offset, line, indent) in enumerate(rows):
         entries = ENTRIES.match(line)[0]
@@ -359,15 +353,74 @@ def step_lines(text, embedded):
             item = ENTRIES.match(rows[at][1])[0]
             if item.count("-") != 1 or len(item) != key:
                 continue
-        dash = rows[at][2]
-        # The sequence's key: the nearest earlier line that is not an item of it.
-        parent = next(
-            (i for i in range(at - 1, -1, -1) if rows[i][2] < dash or (rows[i][2] == dash and not rows[i][1].lstrip().startswith("-"))),
-            None,
-        )
-        if parent is not None and STEPS_KEY.fullmatch(rows[parent][1]):
+        if steps_item(rows, at):
             steps.add(offset)
     return steps
+
+
+def content_rows(text, embedded):
+    """(offset, line, indent) for each line that holds YAML nodes: not blank, not
+    a comment, not inside a block or multi-line quoted scalar."""
+    rows, offset = [], 0
+    for line in lines(text):
+        content = line.strip()
+        inside = any(start <= offset < end for start, end in embedded)
+        if content and not content.startswith("#") and not inside:
+            rows.append((offset, line.rstrip("\r\n"), len(line) - len(line.lstrip(" "))))
+        offset += len(line)
+    return rows
+
+
+def steps_item(rows, at):
+    """Whether the `- ` entry on rows[at] is an item of a sequence under a
+    `steps:` key."""
+    dash = rows[at][2]
+    # The sequence's key: the nearest earlier line that is not an item of it.
+    parent = next(
+        (i for i in range(at - 1, -1, -1) if rows[i][2] < dash or (rows[i][2] == dash and not rows[i][1].lstrip().startswith("-"))),
+        None,
+    )
+    return parent is not None and bool(STEPS_KEY.fullmatch(rows[parent][1]))
+
+
+def flow_mapping(text, at):
+    """(end, keys) for the flow mapping whose `{` is text[at]: the index after
+    its `}` and where each of its own keys starts, leaving out the keys of nested
+    collections and anything in quoted or plain scalars. None if it does not end."""
+    depth, keys, node, key, i = 0, [], True, False, at
+    while i < len(text):
+        c = text[i]
+        if c in "'\"" and node:
+            if key and depth == 1:
+                keys.append(i)
+            i = quote_end(text, i + 1, c)
+            if i < 0:
+                return None
+            node = key = False
+            continue
+        if c in "{[":
+            depth += 1
+            node, key = True, c == "{" and depth == 1
+        elif c in "}]":
+            depth -= 1
+            if depth == 0:
+                return i + 1, keys
+            node = key = False
+        elif c == ",":
+            node, key = True, depth == 1
+        elif c == ":" and text[i + 1 : i + 2] in ("", " ", "\t", "\r", "\n", ",", "}", "]"):
+            node, key = True, False
+        elif c == "#" and text[i - 1 : i] in (" ", "\t", "\n"):
+            i = text.find("\n", i)
+            if i < 0:
+                return None
+        elif c not in " \t\r\n" and node:
+            # A plain scalar: its quotes, braces and colons up to an indicator are text.
+            if key and depth == 1:
+                keys.append(i)
+            node = key = False
+        i += 1
+    return None
 
 
 def rewrite(text, action_sha):
@@ -398,16 +451,27 @@ def rewrite(text, action_sha):
 
 def flow_steps(text):
     """Line numbers of checkout steps written as flow mappings, which --write
-    leaves alone: outside scripts and quoted text, in jobs that are not
-    GitHub-hosted, and without `# cachew: keep`."""
+    leaves alone: a uses: key of a flow mapping that is an item of a steps:
+    sequence, in a job that is not GitHub-hosted, without `# cachew: keep` on
+    the mapping's last line."""
     hosted = hosted_jobs(text)
-    embedded = block_scalars(text)
-    return [
-        text.count("\n", 0, match.start("key")) + 1
-        for match in FLOW_CHECKOUT.finditer(text)
-        if "cachew: keep" not in match[0]
-        and not any(start <= match.start("key") < end for start, end in hosted + embedded)
-    ]
+    rows = content_rows(text, block_scalars(text))
+    found = []
+    for index, (offset, line, indent) in enumerate(rows):
+        entries = ENTRIES.match(line)[0]
+        if entries.count("-") != 1 or not line[len(entries) :].startswith("{") or not steps_item(rows, index):
+            continue
+        if any(start <= offset < end for start, end in hosted):
+            continue
+        mapping = flow_mapping(text, offset + len(entries))
+        if not mapping:
+            continue
+        end, keys = mapping
+        line_end = text.find("\n", end)
+        if "cachew: keep" in text[end : len(text) if line_end < 0 else line_end]:
+            continue
+        found += [text.count("\n", 0, key) + 1 for key in keys if FLOW_CHECKOUT.match(text, key)]
+    return found
 
 
 def migrate_file(path, action_sha, write=False, root=None, exclude=()):

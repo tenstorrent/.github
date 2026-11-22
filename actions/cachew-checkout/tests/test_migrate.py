@@ -424,11 +424,19 @@ class RepositoryTests(unittest.TestCase):
             head + f"      - {{uses: {checkout}}} # cachew: keep\n",
             head.replace("self-hosted", "ubuntu-latest") + f"      - {{uses: {checkout}}}\n",
             head + f"      - run: |\n          - {{uses: {checkout}}}\n",
+            # Not items of a steps: sequence, or not flow mappings at all.
+            "jobs:\n  build:\n    runs-on: self-hosted\n    strategy:\n      matrix:\n        include:\n"
+            f"          - {{uses: {checkout}}}\n    steps:\n      - run: echo\n",
+            head + f"      - run: echo \"{{uses: {checkout}}}\"\n",
+            head + f"      - run: echo {{uses: {checkout}}}\n",
+            head + f"      - {{run: echo, with: {{uses: {checkout}}}}}\n",
+            head + f"      - {{run: 'echo {{uses: {checkout}}}'}}\n",
         ):
             with self.subTest(text=text):
                 workflow.write_text(text)
-                code, out = self.run_main("--write")
-                self.assertNotIn("ci.yml:", out)
+                for mode in ("--write", "--check"):
+                    code, out = self.run_main(mode)
+                    self.assertNotIn("ci.yml:", out)
 
     def test_a_config_that_is_not_an_object_is_reported_in_every_mode(self):
         for text in ("[]", "5", "null", '"x"', "\udcff"):
