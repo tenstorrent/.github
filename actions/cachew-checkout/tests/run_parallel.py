@@ -10,8 +10,9 @@ then a combined summary. The tests use their own temporary directories and
 servers on free ports, so they run side by side safely.
 
 usage: python3 run_parallel.py [-j JOBS] [tests directory]
-Exit status 1 if any test fails or errors, a shard does not run all its tests,
-a shard exits with a non-zero status, or the directory holds no test.
+Exit status 1 if any test fails or errors, succeeds unexpectedly, a shard does
+not run all its tests, a shard exits with a non-zero status, or the directory
+holds no test.
 """
 
 import argparse
@@ -22,6 +23,10 @@ import subprocess
 import sys
 import time
 import unittest
+
+
+# The counts unittest's summary line can carry, in its order.
+COUNTS = ("failures", "errors", "skipped", "expected failures", "unexpected successes")
 
 
 def test_ids(suite):
@@ -62,7 +67,7 @@ def main(argv=None):
         )
         for shard in shards
     ]
-    totals = {"ran": 0, "failures": 0, "errors": 0, "skipped": 0}
+    totals = dict.fromkeys(("ran", *COUNTS), 0)
     complete = True
     exited_nonzero = 0
     for shard, process in zip(shards, processes):
@@ -70,10 +75,15 @@ def main(argv=None):
         # unittest's own summary ends the output; a test may print lines like it.
         summary = output.rstrip().rsplit("\n", 3)[-3:]
         ran = re.fullmatch(r"Ran (\d+) tests? in \S+", summary[0]) if len(summary) == 3 else None
-        counts = dict(re.findall(r"\b(failures|errors|skipped)=(\d+)", summary[-1])) if ran else {}
+        status = re.fullmatch(r"(?:OK|FAILED)(?: \((.*)\))?", summary[-1]) if ran else None
+        if not status:
+            ran = None
         totals["ran"] += int(ran[1]) if ran else 0
-        for key, value in counts.items():
-            totals[key] += int(value)
+        # Each item whole: `expected failures=1` is not `failures=1`.
+        for item in (status[1] or "").split(", ") if status else ():
+            key, _, value = item.partition("=")
+            if key in COUNTS and value.isdigit():
+                totals[key] += int(value)
         if not ran or int(ran[1]) != len(shard):
             complete = False
         # A shard can print a passing summary and still exit non-zero (an
@@ -84,12 +94,11 @@ def main(argv=None):
             print(f"shard exited with status {process.returncode}")
     # No test at all is a wrong directory, not a pass.
     complete = complete and totals["ran"] == len(tests) > 0
-    failed = totals["failures"] or totals["errors"] or not complete or exited_nonzero
+    failed = totals["failures"] or totals["errors"] or totals["unexpected successes"] or not complete or exited_nonzero
     print(
         f"Ran {totals['ran']} of {len(tests)} tests on {len(processes)} processes in "
         f"{time.monotonic() - start:.0f}s: {'FAILED' if failed else 'OK'} "
-        f"(failures={totals['failures']}, errors={totals['errors']}, skipped={totals['skipped']}, "
-        f"shards exited non-zero={exited_nonzero})"
+        f"({', '.join(f'{key}={totals[key]}' for key in COUNTS)}, shards exited non-zero={exited_nonzero})"
     )
     return 1 if failed else 0
 
