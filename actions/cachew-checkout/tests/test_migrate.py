@@ -254,6 +254,26 @@ jobs:
         step = PINNED
         self.assertEqual(migrate.rewrite(before, SHA), workflow(PLAIN, PINNED))
 
+    def test_a_quoted_uses_key_is_a_step_key(self):
+        # YAML reads "uses", 'uses' and `"uses" :` as the key uses.
+        before = (
+            "jobs:\n  build:\n    runs-on: [self-hosted]\n    steps:\n"
+            f'      - "uses": {PLAIN}\n'
+            f"      - name: x\n        'uses' : {PLAIN}\n"
+            f'      - "uses": "actions/checkout@v7.0.1"\n'
+            "  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - 'uses': {STALE}\n"
+        )
+        after = (
+            "jobs:\n  build:\n    runs-on: [self-hosted]\n    steps:\n"
+            f'      - "uses": {PINNED}\n'
+            f"      - name: x\n        'uses' : {PINNED}\n"
+            f'      - "uses": {PINNED}\n'
+            "  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - 'uses': {PLAIN}\n"
+        )
+        self.assertEqual(migrate.rewrite(before, SHA), after)
+
     def test_a_steps_sequence_at_its_keys_indentation_holds_steps(self):
         before = f"jobs:\n  build:\n    runs-on: [self-hosted]\n    'steps':  # comment\n    - name: x\n      uses: {PLAIN}\n    - uses: {PLAIN}\n"
         self.assertEqual(migrate.rewrite(before, SHA), before.replace(PLAIN, PINNED))

@@ -60,7 +60,7 @@ CONFIG = Path(".github/cachew-checkout.json")
 SHA = re.compile(r"[0-9a-f]{40}")
 
 CHECKOUT = re.compile(
-    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?uses:[ \t]*)(?P<quote>['\"]?)"
+    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*)(?P<quote>['\"]?)"
     r"(?:(?i:actions/checkout)@(?:"
     + "|".join(map(re.escape, MIGRATABLE_REFS))
     + r")|(?i:"
@@ -336,7 +336,7 @@ def step_lines(text, embedded):
     steps = set()
     for index, (offset, line, indent) in enumerate(rows):
         entries = ENTRIES.match(line)[0]
-        if not line[len(entries):].startswith("uses:") and not re.match(r"""(['"])uses\1[ \t]*:""", line[len(entries):]):
+        if not re.match(r"""(['"]?)uses\1[ \t]*:""", line[len(entries):]):
             continue
         if entries.count("-") > 1:
             continue
