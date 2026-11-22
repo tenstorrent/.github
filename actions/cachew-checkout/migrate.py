@@ -70,6 +70,14 @@ CHECKOUT = re.compile(
     + r")@[0-9a-f]{40})"
     r"(?P=quote)(?:[ \t]+#[^\n]*)?[ \t]*$"
 )
+# The pin itself in a CHECKOUT match: the action, at either location, and its commit.
+PIN = re.compile(r"(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")@[0-9a-f]{40}")
+# A uses: key of a flow mapping (`- {uses: actions/checkout@v7.0.1, ...}`, on
+# one line or several), which --write does not rewrite; to the end of its line.
+FLOW_CHECKOUT = re.compile(
+    r"[{,][ \t\r\n]*(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*(?P<quote>['\"]?)"
+    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=[ \t]*(?:[,}\r\n]|$))[^\n]*"
+)
 # Any mention of the action with a ref, wherever it appears in a file and however
 # its path is spelled: one word that starts at the owner, names the action and
 # ends in @<ref>. GitHub resolves owner and repository names in any case, so a
@@ -377,8 +385,10 @@ def rewrite(text, action_sha):
         if match.start() not in steps:
             # Text a script writes or prints, or data that is not a step of this
             # file: a checkout there is not migrated. A pin to the action is still
-            # moved to the current commit, as --verify-pins holds every mention to it.
-            return f"{match['prefix']}{action} # cachew checkout" if pinned else match[0]
+            # moved to the current commit, as --verify-pins holds every mention to it,
+            # and nothing else on the line changes: inside a quoted scalar its
+            # quotes and its comment are part of the value.
+            return PIN.sub(action, match[0], count=1) if pinned else match[0]
         if any(start <= match.start() < end for start, end in hosted):
             return f"{match['prefix']}{PLAIN_CHECKOUT}" if pinned else match[0]
         return f"{match['prefix']}{action} # cachew checkout"
@@ -386,20 +396,34 @@ def rewrite(text, action_sha):
     return CHECKOUT.sub(replace, text)
 
 
+def flow_steps(text):
+    """Line numbers of checkout steps written as flow mappings, which --write
+    leaves alone: outside scripts and quoted text, in jobs that are not
+    GitHub-hosted, and without `# cachew: keep`."""
+    hosted = hosted_jobs(text)
+    embedded = block_scalars(text)
+    return [
+        text.count("\n", 0, match.start("key")) + 1
+        for match in FLOW_CHECKOUT.finditer(text)
+        if "cachew: keep" not in match[0]
+        and not any(start <= match.start("key") < end for start, end in hosted + embedded)
+    ]
+
+
 def migrate_file(path, action_sha, write=False, root=None, exclude=()):
+    """(changed, flow) for one file: whether --write changes it, and the line
+    numbers of the flow-style checkout steps it leaves alone."""
     root = root or repository_root()
     path = Path(path)
     absolute = path if path.is_absolute() else root / path
     relative = absolute.resolve().relative_to(root.resolve())
     if excluded(relative, exclude):
-        return False
+        return False, []
     before = absolute.read_text()
     after = rewrite(before, action_sha)
-    if before == after:
-        return False
-    if write:
+    if write and before != after:
         absolute.write_text(after)
-    return True
+    return before != after, flow_steps(before)
 
 
 def tracked_consumers(root, exclude=()):
@@ -605,11 +629,13 @@ def main(argv=None):
         return verify_pins(root, sha, exclude)
     # A path argument is relative to the current directory, as in any command.
     candidates = [Path.cwd() / path for path in args.paths] or tracked_consumers(root, exclude)
-    changed, failed = [], False
+    changed, flow, failed = [], [], False
     for path in candidates:
         try:
-            if migrate_file(path, sha, args.write, root, exclude):
+            migrated, lines = migrate_file(path, sha, args.write, root, exclude)
+            if migrated:
                 changed.append(path)
+            flow += [f"{path}:{line}" for line in lines]
         except (OSError, ValueError) as error:
             # One unreadable file (not UTF-8, deleted, outside the repository)
             # must not stop the run midway with the others unvisited.
@@ -618,7 +644,9 @@ def main(argv=None):
     for path in changed:
         print(f"{'Migrated' if args.write else 'Needs cachew migration:'} {path}")
     print(f"{len(changed)} file(s) {'updated' if args.write else 'need migration'}.")
-    return 1 if failed or (changed and args.check) else 0
+    for place in flow:
+        print(f"{place}: a checkout step written as a flow mapping is not migrated; write it as a block mapping, or add # cachew: keep")
+    return 1 if failed or flow or (changed and args.check) else 0
 
 
 if __name__ == "__main__":

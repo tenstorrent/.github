@@ -447,6 +447,12 @@ plain `actions/checkout` where cachew can never serve the checkout:
   `gh aw compile`;
 - paths under an `exclude` prefix.
 
+A checkout step written as a flow mapping (`- {uses: actions/checkout@...}`)
+is not rewritten: `--write` and `--check` name each one and exit 1. Write it
+as a block mapping, or add `# cachew: keep`. A pin to this action inside a
+script or quoted text moves to `action_sha` with nothing else on its line
+changed.
+
 Other `actions/checkout` versions are never touched, so no step changes
 checkout version. `--verify-pins` accepts only a plain or quoted `uses:` value
 that starts and ends on the key's line; it rejects block scalars, aliases,

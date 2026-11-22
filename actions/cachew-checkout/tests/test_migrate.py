@@ -219,6 +219,25 @@ jobs:
 
         self.assertEqual(migrate.rewrite(workflow(PLAIN, STALE, STALE), SHA), workflow(PINNED, PINNED, PINNED))
 
+    def test_a_pin_in_text_moves_without_touching_the_rest_of_its_line(self):
+        # In a script or a quoted scalar a uses: line is text: only the pin
+        # changes. Its quotes stay, and so does its comment, which inside a
+        # quoted scalar is part of the value.
+        old = "tenstorrent/.github/actions/cachew-checkout@" + "0" * 40
+        legacy = "tenstorrent/tt-metal/.github/actions/cachew-checkout@" + "1" * 40
+        new = f"{migrate.ACTION_REPO}@{SHA}"
+        head = "jobs:\n  build:\n    runs-on: [self-hosted]\n    steps:\n"
+        for text in (
+            "      - run: |\n          cat > wf.yml <<'EOF'\n          - uses: '{pin}' # pinned\n          EOF\n",
+            '      - run: "cat > wf.yml <<EOF\n\n          uses: \'{pin}\'\n\n          EOF"\n',
+            "      - run: 'cat > wf.yml <<EOF\n\n          uses: \"{pin}\" # kept\n\n          EOF'\n",
+            '      - run: "cat > wf.yml <<EOF\n\n          uses: {pin}\n\n          EOF"\n',
+        ):
+            for pin in (old, legacy):
+                with self.subTest(text=text, pin=pin):
+                    before = head + text.format(pin=pin)
+                    self.assertEqual(migrate.rewrite(before, SHA), head + text.format(pin=new))
+
     def test_uses_keys_outside_a_steps_sequence_are_data_not_steps(self):
         # Only an item of a steps: sequence is a step. A uses: key elsewhere (an
         # input, an environment variable, a matrix entry, a data file) is data
@@ -378,6 +397,38 @@ class RepositoryTests(unittest.TestCase):
 
         self.assertEqual(self.run_main("--check")[0], 0)
         self.assertEqual(self.run_main("--verify-pins")[0], 0)
+
+    def test_flow_style_checkout_steps_are_reported_not_skipped(self):
+        # --write does not migrate a step written as a flow mapping; it and
+        # --check name each one, and fail, so none is left behind unnoticed.
+        workflow = self.root / ".github/workflows/ci.yml"
+        checkout = PLAIN.split(" #")[0]
+        head = "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+        for step in (
+            f"      - {{uses: {checkout}, with: {{fetch-depth: 0}}}}\n",
+            f"      - {{name: x, 'uses': \"{checkout}\"}}\n",
+            f"      - {{name: x, uses: {checkout},\n          with: {{fetch-depth: 0}}}}\n",
+            f"      - {{name: x,\n          uses: {checkout}}}\n",
+        ):
+            with self.subTest(step=step):
+                workflow.write_text(head + step)
+                line = 5 + step.count("\n", 0, step.index("uses"))
+                for mode in ("--check", "--write"):
+                    code, out = self.run_main(mode)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(f".github/workflows/ci.yml:{line}", out)
+                    self.assertIn("flow", out)
+                self.assertEqual(workflow.read_text(), head + step)
+        # A kept step, a hosted job and a script are not steps to migrate here.
+        for text in (
+            head + f"      - {{uses: {checkout}}} # cachew: keep\n",
+            head.replace("self-hosted", "ubuntu-latest") + f"      - {{uses: {checkout}}}\n",
+            head + f"      - run: |\n          - {{uses: {checkout}}}\n",
+        ):
+            with self.subTest(text=text):
+                workflow.write_text(text)
+                code, out = self.run_main("--write")
+                self.assertNotIn("ci.yml:", out)
 
     def test_a_config_that_is_not_an_object_is_reported_in_every_mode(self):
         for text in ("[]", "5", "null", '"x"', "\udcff"):
