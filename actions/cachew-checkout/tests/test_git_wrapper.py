@@ -717,6 +717,49 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertTrue(len(self.cache.requests) > before, "the submodule fetch did not reach the cache")
         self.assertEqual(tokens, [])
 
+    def test_a_weakening_setting_in_a_submodule_kept_outside_modules_is_read(self):
+        # Git also reads a submodule whose Git directory is in its work tree
+        # (one added from an existing clone) or reached through a symbolic link
+        # under .git/modules, and applies the submodule's conditional includes
+        # for its own Git directory. Its weakening setting must clear the token too.
+        kid = self.history("kid")
+        self.git_fixture.repository("top", [("kid-name", "deps/kid", "../kid", kid)])
+        cache_kid = self.cache.url + "/git/" + self.upstream.url.split("://", 1)[1] + "/org/kid"
+        for layout in ("embedded", "linked", "conditional"):
+            with self.subTest(layout=layout):
+                recursive = self.root / f"recursive-{layout}"
+                result = self.git_result("clone", "--recurse-submodules", self.upstream.url + "/org/top", str(recursive))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                submodule = recursive / "deps/kid"
+                modules = recursive / ".git/modules/kid-name"
+                if layout == "embedded":
+                    (submodule / ".git").unlink()
+                    modules.rename(submodule / ".git")
+                    result = self.git_result("-C", str(submodule), "config", "--unset", "core.worktree")
+                elif layout == "linked":
+                    elsewhere = self.root / "kid-gitdir"
+                    modules.rename(elsewhere)
+                    modules.symlink_to(elsewhere)
+                    # Its relative core.worktree would resolve from the link's target.
+                    result = self.git_result("config", "--file", str(elsewhere / "config"), "core.worktree", str(submodule))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                result = self.git_result("-C", str(submodule), "remote", "set-url", "origin", cache_kid)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                weakening = f"http.{self.cache.url}/git/.sslVerify"
+                if layout == "conditional":
+                    included = self.root / "weak.config"
+                    result = self.git_result("config", "--file", str(included), weakening, "false")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    result = self.git_result("-C", str(submodule), "config", f"includeIf.gitdir:{modules.resolve()}.path", str(included))
+                else:
+                    result = self.git_result("-C", str(submodule), "config", weakening, "false")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                before = len(self.cache.requests)
+                result = self.git_result("-C", str(recursive), "fetch", "--recurse-submodules=yes", "origin")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(len(self.cache.requests) > before, "the submodule fetch did not reach the cache")
+                self.assertEqual([auth for _, _, auth in self.cache.requests[before:] if auth], [])
+
     def test_a_pin_that_cannot_be_installed_turns_caching_off(self):
         # Without its pin, a partial clone's lazy fetches would follow the cache
         # rewrite with no upstream retry: caching goes off instead, which

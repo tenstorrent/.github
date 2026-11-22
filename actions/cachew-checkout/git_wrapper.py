@@ -480,28 +480,69 @@ def clone_settings(tail):
 
 
 MAX_CONDITIONAL_INCLUDES = 30
+MAX_SUBMODULE_REPOSITORIES = 1000
 CLONE_SHORT_WITH_VALUE = "bcjou"
 GIT_TRUE = ("true", "yes", "on", "1")
 GIT_FALSE = ("false", "no", "off", "0", "")
 
 
-def submodule_configs(real_git, location, environ):
-    """The configuration files of the repository's submodules, at any depth:
-    each Git directory under <git dir>/modules."""
-    result = subprocess.run(
-        [real_git, *location, "rev-parse", "--path-format=absolute", "--git-path", "modules"],
-        env=environ,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    modules = result.stdout.decode(errors="surrogateescape").strip()
-    if result.returncode or not os.path.isdir(modules):
-        return []
-    found = []
-    for directory, _, files in os.walk(modules):
-        if "config" in files and "HEAD" in files:
-            found.append(os.path.join(directory, "config"))
-    return sorted(found)
+def submodule_git_dirs(real_git, location, environ):
+    """The Git directories of the repository's submodules, at any depth, as a
+    recursive fetch reaches them: under <git dir>/modules, through symbolic
+    links too, and wherever a populated submodule's own .git leads (a Git
+    directory kept in its work tree, say). None past MAX_SUBMODULE_REPOSITORIES."""
+    own = {key: value for key, value in environ.items() if key not in REPOSITORY_ENVIRONMENT}
+
+    def ask(where, env, *query):
+        result = subprocess.run(
+            [real_git, *where, "rev-parse", "--path-format=absolute", *query],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        return "" if result.returncode else result.stdout.decode(errors="surrogateescape").rstrip("\n")
+
+    found, seen = [], set()
+
+    def add(directory):
+        real = os.path.realpath(directory)
+        if real in seen:
+            return False
+        seen.add(real)
+        found.append(directory)
+        return True
+
+    pending = [(list(location), environ, False)]
+    while pending:
+        if len(found) > MAX_SUBMODULE_REPOSITORIES:
+            return None
+        where, env, submodule = pending.pop()
+        if submodule:
+            directory = ask(where, env, "--git-dir")
+            if not directory or not add(directory):
+                continue
+        modules = ask(where, env, "--git-path", "modules")
+        if modules and os.path.isdir(modules):
+            walked = set()
+            for directory, children, files in os.walk(modules, followlinks=True):
+                walked.add(os.path.realpath(directory))
+                children[:] = [child for child in children if os.path.realpath(os.path.join(directory, child)) not in walked]
+                if "config" in files and "HEAD" in files:
+                    add(directory)
+        top = ask(where, env, "--show-toplevel")
+        if not top:
+            continue
+        listing = subprocess.run(
+            [real_git, *where, "ls-files", "-z", "--stage", "--full-name"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        for entry in listing.stdout.decode(errors="surrogateescape").split("\0"):
+            metadata, _, path = entry.partition("\t")
+            if metadata.startswith("160000 ") and os.path.lexists(os.path.join(top, path, ".git")):
+                pending.append((["-C", os.path.join(top, path)], own, True))
+    return found
 
 
 def weakened(real_git, arguments, index, environ, cache):
@@ -566,8 +607,20 @@ def weakened(real_git, arguments, index, environ, cache):
     entries = listed()
     if arguments[index] in ("fetch", "pull", "submodule"):
         # These may recurse into submodules, whose own files Git then reads.
-        for path in submodule_configs(real_git, arguments[:index], environ):
-            entries += listed("--file", path)
+        directories = submodule_git_dirs(real_git, arguments[:index], environ)
+        if directories is None:
+            return f"more than {MAX_SUBMODULE_REPOSITORIES} submodule repositories"
+        own = {key: value for key, value in environ.items() if key not in REPOSITORY_ENVIRONMENT}
+        for directory in directories:
+            # In the submodule's own context, as Git reads it: its conditional
+            # includes match its Git directory and branch, not the superproject's.
+            listing = subprocess.run(
+                [real_git, f"--git-dir={directory}", "config", "--null", "--includes", "--list"],
+                env=own,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+            entries += [entry.partition("\n") for entry in listing.stdout.decode(errors="surrogateescape").split("\0")]
     if arguments[index] == "clone":
         # A clone gives its new repository the settings of its -c/--config
         # options and of its template directory before it fetches.
