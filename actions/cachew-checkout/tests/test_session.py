@@ -1428,13 +1428,50 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def load_session():
+    spec = importlib.util.spec_from_file_location("cachew_session", fixtures.ACTION / "session.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class PromisorTests(unittest.TestCase):
-    """pin_promisor_remotes reads remote.<name>.promisor as Git reads a boolean."""
+    """pin_promisor_remotes reads remote.<name>.promisor as Git reads a boolean,
+    whatever the remote is named."""
+
+    def test_a_remote_named_with_a_space_or_a_dot_is_pinned(self):
+        # Git accepts any remote name without a slash; a lazy fetch through an
+        # unpinned one would follow the rewrite to the cache with no upstream retry.
+        session = load_session()
+        real_git = shutil.which("git")
+        cache = "https://cachew.example"
+        upstream = "https://github.com"
+        with __import__("tempfile").TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            home = root / "home"
+            home.mkdir()
+            global_config = root / "global.config"
+            subprocess.run(
+                [real_git, "config", "--file", str(global_config), f"url.{cache}/git/github.com/.insteadOf", upstream + "/"],
+                check=True,
+            )
+            environ = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_GLOBAL": str(global_config), "GIT_CONFIG_NOSYSTEM": "1"}
+            for index, name in enumerate(("my remote", "a.b", "tab\tname")):
+                with self.subTest(name=name):
+                    work = root / f"repo-{index}"
+                    subprocess.run([real_git, "init", "-q", str(work)], check=True, env=environ)
+                    for key, value in (("url", upstream + "/org/main"), ("promisor", "true")):
+                        subprocess.run([real_git, "-C", str(work), "config", f"remote.{name}.{key}", value], check=True, env=environ)
+                    session_dir = root / f"session-{index}"
+                    session_dir.mkdir()
+                    self.assertTrue(session.pin_promisor_remotes(real_git, ["-C", str(work)], environ, cache, str(session_dir)))
+                    url = subprocess.run(
+                        [real_git, "-C", str(work), "ls-remote", "--get-url", name], env=environ, capture_output=True, text=True
+                    ).stdout.strip()
+                    self.assertEqual(url, upstream + "/org/main")
 
     def test_every_git_spelling_of_true_is_pinned(self):
-        spec = importlib.util.spec_from_file_location("cachew_session", fixtures.ACTION / "session.py")
-        session = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(session)
+        session = load_session()
         real_git = shutil.which("git")
         cache = "https://cachew.example"
         upstream = "https://github.com"

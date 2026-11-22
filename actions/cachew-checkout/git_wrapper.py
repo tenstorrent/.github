@@ -502,7 +502,7 @@ def submodule_git_dirs(real_git, location, environ):
         )
         return "" if result.returncode else result.stdout.decode(errors="surrogateescape").rstrip("\n")
 
-    found, seen = [], set()
+    found, seen, walked = [], set(), set()
 
     def add(directory):
         real = os.path.realpath(directory)
@@ -522,13 +522,17 @@ def submodule_git_dirs(real_git, location, environ):
             if not directory or not add(directory):
                 continue
         modules = ask(where, env, "--git-path", "modules")
-        if modules and os.path.isdir(modules):
-            walked = set()
+        # Each directory once in the whole search: a nested submodule's modules
+        # directory is reached from the top and again from its parent's work tree.
+        if modules and os.path.isdir(modules) and os.path.realpath(modules) not in walked:
             for directory, children, files in os.walk(modules, followlinks=True):
                 walked.add(os.path.realpath(directory))
-                children[:] = [child for child in children if os.path.realpath(os.path.join(directory, child)) not in walked]
                 if "config" in files and "HEAD" in files:
                     add(directory)
+                    # A Git directory holds its own submodules only under modules/:
+                    # objects/, refs/ and the rest are never searched.
+                    children[:] = [child for child in children if child == "modules"]
+                children[:] = [child for child in children if os.path.realpath(os.path.join(directory, child)) not in walked]
         top = ask(where, env, "--show-toplevel")
         if not top:
             continue

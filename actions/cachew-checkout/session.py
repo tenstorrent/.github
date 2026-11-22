@@ -417,8 +417,10 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
 
     def reached():
         """The URLs of the promisor remotes the cache rewrite reaches."""
-        for line in run("config", "--local", "--get-regexp", r"^remote\..*\.promisor$").splitlines():
-            key, separator, value = line.partition(" ")
+        # NUL-separated: a remote's name may hold a space (or a tab), which the
+        # line listing would read as the end of the key.
+        for entry in filter(None, run("config", "--local", "--null", "--get-regexp", r"^remote\..*\.promisor$").split("\0")):
+            key, separator, value = entry.partition("\n")
             remote = key[len("remote.") : -len(".promisor")]
             # A filtered fetch from a URL records the URL itself as the promisor remote.
             url = run("config", "--local", "--get", f"remote.{remote}.url").strip() or remote
