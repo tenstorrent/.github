@@ -416,6 +416,10 @@ def flow_mapping(text, at, children=None):
     depth, keys, node, key, quoted, i = 0, [], True, False, False, at
     while i < len(text):
         c = text[i]
+        if c in "!&" and node:
+            # A tag or anchor: the node, a key or quoted scalar, still follows.
+            i = re.compile(r"[^\s,\[\]{}]*").match(text, i + 1).end()
+            continue
         if c in "'\"" and node:
             if key and depth == 1:
                 keys.append(i)
@@ -614,6 +618,10 @@ def sequence_steps(text, rows, hosted):
             if not mapping:
                 continue
             end, keys = mapping
+            # An item's own trailing comment, as for a `- {...}` step.
+            line_end = text.find("\n", end)
+            if "cachew: keep" in text[end : len(text) if line_end < 0 else line_end]:
+                continue
             for number, key in enumerate(keys):
                 name = re.match(r"""(['"]?)uses\1[ \t]*:""", text[key:end])
                 if not name or (not name[1] and not re.match(r"[ \t\r\n,}]|$", text[key + name.end() : end])):

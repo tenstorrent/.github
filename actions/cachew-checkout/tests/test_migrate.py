@@ -544,6 +544,8 @@ class RepositoryTests(unittest.TestCase):
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: &s [{{uses: {checkout}}}]\n", 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: !!seq [{{uses: {checkout}}}]\n", 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: "Checkout [source", uses: {checkout}}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: !!str "Checkout [source", uses: {checkout}}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: &n "Checkout [source", uses: {checkout}}}]\n', 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{"uses":"{checkout}"}}]\n', 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    "steps": [{{"name":"x","uses":"{checkout}"}}]\n', 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      !!seq\n      [{{uses: {checkout}}}]\n", 6),
@@ -582,6 +584,11 @@ class RepositoryTests(unittest.TestCase):
             head + f'      - run: "echo steps: [{{uses: {checkout}}}]"\n',
             "jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{run: "echo uses: {checkout}"}}]\n',
             "jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: [{{uses: {checkout}}}] # cachew: keep\n",
+            # An item of a multi-line sequence kept by its own trailing comment.
+            "jobs:\n  build:\n    runs-on: self-hosted\n"
+            f"    steps: [\n      {{uses: {checkout}}}, # cachew: keep\n      {{run: echo}}\n    ]\n",
+            "jobs:\n  build:\n    runs-on: self-hosted\n"
+            f"    steps: [\n      {{run: echo}},\n      {{uses: {checkout}}} # cachew: keep\n    ]\n",
         ):
             with self.subTest(text=text):
                 workflow.write_text(text)
