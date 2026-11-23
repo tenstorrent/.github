@@ -25,13 +25,12 @@ The job needs this permission:
       id-token: write
 ```
 
-Pin the action to a full commit SHA. The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9a261e462179fe13`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+Pin the action to a full commit SHA. The current release is `vault-secrets-v1.1.0`. The section [Releases](#releases) gives its commit. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 
 ```yaml
       - id: vault
-        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
+        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
         with:
-          role: tenstorrent--example-app
           github-token: lib-read
           secrets: |
             kv/data/tenstorrent/example-app/upload api_key | UPLOAD_API_KEY
@@ -46,6 +45,14 @@ Pin the action to a full commit SHA. The current release is `vault-secrets-v1.0.
 Give values to later steps through `env:`. Do not put
 `${{ steps.vault.outputs.* }}` in `run:` text.
 
+This example has no `role`, so the action uses the default role of the
+repository (`tenstorrent--example-app`). For a named workflow entry, set its
+short name, for example `role: nightly`.
+
+`github-token: lib-read` is the key of the token in the grant. The action
+reads token set `tenstorrent--example-app--lib-read`. The full name and a full
+Vault path also still work. See [Inputs](#inputs).
+
 ## Releases
 
 Each release has a tag with the action name as prefix: `vault-secrets-vX.Y.Z`. The repository holds several actions, so the prefix is needed. There is no moving major tag such as `v1`.
@@ -53,10 +60,76 @@ Each release has a tag with the action name as prefix: `vault-secrets-vX.Y.Z`. T
 Pin the full commit SHA of a release. Put the tag in the comment. Do not pin a branch.
 
 ```yaml
-uses: tenstorrent/.github/actions/vault-secrets@a697f1bb22ad8b488b0ac63f9a261e462179fe13 # vault-secrets-v1.0.0
+uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
 ```
 
-Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github/releases/tag/vault-secrets-v1.0.0). New releases are listed on the [Releases page](https://github.com/tenstorrent/.github/releases).
+Current release: [`vault-secrets-v1.1.0`](https://github.com/tenstorrent/.github/releases/tag/vault-secrets-v1.1.0). New releases are listed on the [Releases page](https://github.com/tenstorrent/.github/releases).
+To get the commit of a tag, run
+`gh api repos/tenstorrent/.github/commits/vault-secrets-v1.1.0 --jq .sha`.
+This gives the commit also when the tag is an annotated tag.
+
+| Release | Commit |
+|---|---|
+| `vault-secrets-v1.1.0` | The commit of the tag. Get it with the command above. |
+| `vault-secrets-v1.0.0` | `a697f1bb22ad8b488b0ac63f9a261e462179fe13` |
+
+### What is new in 1.1
+
+- `role` is optional. Without `role`, the action uses the default role
+  `<org>--<repo>` of the repository that runs the workflow.
+- `role` accepts a short name. `role: nightly` is the role
+  `<org>--<repo>--nightly`. A full name `<org>--<repo>--<name>` still works.
+  The action uses lower case.
+- The action refuses a role of another repository before it logs in.
+- The action logs in to Vault itself (`login.sh`). It asks GitHub for the
+  OIDC token up to 3 times, with a limit of 15 seconds for each request. It
+  sends the Vault login one time, with a limit of 15 seconds.
+  `hashicorp/vault-action` then only reads the values with the Vault token.
+- `github-token` accepts the key of the token only. `github-token: lib-read`
+  is the token set `<org>--<repo>--lib-read`, with the same rules as `role`.
+  The full name `<org>--<repo>--<key>` and a full Vault path with `/` still
+  work.
+- For `github-token` without `/`, the action finds the token itself
+  (`read-token.sh`). It asks the token engines `github`, `github-members` and
+  `github-admin` in this order and reads the token one time.
+  `hashicorp/vault-action` now reads only `secrets`.
+- The action refuses a token name of another repository before it sends a
+  request to Vault.
+- The error messages for a login failure or a token read failure are new.
+  They name the role, the token set and the facts of the run. See
+  [Failures](#failures).
+- No input or output was removed. The values of `failed-step` did not change.
+
+### Upgrade from 1.0
+
+To upgrade, change the pin to the commit of `vault-secrets-v1.1.0` and the
+comment to `# vault-secrets-v1.1.0`. No change to the inputs or to the steps
+that use the outputs is required.
+
+You can simplify the inputs. All of these are optional:
+
+- Remove `role` when it is the default role of the repository
+  (`<org>--<repo>`).
+- Change a full role name to its short name, for example
+  `tenstorrent--example-app--nightly` to `nightly`.
+- Change a full token name to its key, for example
+  `github-token: tenstorrent--example-app--lib-read` to
+  `github-token: lib-read`.
+- Move a token on another engine (for example
+  `github-members/token/<org>--<repo>--<key>`) from `secrets` to
+  `github-token: <key>`, when the step gets only one token.
+
+These changes occur without action:
+
+- A full token name in `github-token` now also finds a token in the engines
+  `github-members` and `github-admin`. In 1.0 the action looked only in
+  `github`.
+- A token name of another repository in `github-token` is refused before any
+  request to Vault. In 1.0 Vault refused it.
+- A full Vault path with `/` in `github-token` is read as is, as in 1.0.
+
+If a workflow reads the error text of the Vault step, check it against the new
+messages in [Failures](#failures).
 
 ## Inputs
 
@@ -145,13 +218,12 @@ on the tailnet and does not join again (`join-tailnet: auto`).
       - id: vault
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
         with:
-          role: tenstorrent--example-app
           github-token: lib-read
 
       - id: vault_kv
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
         with:
-          role: tenstorrent--example-app--deploy
+          role: deploy
           secrets: |
             kv/data/_roles/tenstorrent--example-app--deploy/api key | API_KEY
 ```
