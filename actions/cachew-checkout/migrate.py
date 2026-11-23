@@ -407,11 +407,13 @@ def steps_item(rows, at):
     return parent is not None and bool(STEPS_KEY.fullmatch(rows[parent][1]))
 
 
-def flow_mapping(text, at):
+def flow_mapping(text, at, children=None):
     """(end, keys) for the flow mapping whose `{` is text[at]: the index after
     its `}` and where each of its own keys starts, leaving out the keys of nested
-    collections and anything in quoted or plain scalars. None if it does not end."""
-    depth, keys, node, key, i = 0, [], True, False, at
+    collections and anything in quoted or plain scalars. None if it does not end.
+    Also reads a flow sequence at text[at]; children, when given, collects where
+    each collection directly inside it starts."""
+    depth, keys, node, key, quoted, i = 0, [], True, False, False, at
     while i < len(text):
         c = text[i]
         if c in "'\"" and node:
@@ -420,10 +422,20 @@ def flow_mapping(text, at):
             i = quote_end(text, i + 1, c)
             if i < 0:
                 return None
+            # After a quoted key, as in JSON, a value may follow its : directly.
             node = key = False
+            quoted = True
             continue
+        if c == ":" and quoted:
+            node, key, quoted = True, False, False
+            i += 1
+            continue
+        if c not in " \t\r\n":
+            quoted = False
         if c in "{[":
             depth += 1
+            if depth == 2 and children is not None:
+                children.append(i)
             node, key = True, c == "{" and depth == 1
         elif c in "}]":
             depth -= 1
@@ -550,18 +562,14 @@ def hidden_checkouts(text):
                 continue
             line_start = text.rfind("\n", 0, at) + 1
             if key["flow"]:
+                # Only an unreadable value in a `- {...}` step: flow_steps
+                # reports a readable one, and sequence_steps those of `steps: [...]`.
                 mapping = key.start("flow") if key["flow"] == "{" else open_bracket(text, key.start("flow"))
-                holder = open_bracket(text, mapping) if mapping >= 0 else -1
-                # `steps: [...]`, or with a tag or anchor: `steps: &s [...]`.
-                in_sequence = holder >= 0 and text[holder] == "[" and bool(
-                    re.search(r"""(?:^|[\s{,])(['"]?)steps\1[ \t]*:[ \t\r\n]*""" + PROPERTIES + "$", text[:holder])
-                )
                 item_start = text.rfind("\n", 0, mapping) + 1
                 entries = re.fullmatch(ENTRIES.pattern + PROPERTIES, text[item_start:mapping])
                 row = next((i for i, (offset, _, _) in enumerate(rows) if offset == item_start), None)
                 item = entries and entries[0].count("-") == 1 and row is not None and steps_item(rows, row)
-                # flow_steps reports a readable one in a `- {...}` step.
-                if not (in_sequence or (item and problem)):
+                if not (item and problem):
                     continue
             elif line_start not in steps or not problem:
                 continue
@@ -569,6 +577,51 @@ def hidden_checkouts(text):
             if "cachew: keep" in text[line_start : len(text) if line_end < 0 else line_end]:
                 continue
             found.append(text.count("\n", 0, at) + 1)
+    return sorted(set(found + sequence_steps(text, rows, hosted)))
+
+
+# A block `steps:` key that starts its line, up to its colon.
+STEPS_LINE = re.compile(r"""[ \t]*(?:-[ \t]+)?(['"]?)steps\1[ \t]*:(?=[ \t]|$)""")
+# From a key's colon to the `[` of a flow sequence value: white space, comments,
+# tags and anchors, over any number of lines.
+SEQUENCE_START = re.compile(r"(?:[ \t\r\n]+|(?<=[ \t\n])#[^\n]*|[!&][^\s,\[\]{}]*)*\[")
+
+
+def sequence_steps(text, rows, hosted):
+    """Line numbers of the uses: keys that name a migratable checkout in steps
+    written as a flow sequence: `steps: [{uses: ...}]`, with or without a tag
+    or anchor, the sequence on the key's line or a later one. Read forward from
+    real `steps:` keys, quote-aware, so brackets in quoted scalars and script
+    text that only looks like a steps sequence are not taken for one."""
+    found = []
+    for offset, line, _ in rows:
+        match = STEPS_LINE.match(line)
+        if not match or any(start <= offset < end for start, end in hosted):
+            continue
+        start = SEQUENCE_START.match(text, offset + match.end())
+        if not start:
+            continue
+        at = start.end() - 1
+        children = []
+        sequence = flow_mapping(text, at, children)
+        if not sequence:
+            continue
+        line_end = text.find("\n", sequence[0])
+        if "cachew: keep" in text[sequence[0] : len(text) if line_end < 0 else line_end]:
+            continue
+        for child in children:
+            mapping = text[child] == "{" and flow_mapping(text, child)
+            if not mapping:
+                continue
+            end, keys = mapping
+            for number, key in enumerate(keys):
+                name = re.match(r"""(['"]?)uses\1[ \t]*:""", text[key:end])
+                if not name or (not name[1] and not re.match(r"[ \t\r\n,}]|$", text[key + name.end() : end])):
+                    continue
+                value_end = keys[number + 1] if number + 1 < len(keys) else end
+                fragment = text[key + name.end() : value_end]
+                if migratable(fragment + anchored(text, fragment.strip())):
+                    found.append(text.count("\n", 0, key) + 1)
     return found
 
 

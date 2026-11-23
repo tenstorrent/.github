@@ -543,6 +543,11 @@ class RepositoryTests(unittest.TestCase):
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      [{{run: echo}},\n       {{uses: {checkout}}}]\n", 6),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: &s [{{uses: {checkout}}}]\n", 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: !!seq [{{uses: {checkout}}}]\n", 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: "Checkout [source", uses: {checkout}}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{"uses":"{checkout}"}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    "steps": [{{"name":"x","uses":"{checkout}"}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      !!seq\n      [{{uses: {checkout}}}]\n", 6),
+            (head + f'      - {{"uses":"{checkout}"}}\n', 5),
             (head + f"      - &a {{uses: {checkout}}}\n", 5),
             (head + f"      - !!map {{uses: !!str {checkout}}}\n", 5),
         )
@@ -571,6 +576,12 @@ class RepositoryTests(unittest.TestCase):
             head + "      - uses: !!str myactions/checkout@v7.0.1\n",
             head + f"      - uses: !!str ./local # was {checkout}\n",
             head + f"      - uses: # was {checkout}\n          ./local\n",
+            # Script text that only looks like a steps sequence, and a uses:
+            # inside a quoted scalar of a step.
+            head + f"      - run: 'echo steps: [{{uses: {checkout}}}]'\n",
+            head + f'      - run: "echo steps: [{{uses: {checkout}}}]"\n',
+            "jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{run: "echo uses: {checkout}"}}]\n',
+            "jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: [{{uses: {checkout}}}] # cachew: keep\n",
         ):
             with self.subTest(text=text):
                 workflow.write_text(text)
