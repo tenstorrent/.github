@@ -7,7 +7,8 @@ The action does these steps:
 1. It checks the job and the inputs.
 2. It joins the tailnet, if the runner is not on it yet.
 3. It waits until Vault answers.
-4. It logs in to Vault with the job's GitHub OIDC token and reads the values.
+4. It logs in to Vault with the job's GitHub OIDC token.
+5. It reads the values.
 
 The Vault grant for your repository must exist first. OSPO keeps the grants in
 `github-vault-iac` (`grants/repos/<org>/<repo>.yaml`).
@@ -61,7 +62,7 @@ Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github
 
 | Input | Required | Default | Meaning |
 |---|---|---|---|
-| `role` | yes | | Vault role of the workflow: `<org>--<repo>`, or `<org>--<repo>--<name>` for a named workflow entry. |
+| `role` | no | | Vault role of the workflow. Empty: the default role `<org>--<repo>` of the repository that runs the workflow. A short name, for example `nightly`: the role `<org>--<repo>--nightly` of a named workflow entry. A full name `<org>--<repo>--<name>` is used as is. The action uses lower case. A role of another repository is refused. |
 | `github-token` | no | | Token name. A bare name reads `github/token/<name>`. A value with `/` is the full path, for example `github-members/token/<name>`. |
 | `secrets` | no | | Secrets in [hashicorp/vault-action](https://github.com/hashicorp/vault-action) `secrets` syntax: `<path> <field> \| <NAME> ;` per line. |
 | `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
@@ -69,7 +70,7 @@ Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github
 | `tailscale-client-id` | no | value of org variable `TS_VAULT_OSPO_CLIENT_ID` | Tailscale OAuth client ID. Not a secret. |
 | `tailscale-audience` | no | value of org variable `TS_VAULT_OSPO_AUDIENCE` | Tailscale OIDC audience. Not a secret. |
 | `tailscale-tags` | no | `tag:tt-gha-vault-ospo` | Tags of the runner node. |
-| `vault-timeout-seconds` | no | `120` | Time limit of the Vault login and read, in seconds (10 to 600). After this time the action stops the Vault step and fails. |
+| `vault-timeout-seconds` | no | `120` | Time limit of the Vault read, in seconds (10 to 600). After this time the action stops the Vault step and fails. Each request of the Vault login has its own limit of 15 seconds; the OIDC token request is tried up to 3 times. |
 
 Set `github-token`, `secrets`, or both. If both are empty, the action fails.
 
@@ -118,7 +119,10 @@ The Vault login and the GitHub token last at most 15 minutes. Call the action
 just before the step that needs the values. For a longer job, call it again
 later in the job.
 
-The Vault login and read stop after `vault-timeout-seconds` (default 120).
+Each request of the Vault login (OIDC token, login) stops after 15 seconds.
+The OIDC token request is tried up to 3 times (about 50 seconds in the worst
+case). The Vault login is one request with no retry.
+The Vault read stops after `vault-timeout-seconds` (default 120).
 Without this limit, one stalled network connection can hold the step for
 about 16 minutes. A composite action step cannot have `timeout-minutes`, so
 the action uses a background process for the limit. It needs `pgrep`. If
@@ -162,18 +166,22 @@ one job.
 | Message | Cause | Action |
 |---|---|---|
 | `job needs permissions: id-token: write (not available on fork pull requests)` | The job has no OIDC token. | Add `id-token: write` to the job permissions. Fork pull requests never get it. |
+| `this runner has no curl` / `no jq` | A self-hosted runner without these tools. | Install bash, curl and jq on the runner. |
 | `refused on pull_request_target` | The workflow runs on `pull_request_target`. | Use another event. Vault never accepts this event. |
 | `Vault gave an empty value for <NAME>` | The value stored in Vault is an empty string. | Ask the owner of the secret to store it again. |
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
-| `input role is empty` / `... characters ...` | `role` is missing or not valid. | Set the role name from your grant. |
+| `input role has characters ...` / `input role '...' is not a role of <repo>` | `role` is not valid, or it is a role of another repository. | Use the short name of your workflow entry, or leave `role` empty for the default role. |
+| `This repository has no default Vault role` | `role` is empty, and every workflow entry in the grant has a name. | Set `role` to the name of your entry, for example `role: nightly`. |
+| `Vault has no role ...` | Wrong `role`, or the grant is not applied yet. | Check the name of the workflow entry in your grant file. |
+| `This run does not match role ...: Vault refused claim ...` | The run does not match the role: wrong branch, wrong `environment:`, wrong workflow file, or an event the role does not allow. The message shows the facts of the run. | Run from the bound ref, environment or workflow file, or ask OSPO to change the grant. |
+| `Vault refused the login: too many logins (rate limit)` | Too many logins in a short time. | Run the job again in a minute. |
+| `Vault did not answer the login within 15 seconds` | A stalled network connection. | Run the job again. |
 | `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the token name only, without `token` or `\|`. |
 | `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
 | `Vault ... is not reachable` | The runner is not on the tailnet, the join failed, the tag has no route to Vault, or the URL is wrong. | Read the "Join tailnet" step log. Use `join-tailnet: auto`. |
 | `Vault did not answer within N seconds` | The Vault step took longer than `vault-timeout-seconds`. The likely cause is a stalled network connection on the tailnet. | Run the job again. If it occurs again, report it to OSPO. |
 | `input vault-timeout-seconds must be a whole number from 10 to 600` | Wrong value. | Use a number from 10 to 600, or remove the input to use 120. |
-| Vault: `role "..." could not be found` | Wrong `role`, or the grant is not applied. | Check the role name in your grant file. |
-| Vault: `error validating claims` / `claim ... does not match` | The run does not match the role: wrong branch, wrong `environment:`, or an event the role does not allow. | Run from the bound ref or environment, or ask OSPO to change the grant. |
 | Vault: `permission denied` (403) on a `github/token/...` path | The role may not mint that token, or the name is wrong. | Check `github_tokens` in your grant. |
 | Vault: `permission denied` (403) or not found on a `kv/...` path, or field missing | Wrong path or field, or no read access. | Check the path (`kv/data/...`) and the field name. |
 
@@ -182,6 +190,10 @@ one job.
 - Inputs reach the shell only through `env:`.
 - The action does not export values to the job environment (`exportEnv: false`).
 - Third-party actions are pinned by commit SHA.
+- The action logs in with curl (`login.sh`). It masks the OIDC token and the
+  Vault token before it prints anything, and never puts them in a command
+  line. The Vault token goes to the read step as a step output inside the
+  action. No output of the action has it.
 - Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
   Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
 
