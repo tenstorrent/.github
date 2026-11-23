@@ -24,6 +24,9 @@ With no paths, --write and --check inspect every tracked .yml/.yaml under a
 tracked action.yml/action.yaml, wherever a composite action lives, and accepts
 only a reference written as a plain or quoted value that starts and ends on
 its `uses:` line, since that is the only form whose ref it can read exactly.
+A `uses:` value in any other form fails only when its text (or the anchor an
+alias names) could spell the action; other actions' steps, data under a
+`uses:` key and script text are left alone.
 
 Only checkouts of the exact version the action forwards to (actions/checkout
 v7.0.1, by commit or tag) are migrated, so no step changes checkout version. Left
@@ -528,42 +531,104 @@ def pinned_files(root, exclude=()):
 def uses_values(text):
     """(start, end, value, problem) for each uses: value in YAML text. value is
     decoded when it is a plain, single-quoted, or escape-free double-quoted scalar
-    on the key's own line; otherwise problem says why it cannot be read exactly."""
+    on the key's own line; otherwise problem says why it cannot be read exactly,
+    and start:end is all the text the value could take in (see value_extent)."""
     for key in USES_KEY.finditer(text):
-        start = key.end()
-        while start < len(text) and text[start] in " \t":
-            start += 1
-        line_end = text.find("\n", start)
-        line_end = len(text) if line_end < 0 else line_end
-        line = text[start:line_end].rstrip("\r")
-        if not line or line.startswith("#"):
-            yield start, start, None, "its value is not on the uses: line"
-        elif line[0] in "|>&*!{[":
-            yield start, start, None, "its value is not a plain or quoted scalar"
-        elif line[0] == "'":
-            match = re.match(r"'((?:[^']|'')*)'", line)
-            if not match:
-                yield start, start, None, "its quoted value does not end on the uses: line"
-            else:
-                yield start, start + match.end(), match[1].replace("''", "'"), None
-        elif line[0] == '"':
-            match = re.match(r'"((?:[^"\\]|\\.)*)"', line)
-            if not match:
-                yield start, start, None, "its quoted value does not end on the uses: line"
-            elif "\\" in match[1]:
-                yield start, start, None, "its quoted value contains escape sequences"
-            else:
-                yield start, start + match.end(), match[1], None
+        for start, end, value, problem in uses_value(text, key):
+            yield (start, value_extent(text, key), value, problem) if problem else (start, end, value, problem)
+
+
+def value_extent(text, key):
+    """The end of the text a uses: value could take in: its own line and every
+    following line indented more deeply than the key (in a flow mapping, than
+    the line where its flow collection starts), as YAML requires of a block or
+    flow scalar's continuation, blank lines included."""
+    holder = key.start("q")
+    if key["flow"]:
+        # The line where the innermost open flow collection starts.
+        depth = 0
+        for holder in range(key.start(), -1, -1):
+            depth += {"}": 1, "]": 1, "{": -1, "[": -1}.get(text[holder], 0)
+            if depth < 0:
+                break
+    line_start = text.rfind("\n", 0, holder) + 1
+    line = text[line_start:holder]
+    column = len(line) - len(line.lstrip(" ")) if key["flow"] else holder - line_start
+    end = text.find("\n", key.end())
+    while end >= 0:
+        following = text.find("\n", end + 1)
+        line = text[end + 1 : len(text) if following < 0 else following]
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= column:
+            return end
+        end = following
+    return len(text)
+
+
+def could_name_action(text):
+    """Whether YAML text could spell this action, once its escapes are decoded
+    and the line breaks and spaces a scalar may fold or join are dropped."""
+    return "cachew" in re.sub(r"\s", "", unescaped(text)).lower()
+
+
+def anchored(text, value):
+    """The text of every anchor an alias value (`*name`, after any tags) could
+    take: each line that defines &name, from the anchor on, and the lines after
+    it indented more deeply than that line."""
+    alias = re.match(r"(?:![^\s]*[ \t]+)*\*([^\s,\[\]{}]+)", value)
+    if not alias:
+        return ""
+    found = []
+    for definition in re.finditer(r"&" + re.escape(alias[1]) + r"(?=[\s,\[\]{}]|$)", text):
+        line_start = text.rfind("\n", 0, definition.start()) + 1
+        line = text[line_start : definition.start()]
+        column = len(line) - len(line.lstrip(" "))
+        end = text.find("\n", definition.end())
+        while end >= 0:
+            following = text.find("\n", end + 1)
+            line = text[end + 1 : len(text) if following < 0 else following]
+            if line.strip() and len(line) - len(line.lstrip(" ")) <= column:
+                break
+            end = following
+        found.append(text[definition.start() : len(text) if end < 0 else end])
+    return "".join(found)
+
+
+def uses_value(text, key):
+    """uses_values for one uses: key."""
+    start = key.end()
+    while start < len(text) and text[start] in " \t":
+        start += 1
+    line_end = text.find("\n", start)
+    line_end = len(text) if line_end < 0 else line_end
+    line = text[start:line_end].rstrip("\r")
+    if not line or line.startswith("#"):
+        yield start, start, None, "its value is not on the uses: line"
+    elif line[0] in "|>&*!{[":
+        yield start, start, None, "its value is not a plain or quoted scalar"
+    elif line[0] == "'":
+        match = re.match(r"'((?:[^']|'')*)'", line)
+        if not match:
+            yield start, start, None, "its quoted value does not end on the uses: line"
         else:
-            # A plain scalar ends at a comment (` #`) and, in a flow mapping, at , or }.
-            # Only spaces and tabs around it are not part of it: str.rstrip() would also
-            # drop Unicode spaces (U+00A0, U+2028, ...), which Git allows in branch names.
-            end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
-            value = line[: end.start() if end else len(line)].rstrip(" \t")
-            if not end and plain_continues(text, line_end, key):
-                yield start, start, None, "its plain value goes on past the uses: line"
-            else:
-                yield start, start + len(value), value, None
+            yield start, start + match.end(), match[1].replace("''", "'"), None
+    elif line[0] == '"':
+        match = re.match(r'"((?:[^"\\]|\\.)*)"', line)
+        if not match:
+            yield start, start, None, "its quoted value does not end on the uses: line"
+        elif "\\" in match[1]:
+            yield start, start, None, "its quoted value contains escape sequences"
+        else:
+            yield start, start + match.end(), match[1], None
+    else:
+        # A plain scalar ends at a comment (` #`) and, in a flow mapping, at , or }.
+        # Only spaces and tabs around it are not part of it: str.rstrip() would also
+        # drop Unicode spaces (U+00A0, U+2028, ...), which Git allows in branch names.
+        end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
+        value = line[: end.start() if end else len(line)].rstrip(" \t")
+        if not end and plain_continues(text, line_end, key):
+            yield start, start, None, "its plain value goes on past the uses: line"
+        else:
+            yield start, start + len(value), value, None
 
 
 def plain_continues(text, line_end, key):
@@ -625,6 +690,8 @@ def file_problems(path, text, action_sha, fix=None):
     for start, end, value, problem in uses_values(text):
         line = text.count("\n", 0, start) + 1
         if problem:
+            if not could_name_action(text[start:end] + anchored(text, text[start:end])):
+                continue
             problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
             continue
         reference = action_reference(value)

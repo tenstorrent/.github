@@ -517,7 +517,8 @@ class RepositoryTests(unittest.TestCase):
             f"- {{uses: {action}@main, with: {{a: b}}}}",
             f"- uses: \"tenstorrent/.github/actions/cachew-checkou\\x74@main\"",
             f"- uses: >-\n          {action}@main",
-            f"- uses: *pin",
+            # Split, so that only the alias leads to it.
+            "- name: &pin >-\n          tenstorrent/.github/actions/\n          cachew-checkout@main\n      - uses: *pin",
             f"- uses: \"{action}@\\\n          main\"",
             # A plain scalar goes on over more deeply indented lines, blank lines
             # between them included; YAML joins them with a space.
@@ -545,6 +546,41 @@ class RepositoryTests(unittest.TestCase):
                 workflow.write_text(good.replace(line, fine))
                 code, out = self.run_main("--verify-pins")
                 self.assertEqual(code, 0, out)
+
+    def test_unreadable_uses_values_fail_only_when_they_could_name_the_action(self):
+        # A uses: value the reader cannot take exactly is a problem only when it
+        # could spell this action: an unrelated folded step, data under a uses:
+        # key and script text are left alone, in every mode.
+        self.run_main("--write")
+        workflow = self.root / ".github/workflows/ci.yml"
+        good = workflow.read_text()
+        line = f"- uses: {PINNED}"
+        action = "tenstorrent/.github/actions/cachew-checkout"
+        for unrelated in (
+            f"{line}\n      - uses: >-\n          actions/setup-python@v5",
+            f"{line}\n      - uses: actions/setup-python@v5\n          # pinned\n        env:\n          uses: |\n            a\n            b",
+            f"{line}\n      - run: |\n          cat <<EOF\n          uses: {{key: value}}\n          uses:\n          uses: >\n          EOF",
+            f"{line}\n      - uses: actions/setup-python@\n          v5",
+            f"{line}\n      - name: &py actions/setup-python@v5\n      - uses: *py",
+        ):
+            with self.subTest(unrelated=unrelated):
+                workflow.write_text(good.replace(line, unrelated))
+                for mode in ("--check", "--write", "--verify-pins"):
+                    code, out = self.run_main(mode)
+                    self.assertEqual(code, 0, f"{mode}: {out}")
+        # Still caught: the action hidden in a value read over several lines,
+        # in a block-valued key, in script text, or behind escapes.
+        for hidden in (
+            f"{line}\n      - uses: >-\n          tenstorrent/.github/actions/\n          cachew-checkout@main",
+            f"{line}\n      - name: x\n        env:\n          uses: |\n            {action}@main",
+            f"{line}\n      - run: |\n          uses: {{{action}@main}}",
+            f"{line}\n      - uses: >-\n          tenstorrent/.github/actions/\\x63achew-checkout@main",
+            f"{line}\n      - uses: [\n          tenstorrent/.github/actions/cach\n          ew-checkout@main]",
+        ):
+            with self.subTest(hidden=hidden):
+                workflow.write_text(good.replace(line, hidden))
+                code, out = self.run_main("--verify-pins")
+                self.assertEqual(code, 1, out)
 
     def test_verify_pins_reads_the_action_path_as_the_runner_does(self):
         # The runner splits owner/repo/path on / and \\ and drops empty segments,

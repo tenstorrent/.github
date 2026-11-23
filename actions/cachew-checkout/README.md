@@ -467,7 +467,9 @@ Other `actions/checkout` versions are never touched, so no step changes
 checkout version. `--verify-pins` accepts only a plain or quoted `uses:` value
 that starts and ends on the key's line; it rejects block scalars, aliases,
 escapes and values YAML continues on later lines, since GitHub could read
-those as another ref. It does not check that the pin exists here;
+those as another ref. It rejects such a value only when its text, or the
+anchor an alias names, could spell this action, so other actions' steps,
+data under a `uses:` key and script text pass. It does not check that the pin exists here;
 a consumer's CI can do that by fetching it, as tt-metal's
 `test-cachew-checkout` workflow does. Run the copy of `migrate.py` at the
 consumer's pin (tt-metal's `.github/scripts/utils/cachew_checkout.py`
