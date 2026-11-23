@@ -251,6 +251,11 @@ one job.
 | `Vault did not answer the read of GitHub token set ...` / `Vault refused the read of GitHub token set ...` | A stalled network connection, or a Vault error other than "permission denied". | Run the job again. If it occurs again, report it to OSPO. |
 | `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
+| `input network-mode must be kernel or userspace` | Wrong value (release 1.2). | Use `kernel` or `userspace`, in lower case, or remove the input. |
+| `input network-mode userspace needs a Linux runner` | `userspace` on a macOS or Windows runner. | Remove `network-mode`. |
+| `input proxy-port must be a whole number from 1 to 65535` | Wrong value in `userspace` mode. | Use a free port, or remove the input to use 1055. |
+| `no Tailscale HTTP proxy answers on 127.0.0.1:<port>` | `userspace` mode without a join (`join-tailnet: false`, or `auto` on a runner already on the tailnet), and nothing listens on `proxy-port`. | See [Linux runner pods without TUN](#linux-runner-pods-without-tun-release-12). |
+| `vault-secrets userspace mode requires Node 24.5 or newer` (read step) | The Actions runner runs actions with an older Node. | Update the runner. |
 | `Vault ... is not reachable` | The runner is not on the tailnet, the join failed, the tag has no route to Vault, or the URL is wrong. | Read the "Join tailnet" step log. Use `join-tailnet: auto`. |
 | `Vault did not answer within N seconds` | The Vault step took longer than `vault-timeout-seconds`. The likely cause is a stalled network connection on the tailnet. | Run the job again. If it occurs again, report it to OSPO. |
 | `input vault-timeout-seconds must be a whole number from 10 to 600` | Wrong value. | Use a number from 10 to 600, or remove the input to use 120. |
