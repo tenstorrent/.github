@@ -352,7 +352,7 @@ refused 'userspace: login timeout' 'Vault did not answer the login within 15 sec
 
 # Only a proxy on 127.0.0.1 gets the OIDC token: no request at all otherwise.
 for other in http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 \
-  http://127.0.0.1:1055/x http://127.0.0.1: 'http://127.0.0.1:1055 -k'; do
+  http://127.0.0.1:1055/x http://127.0.0.1: http://127.0.0.1:65536 'http://127.0.0.1:1055 -k'; do
   refused "proxy '$other'" 'is not a loopback Tailscale proxy' VAULT_PROXY="$other"
   if [ -s "$work/argv" ]; then
     bad "proxy '$other': login.sh sent a request"
@@ -613,7 +613,7 @@ read_refused 'userspace, timeout' 'github' 'within 15 seconds' \
 
 # Only a proxy on 127.0.0.1 gets the Vault token: no request at all otherwise.
 for other in http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 \
-  http://127.0.0.1:1055/x 'http://127.0.0.1:1055 -k'; do
+  http://127.0.0.1:1055/x http://127.0.0.1:65536 'http://127.0.0.1:1055 -k'; do
   read_refused "proxy '$other'" '' 'is not a loopback Tailscale proxy' VAULT_PROXY="$other"
   if [ -s "$work/argv" ]; then
     bad "token read, proxy '$other': read-token.sh sent a request"

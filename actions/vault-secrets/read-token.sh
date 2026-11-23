@@ -67,7 +67,7 @@ esac
 # Vault requests go through the Tailscale proxy only, and only on loopback.
 vault_proxy=()
 if [ -n "${VAULT_PROXY:-}" ]; then
-  [[ "$VAULT_PROXY" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] \
+  [[ "$VAULT_PROXY" =~ ^http://127\.0\.0\.1:([1-9][0-9]{0,4})$ ]] && [ "${BASH_REMATCH[1]}" -le 65535 ] \
     || fail "proxy URL '$VAULT_PROXY' is not a loopback Tailscale proxy. The action does not send the Vault token through it."
   vault_proxy=(--proxy "$VAULT_PROXY" --noproxy '')
 fi

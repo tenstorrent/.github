@@ -21,7 +21,8 @@ if [ "$major" -lt 24 ] || { [ "$major" -eq 24 ] && [ "$minor" -lt 5 ]; }; then
 fi
 
 # The preload refuses a bad proxy setting before any request.
-for proxy in '' http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 http://127.0.0.1:1055/x; do
+for proxy in '' http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 http://127.0.0.1:1055/x \
+  http://127.0.0.1:0 http://127.0.0.1:01055 http://127.0.0.1:65536; do
   rc=0
   out="$(env -i PATH="$PATH" VAULT_SECRETS_PROXY_URL="$proxy" node --require="$preload" -e '' 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ] || [[ "$out" != *'proxy setting is missing or invalid'* ]]; then
