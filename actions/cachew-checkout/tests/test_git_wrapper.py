@@ -358,6 +358,31 @@ class DownstreamGitTests(unittest.TestCase):
         self.assert_disabled()
         self.assertEqual(json.loads((self.session / "state.json").read_text())["managed"], [])
 
+    def test_an_unreadable_session_state_still_keeps_reads_off_the_cache(self):
+        # The job file still holds cachew's rewrite and token, but the state
+        # that records them is gone or corrupt. Run as it is, the read would go
+        # to the cache with no upstream retry: the wrapper must find cachew's
+        # keys in the job file itself, take them out and turn caching off.
+        self.dependency("cmake-dependency")
+        self.cache.fail_repo = "cmake-dependency"
+        for damage in ("missing", "corrupt", "wrong shape"):
+            with self.subTest(damage):
+                active = self.session / "global.config"
+                for key, value in self.managed:
+                    subprocess.run([self.real_git, "config", "--file", str(active), "--add", key, value], check=True)
+                (self.session / "cache-disabled").unlink(missing_ok=True)
+                state = self.session / "state.json"
+                state.unlink(missing_ok=True)
+                if damage == "corrupt":
+                    state.write_text('{"active": true, "managed": [')
+                elif damage == "wrong shape":
+                    state.write_text('["active"]')
+                self.cache.requests.clear()
+                self.run_git("ls-remote", self.upstream.url + "/org/cmake-dependency")
+                self.assertEqual(self.cache.requests, [])
+                self.assert_disabled()
+                self.assertNotIn(b"AUTHORIZATION", active.read_bytes())
+
     def test_disabled_partial_clone_with_a_stuck_rewrite_lazy_fetches_upstream(self):
         # The rewrite stays in the job file (still locked), so the partial clone
         # made upstream must be pinned there, or its lazy fetches go to the cache.

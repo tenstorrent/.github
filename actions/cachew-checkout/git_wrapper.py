@@ -36,7 +36,7 @@ from checkout import (  # noqa: E402
     apply_git_config,
     transport_error,
 )
-from session import LEGACY_CONFIG, pin_promisor_remotes, read_state, remove_cache_keys, remove_managed, subsection  # noqa: E402
+from session import LEGACY_CONFIG, load_state, pin_promisor_remotes, remove_cache_keys, remove_managed, subsection  # noqa: E402
 
 OPTIONS_WITH_VALUE = {
     "-C",
@@ -797,11 +797,12 @@ def run(arguments, environ):
     owned_config = Path(environ.get("GIT_CONFIG_GLOBAL", "")).resolve() == (session / "global.config").resolve()
     if not owned_config:
         return subprocess.call([real_git, *arguments], env=environ)
-    try:
-        state = read_state(session)
-    except (OSError, ValueError):
+    if not (session / "global.config").exists():
         # A missing session must not prevent Git from running after the runner empties RUNNER_TEMP.
         return subprocess.call([real_git, *arguments], env=environ)
+    # A corrupt or missing state.json turns caching off, taking cachew's keys
+    # out of the job file, rather than leaving them to redirect this read.
+    state = load_state(session, environ)
     disabled = (session / "cache-disabled").exists()
     if not disabled and not state.get("active"):
         return subprocess.call([real_git, *arguments], env=environ)
@@ -866,7 +867,7 @@ def run(arguments, environ):
             # Its lazy fetches would follow the rewrite with no upstream retry:
             # removing the rewrite sends them upstream.
             print("Cachew could not pin a partial clone to upstream; caching is off for the rest of the job.", file=sys.stderr)
-            remove_cache_keys(real_git, session, read_state(session), environ)
+            remove_cache_keys(real_git, session, load_state(session, environ), environ)
         return result
 
     if disabled:

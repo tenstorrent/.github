@@ -56,6 +56,7 @@ from checkout import (  # noqa: E402
     MAX_HEALTH_TIMEOUT_SECONDS,
     SECRET_ENVIRONMENT,
     TLS_OVERRIDES,
+    TRUSTED_CACHES,
     Bypass,
     SecurityViolation,
     cache_candidates,
@@ -246,7 +247,62 @@ def owned_session(environ):
 
 
 def read_state(session):
-    return json.loads((session / "state.json").read_text())
+    state = json.loads((session / "state.json").read_text())
+    managed = state.get("managed", []) if isinstance(state, dict) else None
+    if not isinstance(managed, list) or not all(
+        isinstance(entry, list) and len(entry) == 2 and all(isinstance(part, str) for part in entry)
+        for entry in managed
+    ):
+        raise ValueError("The cachew session state is not readable")
+    return state
+
+
+def load_state(session, environ):
+    """The session state, or, when state.json is missing or corrupt, the state of
+    a session whose caching is now off. The job file may still hold cachew's
+    rewrite and tokens, and only the state records them: a read run as it is
+    would go to the cache with no upstream retry, and a fallback copy of the
+    file would send the standard checkout there too. Recovery finds cachew's
+    keys in the file by their shape and takes them out."""
+    try:
+        return read_state(session)
+    except (OSError, ValueError):
+        pass
+    real_git = environ.get("CACHEW_REAL_GIT") or find_git(environ)
+    entries = config_entries(real_git, environ, "--file", str(session / "global.config"), "--no-includes")
+    caches, upstreams = set(TRUSTED_CACHES), set()
+    for key, value in entries:
+        # Cachew's rewrite, whatever the cache: url.<cache>/git/<host>/.insteadOf <scheme>://<host>/.
+        rewritten = subsection(key, "url.", ".insteadof")
+        if rewritten is None or value is None:
+            continue
+        try:
+            source, target = urllib.parse.urlsplit(rewritten), urllib.parse.urlsplit(value)
+        except ValueError:
+            continue
+        if target.netloc and source.path == f"/git/{target.netloc}/" and value == f"{target.scheme}://{target.netloc}/":
+            caches.add(f"{source.scheme}://{source.netloc}".lower())
+            upstreams.add(value)
+    managed = []
+    for key, value in entries:
+        if value is None:
+            continue
+        rewritten = subsection(key, "url.", ".insteadof")
+        pushed = subsection(key, "url.", ".pushinsteadof")
+        scoped = next(
+            filter(None, (subsection(key, "http.", suffix) for suffix in (".extraheader", ".sslverify", ".followredirects"))),
+            None,
+        )
+        if (
+            (rewritten is not None and value in upstreams and cache_host(rewritten, caches))
+            or (pushed is not None and value in upstreams and pushed + "/" == value)
+            or (scoped is not None and cache_host(scoped, caches))
+        ):
+            managed.append([key, value])
+    print("::warning::The cachew session state could not be read; caching is off for the rest of the job.")
+    state = {"active": False, "real_git": real_git, "managed": managed, "cache": None}
+    state.update(tokens={}, defaults={}, paths={})
+    return remove_cache_keys(real_git, session, state, environ)
 
 
 def own_tokens(state):
@@ -641,7 +697,7 @@ def prepare(environ):
         # A later checkout in the same job: take the cache rewrite out of the job's
         # file in place, keeping the job's writes, so this checkout talks to upstream.
         session = owned_session(environ)
-        state = read_state(session)
+        state = load_state(session, environ)
         state = remove_cache_keys(state["real_git"], session, state, environ, disable=False)
     else:
         # An unusable or untrusted cache or upstream origin means no session at all:
@@ -791,7 +847,7 @@ def activate(environ):
     # No child process (Git, curl) inherits the token; it travels only in configuration files.
     environ = {key: value for key, value in environ.items() if key not in SECRET_ENVIRONMENT}
     session = owned_session(environ)
-    state = read_state(session)
+    state = load_state(session, environ)
     real_git = state["real_git"]
     global_config = session / "global.config"
     workspace = Path(environ.get("GITHUB_WORKSPACE", ".")).resolve()
@@ -943,7 +999,7 @@ def keep_job_file(session, environ):
     global_config = session / "global.config"
     copy = session / f"fallback-{uuid.uuid4().hex}.config"
     try:
-        state = read_state(session)
+        state = load_state(session, environ)
         skip = {(key.lower(), value) for key, value in state["managed"]}
         entries = flatten(state["real_git"], environ, global_config, skip)
         write_private(copy, render(entries))
@@ -967,7 +1023,7 @@ def restore(environ):
     try:
         if environ.get("CACHEW_RESTORE_FROM"):
             keep_safe_directories(
-                read_state(owned_session(environ))["real_git"],
+                load_state(owned_session(environ), environ)["real_git"],
                 environ,
                 Path(environ["CACHEW_RESTORE_FROM"]),
                 int(environ["CACHEW_RESTORE_SAFE_DIRECTORIES"]),
@@ -994,7 +1050,7 @@ def main(phase):
         # the cache once this step cannot keep it consistent.
         try:
             session = owned_session(environ)
-            state = read_state(session)
+            state = load_state(session, environ)
             remove_cache_keys(state["real_git"], session, state, environ)
             if phase == "activate":
                 environment("GIT_CONFIG_GLOBAL", str(session / "global.config"))

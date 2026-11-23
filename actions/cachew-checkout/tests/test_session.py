@@ -969,6 +969,48 @@ class SessionTests(unittest.TestCase):
         safe = self.real_git("config", "--file", str(global_config), "--get-all", "safe.directory").splitlines()
         self.assertIn(str(self.fixture.workspace.resolve() / "second"), safe)
 
+    def later_checkout_without_state(self, damage):
+        # The job file holds cachew's rewrite and token, but the session state
+        # that records them cannot be read. The standard checkout that follows
+        # must reach no cache, and later steps must find the keys gone.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        global_config = session / "global.config"
+        self.assertIn("AUTHORIZATION", global_config.read_text())
+        damage(session / "state.json")
+        self.env.update(CACHEW_PATH="second", CACHEW_SUBMODULES="true")
+        self.run_step("session")
+        outputs = fixtures.runner_file(self.fixture.root / "output")
+        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        checkout_config = Path(self.env["GIT_CONFIG_GLOBAL"])
+        self.assertNotEqual(checkout_config, global_config)
+        self.assertNotIn(self.fixture.cache.url, checkout_config.read_text())
+        self.assertNotIn("AUTHORIZATION", checkout_config.read_text())
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        self.assertNotIn("AUTHORIZATION", global_config.read_text())
+        self.checkout()
+        if outputs.get("ready") == "true":
+            self.assertFalse(self.activate())
+        else:
+            self.env.update(
+                CACHEW_RESTORE_GLOBAL=outputs["restore-global"],
+                CACHEW_RESTORE_FROM=outputs.get("restore-from", ""),
+                CACHEW_RESTORE_SAFE_DIRECTORIES=outputs.get("restore-safe-directories", "0"),
+            )
+            self.run_step("restore")
+            self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        before = list(self.fixture.cache.requests)
+        self.real_git("ls-remote", self.fixture.upstream.url + "/org/main")
+        self.assertEqual(self.fixture.cache.requests, before)
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+
+    def test_a_later_checkout_after_the_session_state_is_deleted_reaches_no_cache(self):
+        self.later_checkout_without_state(lambda state: state.unlink())
+
+    def test_a_later_checkout_after_the_session_state_is_corrupted_reaches_no_cache(self):
+        self.later_checkout_without_state(lambda state: state.write_text('{"managed": ['))
+
     def test_a_later_checkout_whose_includes_cannot_flatten_still_gets_a_private_file(self):
         # An include of itself makes flattening fail, in prepare and in the
         # fallback copy alike: the standard checkout must still write elsewhere.
