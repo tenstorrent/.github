@@ -56,7 +56,7 @@ Each release has a tag with the action name as prefix: `vault-secrets-vX.Y.Z`. T
 Pin the full commit SHA of a release. Put the tag in the comment. Do not pin a branch.
 
 ```yaml
-uses: tenstorrent/.github/actions/vault-secrets@<SHA of vault-secrets-v1.1.0> # vault-secrets-v1.1.0
+uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
 ```
 
 Current release: [`vault-secrets-v1.1.0`](https://github.com/tenstorrent/.github/releases/tag/vault-secrets-v1.1.0). New releases are listed on the [Releases page](https://github.com/tenstorrent/.github/releases).
@@ -65,7 +65,7 @@ To get the commit of a tag, run
 
 | Release | Commit |
 |---|---|
-| `vault-secrets-v1.1.0` | See the example above. |
+| `vault-secrets-v1.1.0` | The commit of the tag. Get it with the command above. |
 | `vault-secrets-v1.0.0` | `a697f1bb22ad8b488b0ac63f9a261e462179fe13` |
 
 ### What is new in 1.1
