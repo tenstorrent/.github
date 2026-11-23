@@ -398,6 +398,34 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(self.run_main("--check")[0], 0)
         self.assertEqual(self.run_main("--verify-pins")[0], 0)
 
+    def test_check_fails_on_every_reference_write_cannot_fix(self):
+        # --check passing must mean --verify-pins passes for these files: a
+        # cachew reference --write leaves alone (a flow-style step, a ref that is
+        # not a commit, the old tt-metal location) is reported, not skipped.
+        workflow = self.root / ".github/workflows/ci.yml"
+        (self.root / ".github/actions/setup/action.yml").write_text(f"runs:\n  using: composite\n  steps:\n    - uses: {PINNED}\n")
+        head = "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+        legacy = LEGACY.split(" #")[0]
+        stale = STALE.split(" #")[0]
+        for step in (
+            f"      - {{uses: {legacy}}}\n",
+            f"      - {{name: x, uses: {stale}}}\n",
+            "      - uses: tenstorrent/tt-metal/.github/actions/cachew-checkout@main\n",
+            "      - uses: tenstorrent/.github/actions/cachew-checkout@v1\n",
+            "      - uses: \"tenstorrent/.github/actions/cachew-checkout@main\" # pinned later\n",
+        ):
+            with self.subTest(step=step):
+                workflow.write_text(head + step)
+                self.assertEqual(self.run_main("--verify-pins")[0], 1)
+                for mode in ("--check", "--write"):
+                    code, out = self.run_main(mode)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(".github/workflows/ci.yml:5", out)
+        workflow.write_text(head + f"      - uses: {PINNED}\n      - {{uses: {PINNED.split(' #')[0]}}}\n")
+        for mode in ("--check", "--write", "--verify-pins"):
+            code, out = self.run_main(mode)
+            self.assertEqual(code, 0, out)
+
     def test_flow_style_checkout_steps_are_reported_not_skipped(self):
         # --write does not migrate a step written as a flow mapping; it and
         # --check name each one, and fail, so none is left behind unnoticed.

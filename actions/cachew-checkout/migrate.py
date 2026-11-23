@@ -14,7 +14,9 @@ Modes:
                  commit (or to the action's old tt-metal location) become
                  tenstorrent/.github/actions/cachew-checkout@<action_sha>.
                  With --action-sha, the new pin is saved to the config first.
-  --check        exit 1 if any file still needs --write.
+  --check        exit 1 if any file still needs --write, or holds a reference
+                 --verify-pins rejects that --write cannot change (a flow-style
+                 step, a ref that is not a commit). --write reports those too.
   --verify-pins  exit 1 unless every reference pins exactly action_sha.
 
 With no paths, --write and --check inspect every tracked .yml/.yaml under a
@@ -475,19 +477,25 @@ def flow_steps(text):
 
 
 def migrate_file(path, action_sha, write=False, root=None, exclude=()):
-    """(changed, flow) for one file: whether --write changes it, and the line
-    numbers of the flow-style checkout steps it leaves alone."""
+    """(changed, flow, left) for one file: whether --write changes it, the line
+    numbers of the flow-style checkout steps it leaves alone, and what
+    --verify-pins would still reject once it is written."""
     root = root or repository_root()
     path = Path(path)
     absolute = path if path.is_absolute() else root / path
     relative = absolute.resolve().relative_to(root.resolve())
     if excluded(relative, exclude):
-        return False, []
+        return False, [], []
     before = absolute.read_text()
     after = rewrite(before, action_sha)
     if write and before != after:
         absolute.write_text(after)
-    return before != after, flow_steps(before)
+    # What --write leaves for --verify-pins to reject: a flow-style step, a ref
+    # that is not a commit, a value it cannot read exactly.
+    left = file_problems(
+        relative.as_posix(), after, action_sha, f"--write cannot change it; write uses: {ACTION_REPO}@<sha> on a block-style step"
+    )
+    return before != after, flow_steps(before), left
 
 
 def tracked_consumers(root, exclude=()):
@@ -609,12 +617,49 @@ def unescaped(text):
     return ESCAPE.sub(decode, text)
 
 
+def file_problems(path, text, action_sha, fix=None):
+    """What --verify-pins rejects in one file's text, one message each. fix, when
+    given, replaces the advice for a reference to another commit or location."""
+    problems = []
+    read = []
+    for start, end, value, problem in uses_values(text):
+        line = text.count("\n", 0, start) + 1
+        if problem:
+            problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
+            continue
+        reference = action_reference(value)
+        if not reference:
+            continue
+        legacy, subdirectory, ref, problem = reference
+        read.append((start, end))
+        if problem:
+            problems.append(f"{path}:{line} references {value}: {problem}; write {ACTION_REPO}@<sha>")
+        elif legacy:
+            problems.append(f"{path}:{line} references {value}; the action moved to {ACTION_REPO} ({fix or 'run --write'})")
+        elif subdirectory:
+            problems.append(f"{path}:{line} references {value}; reference the action itself, not a subdirectory")
+        elif ref != action_sha:
+            if not fix:
+                fix = "set the pin in its .md source and recompile it with gh aw compile" if generated(Path(path)) else "run --write"
+            problems.append(f"{path}:{line} pins {ref}, expected action_sha {action_sha}; {fix}")
+    # A mention the uses: values above do not account for (a comment, an
+    # anchor, a multi-line value) could still be what GitHub runs.
+    for match in ANY_PIN.finditer(text):
+        if not any(start <= match.start() < end for start, end in read):
+            line = text.count("\n", 0, match.start()) + 1
+            problems.append(f"{path}:{line} mentions {match[0]} outside a uses: value it can verify")
+    # A double-quoted scalar can spell the action with escape sequences
+    # (\x65 for e), under a key the reader above does not take for uses:.
+    if len(ANY_PIN.findall(unescaped(text))) != len(ANY_PIN.findall(text)):
+        problems.append(f"{path} names the action through escape sequences; write it as one plain line")
+    return problems
+
+
 def verify_pins(root, action_sha, exclude=()):
     """Every reference pins exactly action_sha in tenstorrent/.github: no other
     commit, no reference to the old tt-metal location, no subdirectory.
     Whether action_sha exists there is for the caller's CI to check."""
     problems = []
-    pins = {}
     # Excluded prefixes are left out; gh-aw lock files are not, since GitHub
     # runs them here although --write leaves them to gh-aw.
     for path in pinned_files(root, exclude):
@@ -623,40 +668,7 @@ def verify_pins(root, action_sha, exclude=()):
         except (OSError, ValueError) as error:
             problems.append(f"{path}: cannot be read ({error})")
             continue
-        read = []
-        for start, end, value, problem in uses_values(text):
-            line = text.count("\n", 0, start) + 1
-            if problem:
-                problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
-                continue
-            reference = action_reference(value)
-            if not reference:
-                continue
-            legacy, subdirectory, ref, problem = reference
-            read.append((start, end))
-            if problem:
-                problems.append(f"{path}:{line} references {value}: {problem}; write {ACTION_REPO}@<sha>")
-                continue
-            if legacy:
-                problems.append(f"{path}:{line} references {value}; the action moved to {ACTION_REPO} (run --write)")
-                continue
-            if subdirectory:
-                problems.append(f"{path}:{line} references {value}; reference the action itself, not a subdirectory")
-            pins.setdefault(ref, []).append(path.as_posix())
-        # A mention the uses: values above do not account for (a comment, an
-        # anchor, a multi-line value) could still be what GitHub runs.
-        for match in ANY_PIN.finditer(text):
-            if not any(start <= match.start() < end for start, end in read):
-                line = text.count("\n", 0, match.start()) + 1
-                problems.append(f"{path}:{line} mentions {match[0]} outside a uses: value it can verify")
-        # A double-quoted scalar can spell the action with escape sequences
-        # (\x65 for e), under a key the reader above does not take for uses:.
-        if len(ANY_PIN.findall(unescaped(text))) != len(ANY_PIN.findall(text)):
-            problems.append(f"{path} names the action through escape sequences; write it as one plain line")
-    for ref in sorted(set(pins) - {action_sha}):
-        for name in sorted(set(pins[ref])):
-            fix = "set the pin in its .md source and recompile it with gh aw compile" if generated(Path(name)) else "run --write"
-            problems.append(f"{name} pins {ref}, expected action_sha {action_sha}; {fix}")
+        problems += file_problems(path.as_posix(), text, action_sha)
     for problem in problems:
         print(problem)
     print("Pins verified." if not problems else f"{len(problems)} pin problem(s).")
@@ -693,13 +705,14 @@ def main(argv=None):
         return verify_pins(root, sha, exclude)
     # A path argument is relative to the current directory, as in any command.
     candidates = [Path.cwd() / path for path in args.paths] or tracked_consumers(root, exclude)
-    changed, flow, failed = [], [], False
+    changed, flow, left, failed = [], [], [], False
     for path in candidates:
         try:
-            migrated, lines = migrate_file(path, sha, args.write, root, exclude)
+            migrated, lines, problems = migrate_file(path, sha, args.write, root, exclude)
             if migrated:
                 changed.append(path)
             flow += [f"{path}:{line}" for line in lines]
+            left += problems
         except (OSError, ValueError) as error:
             # One unreadable file (not UTF-8, deleted, outside the repository)
             # must not stop the run midway with the others unvisited.
@@ -710,7 +723,9 @@ def main(argv=None):
     print(f"{len(changed)} file(s) {'updated' if args.write else 'need migration'}.")
     for place in flow:
         print(f"{place}: a checkout step written as a flow mapping is not migrated; write it as a block mapping, or add # cachew: keep")
-    return 1 if failed or flow or (changed and args.check) else 0
+    for problem in left:
+        print(problem)
+    return 1 if failed or flow or left or (changed and args.check) else 0
 
 
 if __name__ == "__main__":

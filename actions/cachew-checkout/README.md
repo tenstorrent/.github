@@ -424,9 +424,14 @@ repository's `.github/cachew-checkout.json`:
 ```sh
 python3 migrate.py --write                     # migrate to action_sha
 python3 migrate.py --write --action-sha <sha>  # re-pin everything, and save <sha>
-python3 migrate.py --check                     # exit 1 if anything needs --write
+python3 migrate.py --check                     # exit 1 if anything needs --write or a hand fix
 python3 migrate.py --verify-pins               # exit 1 unless every reference pins action_sha
 ```
+
+`--check` and `--write` also fail, naming the line, on a reference to this
+action that `--write` cannot change but `--verify-pins` would reject: a
+flow-style step (`- {uses: ...}`), a branch or tag instead of a commit, or a
+`uses:` value it cannot read exactly. Fix those by hand.
 
 `--write` replaces `actions/checkout` v7.0.1 steps (the version this action
 forwards to), pins to any other commit of this action, and pins to its old
