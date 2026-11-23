@@ -524,6 +524,78 @@ class RepositoryTests(unittest.TestCase):
                     code, out = self.run_main(mode)
                     self.assertNotIn("ci.yml:", out)
 
+    def test_checkouts_in_forms_write_cannot_read_are_reported_not_skipped(self):
+        # GitHub runs these steps' checkout, but --write cannot rewrite their
+        # value in place: --check and --write must name each one and fail.
+        workflow = self.root / ".github/workflows/ci.yml"
+        checkout = PLAIN.split(" #")[0]
+        escaped = checkout.replace("/", "\\x2f", 1)
+        head = "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+        cases = (
+            (head + f"      - uses: !!str {checkout}\n", 5),
+            (head + f"      - uses: &c {checkout}\n", 5),
+            (head + f"      - name: &c {checkout}\n        run: echo\n      - uses: *c\n", 7),
+            (head + f"      - uses:\n          {checkout}\n", 5),
+            (head + f"      - uses: >-\n          {checkout}\n", 5),
+            (head + f'      - uses: "{escaped}"\n', 5),
+            (head + f"      - {{uses: !!str {checkout}}}\n", 5),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: [{{uses: {checkout}}}]\n", 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      [{{run: echo}},\n       {{uses: {checkout}}}]\n", 6),
+        )
+        for text, line in cases:
+            with self.subTest(text=text):
+                workflow.write_text(text)
+                for mode in ("--check", "--write"):
+                    code, out = self.run_main(mode)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(f".github/workflows/ci.yml:{line}", out)
+                self.assertEqual(workflow.read_text(), text)
+        # Kept, hosted, script text and data are still left alone.
+        for text in (
+            head + f"      - uses: !!str {checkout} # cachew: keep\n",
+            head.replace("self-hosted", "ubuntu-latest") + f"      - uses: !!str {checkout}\n",
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n" f"    steps: [{{uses: {checkout}}}]\n",
+            head + f"      - run: |\n          uses: !!str {checkout}\n",
+            head + f"      - uses: ./local\n        with:\n          uses: !!str {checkout}\n",
+            head + f"      - {{run: echo, with: {{uses: !!str {checkout}}}}}\n",
+            "jobs:\n  build:\n    runs-on: self-hosted\n" f"    env: [{{uses: {checkout}}}]\n    steps:\n      - run: echo\n",
+        ):
+            with self.subTest(text=text):
+                workflow.write_text(text)
+                for mode in ("--write", "--check"):
+                    code, out = self.run_main(mode)
+                    self.assertNotIn("ci.yml:", out)
+
+    def test_a_steps_own_comment_survives_migration(self):
+        # The version tag comment is replaced; anything else the author wrote
+        # after it stays on the line.
+        checkout = PLAIN.split(" #")[0]
+        pin = PINNED.split(" #")[0]
+        head = "jobs:\n  build:\n    runs-on: {}\n    steps:\n"
+        for runner, before, after in (
+            ("self-hosted", f"{checkout} # v7.0.1 needs full history", f"{pin} # cachew checkout; needs full history"),
+            ("self-hosted", f"{checkout} # needs full history", f"{pin} # cachew checkout; needs full history"),
+            ("self-hosted", f"{checkout} # v7.0.1", f"{pin} # cachew checkout"),
+            ("ubuntu-latest", f"{pin} # cachew checkout; needs tags", f"{PLAIN}; needs tags"),
+            ("ubuntu-latest", f"{pin} # cachew checkout", PLAIN),
+        ):
+            with self.subTest(before=before):
+                text = head.format(runner) + f"      - uses: {before}\n"
+                self.assertEqual(migrate.rewrite(text, SHA), head.format(runner) + f"      - uses: {after}\n")
+
+    def test_an_exclude_prefix_is_a_whole_directory(self):
+        # "tools" excludes tools/, not a sibling tools-extra/ whose action GitHub runs.
+        self.write_config({"action_sha": SHA, "exclude": ["tools"]})
+        for name in ("tools/x/action.yml", "tools-extra/x/action.yml"):
+            (self.root / name).parent.mkdir(parents=True)
+            (self.root / name).write_text(f"runs:\n  using: composite\n  steps:\n    - uses: {STALE}\n")
+        self.assertEqual(self.run_main("--write")[0], 0)
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("tools-extra/x/action.yml", out)
+        self.assertNotIn("tools/x/action.yml", out)
+
     def test_a_config_that_is_not_an_object_is_reported_in_every_mode(self):
         for text in ("[]", "5", "null", '"x"', "\udcff"):
             for mode in ("--check", "--write", "--verify-pins"):
@@ -771,7 +843,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("aaa-binary.yml", out)
 
     def test_bad_config_is_reported(self):
-        for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of path prefixes")):
+        for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of directories or files")):
             self.write_config(data)
             code, out = self.run_main("--check")
             self.assertEqual(code, 2)

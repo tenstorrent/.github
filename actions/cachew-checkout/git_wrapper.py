@@ -6,7 +6,8 @@
 Any failed cache read is retried once against upstream. Only failures of the
 cache endpoint itself (connection, TLS, 3xx/5xx, stall, deadline) remove the
 job's cache rewrite; answers about one repository or ref (401/403/404, missing
-ref, `ls-remote --exit-code` finding nothing) keep caching on for later reads.
+ref, `ls-remote --exit-code` finding nothing) keep caching on for later reads,
+as does a cache attempt whose Git alone was killed by a signal.
 Reads whose effective URL is not the cache (other hosts, token-in-URL or SSH
 remotes, a promisor origin pinned upstream) run unchanged and never affect it.
 After a clone or fetch, partial-clone remotes are pinned upstream the same way,
@@ -187,11 +188,18 @@ class UpstreamView:
         self.environ = environ
         if not state.get("managed"):
             return
-        descriptor, name = tempfile.mkstemp(dir=session, prefix="upstream-view-", suffix=".config")
-        self.path = Path(name)
-        with os.fdopen(descriptor, "wb") as target, (session / "global.config").open("rb") as source:
-            shutil.copyfileobj(source, target)
-        remove_managed(real_git, self.path, state, environ, rewrites_only=True)
+        # Opened first: the job file can be gone (the runner emptied RUNNER_TEMP),
+        # and then there is no copy to leave behind.
+        with (session / "global.config").open("rb") as source:
+            descriptor, name = tempfile.mkstemp(dir=session, prefix="upstream-view-", suffix=".config")
+            self.path = Path(name)
+            try:
+                with os.fdopen(descriptor, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                remove_managed(real_git, self.path, state, environ, rewrites_only=True)
+            except BaseException:
+                self.path.unlink(missing_ok=True)
+                raise
         self.environ = dict(environ, GIT_CONFIG_GLOBAL=str(self.path))
 
     def __enter__(self):
@@ -200,6 +208,32 @@ class UpstreamView:
     def __exit__(self, *_):
         if self.path:
             self.path.unlink(missing_ok=True)
+
+
+class FetchHead:
+    """FETCH_HEAD as it was before the cache attempt, to put back before a retry."""
+
+    def __init__(self, real_git, arguments, index, environ):
+        result = subprocess.run(
+            [real_git, *arguments[:index], "rev-parse", "--path-format=absolute", "--git-path", "FETCH_HEAD"],
+            env=environ,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        path = os.fsdecode(result.stdout.rstrip(b"\n"))
+        self.path = Path(path) if not result.returncode and os.path.isabs(path) else None
+        try:
+            self.content = self.path.read_bytes() if self.path else None
+        except FileNotFoundError:
+            self.content = None
+
+    def restore(self):
+        if not self.path:
+            return
+        if self.content is None:
+            self.path.unlink(missing_ok=True)
+        else:
+            self.path.write_bytes(self.content)
 
 
 def direct_network_operation(real_git, arguments, index, environ):
@@ -906,11 +940,20 @@ def run(arguments, environ):
         print(f"Cachew is skipped for this operation: {setting} could weaken requests to the cache.", file=sys.stderr)
         with UpstreamView(real_git, direct, session, state) as upstream:
             return done(subprocess.call([real_git, *arguments], env=upstream))
+    head = FetchHead(real_git, arguments, index, environ) if command == "fetch" else None
     result, errors = cache_attempt(real_git, arguments, environ, index)
-    if result == 0 or result < 0:
+    if result == 0:
         return done(result)
     target.reset()
-    if result == 124 or transport_error(errors):
+    if head:
+        # The retry fetches every remote again: an appending fetch would record
+        # the refs the attempt already wrote a second time.
+        head.restore()
+    if result < 0:
+        # Only the attempt's Git was killed (the wrapper's own stop raises out of
+        # the attempt): the cache did not fail, so caching stays on.
+        print("Cachew read was stopped by a signal; retrying this operation upstream once.", file=sys.stderr)
+    elif result == 124 or transport_error(errors):
         state = remove_cache_keys(real_git, session, state, environ)
         print("Cachew is unavailable; removed the job's cache rewrite and retrying upstream once.", file=sys.stderr)
     else:
