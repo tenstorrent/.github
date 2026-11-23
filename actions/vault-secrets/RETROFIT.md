@@ -29,14 +29,15 @@ The current release is `vault-secrets-v1.1.0`. The section [Releases](README.md#
 | Step `Join tailnet` (`tailscale/github-action`) | Removed. The action joins when needed. |
 | Step `Wait for Vault` (curl loop) | Removed. The action waits. |
 | Step with `hashicorp/vault-action` | One step with `uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>`. |
-| `role: <name>` | `role: <name>`. Do not change the role. You may remove `role` when it is the default role `<org>--<repo>` of the repository that runs the workflow. |
+| `role: <org>--<repo>` (the default role) | Remove `role`. The action uses the default role of the repository that runs the workflow. `role: <org>--<repo>` still works. |
+| `role: <org>--<repo>--<name>` | `role: <name>` (the short name). The full name still works. Do not change the role itself. |
 | `url`, `method`, `path`, `jwtGithubAudience` | Removed. The action sets them. |
 | `exportEnv: false`, `exportToken: false`, `outputToken: false` | Removed. The action always sets these values. |
 | No `exportEnv`, or `exportEnv: true` | Removed, but do step 2a first. vault-action exports by default; the action does not. |
 | Any other `hashicorp/vault-action` input | Stop. See section 4. |
-| `github/token/<name> token \| GH_TOKEN` | `github-token: <name>`. Read it with `steps.<id>.outputs.token`. |
+| `github/token/<org>--<repo>--<key> token \| GH_TOKEN` | `github-token: <key>` (the part after `<org>--<repo>--`). Read it with `steps.<id>.outputs.token`. The full name and the full path still work, but use the key. |
 | Other lines in `secrets` | Same lines in the `secrets:` input. Read them with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. |
-| Token on another mount, for example `github-members/token/<name> token \| NAME` | One token: `github-token: github-members/token/<name>` (a value with `/` is the full path). More than one token: keep each as a line in `secrets:`. |
+| Token on another mount, for example `github-members/token/<org>--<repo>--<key> token \| NAME` | One token: `github-token: <key>`. The action finds the mount. More than one token: keep each as a line in `secrets:`. |
 | `steps.<id>.outputs.<NAME>` | `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Use `steps.<id>.outputs.token` for the `github-token` value. |
 
 Keep the `;` at the end of each `secrets` line except the last. A `;` after the last line is optional.
@@ -125,8 +126,7 @@ steps:
     id: vault
     uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
     with:
-      role: example-org--example-app
-      github-token: example-org--example-app--lib-read
+      github-token: lib-read
       secrets: |
         kv/data/example-org/example-app/upload api_key | UPLOAD_API_KEY
 
@@ -137,16 +137,21 @@ steps:
     run: ./upload.sh
 ```
 
+The old role `example-org--example-app` is the default role of the
+repository, so the new step has no `role`.
+
 ### Tokens on another mount
 
-A token path with `/` is a full path. The action does not add `github/token/`.
+For one token, use `github-token: <key>`: the action finds the mount. For more
+than one token, use `secrets` with full paths. A token path with `/` is a full
+path. The action does not add `github/token/`.
 
 ```yaml
 steps:
   - id: vault
     uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
     with:
-      role: example-org--example-app--nightly
+      role: nightly
       secrets: |
         github-members/token/example-org--example-app--read-a token | TOKEN_A ;
         github-members/token/example-org--example-app--read-b token | TOKEN_B
@@ -190,13 +195,12 @@ steps:
      - id: vault
        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
        with:
-         role: example-org--example-app
-         github-token: example-org--example-app--lib-read
+         github-token: lib-read
 
      - id: vault_deploy
        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
        with:
-         role: example-org--example-app--deploy
+         role: deploy
          secrets: |
            kv/data/_roles/example-org--example-app--deploy/api key | API_KEY
    ```
@@ -208,8 +212,12 @@ steps:
    Search the file first: `grep -n VAULT_URL <file>`.
 9. Do not change the role name, the token names, or the secret paths. OSPO sets
    them in the grant (see the OSPO ticket). If a name looks wrong, ask OSPO.
-   Removing `role` for the default role `<org>--<repo>` is not a change of the
-   role. Keep `role` when you are not sure.
+   These changes of form are not a change of name:
+   - `github-token` takes the token key, the part of the token name after
+     `<org>--<repo>--`.
+   - You may remove `role` for the default role `<org>--<repo>`, or write a
+     named role as its short name (the part after `<org>--<repo>--`). Keep
+     the full role name when you are not sure.
 10. Never print a value. Do not use `echo`, `set -x`, or debug output on a
     value. Print lengths or key names only.
 

@@ -36,10 +36,10 @@ OSPO sets up the Vault side. The developer asks in an OSPO ticket and gives the
 answers from section 1. OSPO replies with:
 
 - the role name
-- the GitHub token name
+- the GitHub token key (for example `lib-read`)
 - the secret paths and field names
 
-Do not invent these names. Use placeholders (`<role>`, `<token-name>`,
+Do not invent these names. Use placeholders (`<role-short-name>`, `<token-key>`,
 `<secret-path>`, `<field>`) until the ticket gives the real values. Do not
 change a name that OSPO gave.
 
@@ -69,8 +69,8 @@ jobs:
       - id: vault
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
         with:
-          role: <role>
-          github-token: <token-name>
+          role: <role-short-name>
+          github-token: <token-key>
           secrets: |
             <secret-path> <field> | API_KEY
 
@@ -93,7 +93,10 @@ The current release is `vault-secrets-v1.1.0`. The section [Releases](../../acti
 Remove `secrets:` if there is no other secret. Remove `github-token:` if there
 is no token. Remove `role:` if OSPO gave the default role `<org>--<repo>` of
 this repository. For a named workflow entry, the short name is enough, for
-example `role: nightly`.
+example `role: nightly`. A full role name also works.
+`github-token` takes the key of the token in the grant, not a Vault path. The
+action finds where Vault keeps it. A full name `<org>--<repo>--<key>` or a full
+path with `/` also works, but do not write new workflows with them.
 
 ## 4. Which events can log in
 
@@ -149,6 +152,8 @@ The README lists every message in
 | `This repository has no default Vault role` | `role` is empty, and the grant has no default role. | Failures |
 | `input role '...' is not a role of <repo>` | `role` names a role of another repository. | Failures |
 | `This run does not match role ...` | Wrong branch, environment, workflow file or event. | Failures |
+| `input github-token '...' is not a token of <repo>` | `github-token` names a token of another repository. | Failures |
+| `Role ... has no grant for GitHub token set ...` | Wrong token key, no grant for it, or the grant is not applied. | Failures |
 | `permission denied` on a token or `kv` path | Wrong name or path, or no access. | Failures |
 | `Vault ... is not reachable` | Runner not on the tailnet. | Failures |
 | `Vault did not answer within N seconds` | The Vault step took longer than the time limit. | Failures |
