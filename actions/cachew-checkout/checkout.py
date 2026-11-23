@@ -212,6 +212,13 @@ def checkout_input(environ, name, default=""):
     return JS_TRIM.sub("", environ.get(name, "")) or default
 
 
+def submodules_input(environ):
+    """"true", "recursive" or "false", folded as actions/checkout does: its
+    toUpperCase() maps characters such as U+0131 to ASCII, which lower() does not."""
+    value = checkout_input(environ, "CACHEW_SUBMODULES", "false").upper()
+    return {"TRUE": "true", "RECURSIVE": "recursive"}.get(value, "false")
+
+
 def checkout_flag(environ, name, default):
     """A boolean input as actions/checkout reads it: true only for TRUE in any case.
     default is the fallback in its input-helper (getInput(name) || default), which
@@ -614,7 +621,7 @@ class Checkout:
             raise Bypass("unsupported fetch depth")
         self.depth = int(depth)
         self.tags = checkout_flag(environ, "CACHEW_FETCH_TAGS", "false")
-        self.submodules = checkout_input(environ, "CACHEW_SUBMODULES", "false").lower()
+        self.submodules = submodules_input(environ)
         if self.sparse and self.submodules in ("true", "recursive"):
             raise Bypass("sparse checkout with submodules uses upstream directly")
         self.persist = checkout_flag(environ, "CACHEW_PERSIST_CREDENTIALS", "false")

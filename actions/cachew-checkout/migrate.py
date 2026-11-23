@@ -497,7 +497,11 @@ def migrate_file(path, action_sha, write=False, root=None, exclude=()):
     before = absolute.read_text()
     after = rewrite(before, action_sha)
     if write and before != after:
-        absolute.write_text(after)
+        # Keep a file's CRLF line endings, so the diff is only the reference.
+        raw = absolute.read_bytes()
+        crlf = raw.count(b"\r\n") == raw.count(b"\n") > 0
+        with open(absolute, "w", newline="\r\n" if crlf else None) as stream:
+            stream.write(after)
     # What --write leaves for --verify-pins to reject: a flow-style step, a ref
     # that is not a commit, a value it cannot read exactly.
     left = file_problems(

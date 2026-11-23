@@ -1615,6 +1615,19 @@ class CheckoutTests(unittest.TestCase):
         self.assertTrue(cachew_checkout.transport_error(answer.replace(b"404", b"503")))
         self.assertTrue(cachew_checkout.transport_error(b"fatal: unable to access: Failed to connect to cachew\n"))
 
+    def test_submodules_input_folds_case_like_actions_checkout(self):
+        # actions/checkout compares toUpperCase() with TRUE and RECURSIVE, so a
+        # dotless i (U+0131) or long s (U+017F) still spells recursive.
+        for value, expected in (
+            ("Recursive", "recursive"),
+            ("recurs\u0131ve", "recursive"),
+            ("recur\u017five", "recursive"),
+            (" TRUE ", "true"),
+            ("yes", "false"),
+            ("", "false"),
+        ):
+            self.assertEqual(cachew_checkout.submodules_input({"CACHEW_SUBMODULES": value}), expected, repr(value))
+
     def test_boolean_inputs_parse_like_actions_checkout(self):
         for value, default, expected in (("", "true", True), (" false\n", "true", False), ("True", "false", True), ("yes", "true", False)):
             self.assertEqual(cachew_checkout.checkout_flag({"X": value}, "X", default), expected, repr(value))

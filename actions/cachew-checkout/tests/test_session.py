@@ -951,7 +951,11 @@ class SessionTests(unittest.TestCase):
         self.run_step("session")
         outputs = fixtures.runner_file(self.fixture.root / "output")
         self.assertNotEqual(outputs.get("ready"), "true")
-        self.env["CACHEW_RESTORE_GLOBAL"] = outputs["restore-global"]
+        self.env.update(
+            CACHEW_RESTORE_GLOBAL=outputs["restore-global"],
+            CACHEW_RESTORE_FROM=outputs["restore-from"],
+            CACHEW_RESTORE_SAFE_DIRECTORIES=outputs["restore-safe-directories"],
+        )
         self.env.update(fixtures.runner_file(self.fixture.root / "env"))
         self.assertNotEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
         self.checkout()
@@ -960,6 +964,55 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
         self.assertNotIn("git-credentials", global_config.read_text())
         self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+        # set-safe-directory: the entry the standard checkout added to its copy
+        # reaches the job's file, as activate would have copied it.
+        safe = self.real_git("config", "--file", str(global_config), "--get-all", "safe.directory").splitlines()
+        self.assertIn(str(self.fixture.workspace.resolve() / "second"), safe)
+
+    def test_a_later_checkout_whose_includes_cannot_flatten_still_gets_a_private_file(self):
+        # An include of itself makes flattening fail, in prepare and in the
+        # fallback copy alike: the standard checkout must still write elsewhere.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        global_config = session / "global.config"
+        looping = self.fixture.root / "looping.config"
+        looping.write_text(f"[include]\n\tpath = {looping}\n")
+        self.real_git("config", "--file", str(global_config), "--add", "include.path", str(looping))
+        self.env.update(CACHEW_PATH="second")
+        self.run_step("session")
+        outputs = fixtures.runner_file(self.fixture.root / "output")
+        self.assertNotEqual(outputs.get("ready"), "true")
+        self.assertEqual(outputs.get("restore-global"), str(global_config))
+        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertNotEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+
+    def test_a_later_checkout_whose_session_cannot_prepare_reaches_no_cache_from_a_locked_file(self):
+        # The job's file is locked, so prepare cannot take cachew's rewrite out
+        # of it. The standard checkout's copy must still leave cachew's keys out,
+        # and inline the job's includes: with submodules, checkout replaces the
+        # global include.path with its credentials file.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        global_config = session / "global.config"
+        inherited = self.fixture.root / "inherited.config"
+        inherited.write_text("[user]\n\tname = Inherited\n")
+        self.real_git("config", "--file", str(global_config), "--add", "include.path", str(inherited))
+        self.assertIn(self.fixture.cache.url, global_config.read_text())
+        (session / "checkout.config").unlink()
+        (session / "checkout.config").mkdir()
+        lock = session / "global.config.lock"
+        lock.touch()
+        try:
+            self.env.update(CACHEW_PATH="second", CACHEW_SUBMODULES="true")
+            self.run_step("session")
+            self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+            fallback = Path(self.env["GIT_CONFIG_GLOBAL"])
+            self.assertNotEqual(fallback, global_config)
+            self.assertNotIn(self.fixture.cache.url, fallback.read_text())
+            self.assertNotIn("include", fallback.read_text().lower())
+            self.assertEqual(self.real_git("config", "--file", str(fallback), "--get", "user.name"), "Inherited")
+        finally:
+            lock.unlink()
 
     def assert_lazy_fetches_stay_upstream(self, cached):
         self.fixture.update_main()
@@ -1023,6 +1076,21 @@ class SessionTests(unittest.TestCase):
         before = len(self.fixture.cache.discoveries())
         self.assertEqual(self.flow(), (False, True))
         self.assertEqual(len(self.fixture.cache.discoveries()), before)
+        self.finish()
+
+    def test_global_values_keep_their_exact_bytes(self):
+        # Git config values are bytes: a Latin-1 name is not UTF-8, and a raw CR
+        # inside quotes stays a CR (Git has no \\r escape). Neither may stop the
+        # session, and the job's copy must read back the same bytes.
+        with (self.fixture.home / ".gitconfig").open("ab") as config:
+            config.write(b'[fixture]\n\tlatin = "caf\xe9"\n\tcarriage = "a\rb"\n')
+        self.original_global = (self.fixture.home / ".gitconfig").read_bytes()
+        self.assertEqual(self.flow(), (True, True))
+        for key, expected in (("fixture.latin", b"caf\xe9"), ("fixture.carriage", b"a\rb")):
+            value = subprocess.run(
+                [self.env["CACHEW_REAL_GIT"], "config", "--null", "--get", key], env=self.env, capture_output=True
+            ).stdout
+            self.assertEqual(value, expected + b"\0", key)
         self.finish()
 
     def test_global_includes_of_files_written_later_still_apply(self):

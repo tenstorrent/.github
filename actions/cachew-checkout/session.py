@@ -105,7 +105,12 @@ def config_environment(environ):
 
 
 def git(real_git, environ, *arguments, allowed=(0,)):
-    result = subprocess.run([real_git, *arguments], env=config_environment(environ), capture_output=True, text=True)
+    # Configuration values are bytes: decoded here without newline translation,
+    # which would turn a CR into LF, and with surrogateescape, which carries
+    # bytes that are not UTF-8 through to the files written from them unchanged.
+    result = subprocess.run([real_git, *arguments], env=config_environment(environ), capture_output=True)
+    result.stdout = result.stdout.decode("utf-8", "surrogateescape")
+    result.stderr = result.stderr.decode("utf-8", "surrogateescape")
     if result.returncode not in allowed:
         raise RuntimeError("Git configuration command failed")
     return result
@@ -130,7 +135,8 @@ def get_all(real_git, environ, file, key, includes=False):
 
 
 def quote(value):
-    for character, escaped in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\r", "\\n"), ("\t", "\\t")):
+    # Git has no escape for CR, and keeps a raw one inside quotes.
+    for character, escaped in (("\\", "\\\\"), ('"', '\\"'), ("\n", "\\n"), ("\t", "\\t")):
         value = value.replace(character, escaped)
     return f'"{value}"'
 
@@ -151,7 +157,7 @@ def render(entries):
 def write_private(file, content):
     temporary = file.with_name(f"{file.name}.{uuid.uuid4().hex}")
     temporary.touch(mode=0o600)
-    temporary.write_text(content)
+    temporary.write_text(content, encoding="utf-8", errors="surrogateescape", newline="")
     os.replace(temporary, file)
 
 
@@ -163,8 +169,9 @@ def append_locked(file, text):
     lock = file.with_name(file.name + ".lock")
     descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        with os.fdopen(descriptor, "w") as stream:
-            content = file.read_text()
+        with os.fdopen(descriptor, "w", encoding="utf-8", errors="surrogateescape", newline="") as stream:
+            with open(file, encoding="utf-8", errors="surrogateescape", newline="") as current:
+                content = current.read()
             stream.write(content + ("\n" if content and not content.endswith("\n") else "") + text)
         os.replace(lock, file)
     except BaseException:
@@ -919,22 +926,57 @@ def activate(environ):
     output("configured", str(state["active"]).lower())
 
 
-def keep_job_file(session):
+def keep_job_file(session, environ):
     """After a later checkout's prepare failed: the standard checkout that runs
     instead writes to the global file (with submodules, an include of its
     credentials file, which would then apply to every later step). Give it a
-    private copy of the job's file, and have the restore step hand the job's
-    file back to later steps, as configure would have."""
+    private copy of the job's file, built as checkout.config is: flattened, and
+    without cachew's keys a locked file still holds. The restore step hands the
+    job's file back to later steps, with the safe.directory entries checkout
+    added, as configure would have."""
     global_config = session / "global.config"
     copy = session / f"fallback-{uuid.uuid4().hex}.config"
-    copy.touch(mode=0o600)
-    shutil.copyfile(global_config, copy)
+    try:
+        state = read_state(session)
+        skip = {(key.lower(), value) for key, value in state["managed"]}
+        entries = flatten(state["real_git"], environ, global_config, skip)
+        write_private(copy, render(entries))
+        output("restore-from", str(copy))
+        output("restore-safe-directories", str(sum(key.lower() == "safe.directory" for key, _ in entries)))
+    except Exception:
+        # Whatever stops the flattening (an include loop, a missing state file),
+        # checkout's writes must still stay out of the job's file.
+        copy.touch(mode=0o600)
+        shutil.copyfile(global_config, copy)
     environment("GIT_CONFIG_GLOBAL", str(copy))
     output("restore-global", str(global_config))
 
 
+def restore(environ):
+    """The restore step: copy back the safe.directory entries the standard
+    checkout added to its copy, then give later steps the job's file. The file
+    goes back even when the copy fails. Without a flattened copy (restore-from)
+    there is no snapshot count to copy after, so nothing is copied."""
+    global_config = Path(environ["CACHEW_RESTORE_GLOBAL"])
+    try:
+        if environ.get("CACHEW_RESTORE_FROM"):
+            keep_safe_directories(
+                read_state(owned_session(environ))["real_git"],
+                environ,
+                Path(environ["CACHEW_RESTORE_FROM"]),
+                int(environ["CACHEW_RESTORE_SAFE_DIRECTORIES"]),
+                global_config,
+            )
+    except Exception as error:
+        print(f"::warning::Cachew could not keep the standard checkout's safe.directory entries: {error}")
+    environment("GIT_CONFIG_GLOBAL", str(global_config))
+
+
 def main(phase):
     environ = dict(os.environ)
+    if phase == "restore":
+        restore(environ)
+        return
     try:
         {"prepare": prepare, "activate": activate}[phase](environ)
     except Exception as error:
@@ -957,7 +999,7 @@ def main(phase):
             output("ready", "false")
             try:
                 if environ.get("CACHEW_SESSION_DIR"):
-                    keep_job_file(owned_session(environ))
+                    keep_job_file(owned_session(environ), environ)
             except Exception:
                 pass
         else:

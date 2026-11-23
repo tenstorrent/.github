@@ -380,6 +380,17 @@ class RepositoryTests(unittest.TestCase):
     def read(self, name):
         return (self.root / name).read_text()
 
+    def test_write_keeps_crlf_line_endings(self):
+        name = ".github/workflows/ci.yml"
+        crlf = self.files[name].replace("\n", "\r\n")
+        (self.root / name).write_bytes(crlf.encode())
+        self.assertEqual(self.run_main("--write")[0], 0)
+        written = (self.root / name).read_bytes().decode()
+        self.assertIn(PINNED, written)
+        self.assertEqual(written.count("\n"), written.count("\r\n"))
+        self.assertEqual(written.count("\n"), crlf.count("\n"))
+        self.assertEqual(self.run_main("--check")[0], 0)
+
     def test_check_write_and_verify(self):
         code, out = self.run_main("--check")
         self.assertEqual(code, 1, out)

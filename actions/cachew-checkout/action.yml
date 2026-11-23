@@ -234,7 +234,12 @@ runs:
       shell: bash
       env:
         CACHEW_RESTORE_GLOBAL: ${{ steps.session.outputs.restore-global }}
-      run: printf 'GIT_CONFIG_GLOBAL=%s\n' "$CACHEW_RESTORE_GLOBAL" >>"$GITHUB_ENV"
+        CACHEW_RESTORE_FROM: ${{ steps.session.outputs.restore-from }}
+        CACHEW_RESTORE_SAFE_DIRECTORIES: ${{ steps.session.outputs.restore-safe-directories }}
+      # Without Python, later steps still get the job's file back.
+      run: |
+        "$CACHEW_PYTHON" "$GITHUB_ACTION_PATH/session.py" restore ||
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$CACHEW_RESTORE_GLOBAL" >>"$GITHUB_ENV"
     - name: Configure job-global cachew Git transport
       id: configure
       # always(): after a failed checkout too, or later steps keep checkout's
