@@ -225,6 +225,24 @@ case "$network_mode" in
   *) fail "input network-mode must be kernel or userspace." ;;
 esac
 
+# Userspace without a join (join-tailnet false, or auto on a runner that is
+# already on the tailnet): the action uses a Tailscale HTTP proxy that already
+# runs. Something must answer on that port now, else the later steps fail. The
+# action never starts a second tailscaled next to a running one. curl exit 7
+# (refused) and 28 (no answer in 2 seconds) mean that nothing listens; any
+# other result means a listener. The wait step then checks the route to Vault.
+if [ "$network_mode" = userspace ] && [ "$join" = false ]; then
+  probe_rc=0
+  curl -s --noproxy '*' --connect-timeout 2 --max-time 2 -o /dev/null "$proxy_url/" || probe_rc=$?
+  if [ "$probe_rc" -eq 7 ] || [ "$probe_rc" -eq 28 ]; then
+    if [ "${IN_JOIN_TAILNET:-auto}" = auto ]; then
+      fail "network-mode userspace: this runner is already on the tailnet, but no Tailscale HTTP proxy answers on 127.0.0.1:$proxy_port. The action does not start a second Tailscale. Use join-tailnet: true on a runner without Tailscale, or set proxy-port to the port of the running Tailscale HTTP proxy (with join-tailnet: false), or use network-mode: kernel for a runner with a route to Vault."
+    else
+      fail "network-mode userspace with join-tailnet false: no Tailscale HTTP proxy answers on 127.0.0.1:$proxy_port. Set proxy-port to the port of the running Tailscale HTTP proxy, or use join-tailnet: true on a runner without Tailscale."
+    fi
+  fi
+fi
+
 delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 {
   printf 'url=%s\n' "$url"

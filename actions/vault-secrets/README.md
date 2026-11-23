@@ -130,13 +130,20 @@ Limits:
 - The runner's outbound proxy must let the Tailscale downloads and the
   Tailscale control plane (`*.tailscale.com`) through.
 
-`join-tailnet` works the same in both modes. With `auto`, a second call in the
-same job uses the connection of the first call; both calls must use the same
-`network-mode` and `proxy-port`. With `false`, the action never joins: use
-`kernel` for a route that the runner already has, or `userspace` with the port
-of a Tailscale proxy that already runs. When the mode or port does not match,
-the wait for Vault fails. The action does not change a connection that it did
-not make.
+`join-tailnet` in `userspace` mode:
+
+- `true`, or `auto` on a runner that is not on the tailnet: the action joins
+  and starts the proxy on `proxy-port`.
+- `auto` on a runner that is already on the tailnet (for example a second call
+  in the same job), or `false`: the action does not join. It uses the
+  Tailscale HTTP proxy that already runs on `proxy-port`. If nothing answers
+  on that port, the first step stops with an error. The action never starts a
+  second Tailscale next to a running one. On a runner with a kernel-mode
+  Tailscale connection, use `network-mode: kernel`.
+
+The action does not change a connection that it did not make. If something
+answers on `proxy-port` but it is not a Tailscale proxy with a route to
+Vault, the wait for Vault fails.
 
 The `userspace-proxy` test jobs run the action on Ubuntu and in an Ubuntu
 container against a fake Vault, a fake OIDC endpoint and fake proxies on
