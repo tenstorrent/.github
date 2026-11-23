@@ -36,10 +36,10 @@ OSPO sets up the Vault side. The developer asks in an OSPO ticket and gives the
 answers from section 1. OSPO replies with:
 
 - the role name
-- the GitHub token name
+- the GitHub token key (for example `lib-read`)
 - the secret paths and field names
 
-Do not invent these names. Use placeholders (`<role>`, `<token-name>`,
+Do not invent these names. Use placeholders (`<role>`, `<token-key>`,
 `<secret-path>`, `<field>`) until the ticket gives the real values. Do not
 change a name that OSPO gave.
 
@@ -70,7 +70,7 @@ jobs:
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
         with:
           role: <role>
-          github-token: <token-name>
+          github-token: <token-key>
           secrets: |
             <secret-path> <field> | API_KEY
 
@@ -92,6 +92,9 @@ Pin the action by the full SHA of a commit on `main` of `tenstorrent/.github`.
 The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9a261e462179fe13`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 Remove `secrets:` if there is no other secret. Remove `github-token:` if there
 is no token.
+`github-token` takes the key of the token in the grant, not a Vault path. The
+action finds where Vault keeps it. A full name `<org>--<repo>--<key>` or a full
+path with `/` also works, but do not write new workflows with them.
 
 ## 4. Which events can log in
 

@@ -14,8 +14,11 @@ inputs:
     default: ""
   github-token:
     description: >-
-      Name of a GitHub token in Vault. A bare name reads `github/token/<name>`.
-      A value with `/` is the full path, for example `github-members/token/<name>`.
+      Key of a GitHub token in the grant of this repository, for example
+      `contents-read`. The action reads token set `<org>--<repo>--<key>` (lower
+      case) and finds where Vault keeps it. A full name `<org>--<repo>--<key>`
+      also works. A name of another repository is refused. Still accepted (1.0
+      form): a value with `/` is a full Vault path and is read as is.
       The token goes to output `token`.
     required: false
     default: ""
@@ -74,19 +77,21 @@ inputs:
       action stops the Vault step and fails with failed-step `vault`. Each request
       of the Vault login has its own limit of 15 seconds; the OIDC token request
       is tried up to 3 times.
+      The read of a github-token without `/` is not under this limit: it sends
+      at most 3 requests of 15 seconds each.
     required: false
     default: "120"
 
 outputs:
   token:
     description: The GitHub token from `github-token`. Empty when `github-token` is not set or the action failed. Masked in logs.
-    value: ${{ steps.check.outcome == 'success' && steps.vault.outputs.VAULT_SECRETS_GITHUB_TOKEN || '' }}
+    value: ${{ steps.check.outcome == 'success' && (steps.token.outputs.token || steps.vault.outputs.VAULT_SECRETS_GITHUB_TOKEN) || '' }}
   secrets:
     description: >-
       JSON object with one key per name in `secrets`. When `github-token` is set,
       it also has the key VAULT_SECRETS_GITHUB_TOKEN. `{}` when the action failed.
       Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Values are masked in logs.
-    value: ${{ steps.check.outcome == 'success' && toJSON(steps.vault.outputs) || '{}' }}
+    value: ${{ steps.check.outcome == 'success' && steps.check.outputs.secrets || '{}' }}
   failed-step:
     description: >-
       The step of the action that failed: `prepare`, `join`, `wait`, `vault` or `check`.
@@ -97,6 +102,7 @@ outputs:
         steps.join.outcome == 'failure' && 'join' ||
         steps.wait.outcome == 'failure' && 'wait' ||
         steps.login.outcome == 'failure' && 'vault' ||
+        steps.token.outcome == 'failure' && 'vault' ||
         steps.watchdog.outcome == 'failure' && 'vault' ||
         steps.vault.outcome == 'failure' && 'vault' ||
         steps.watchdog_stop.outcome == 'failure' && 'vault' ||
@@ -145,7 +151,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/wait-for-vault.sh"
 
     # login.sh masks the OIDC JWT and the Vault token at once. The Vault token
-    # goes to the step output vault-token, which only the read step below uses.
+    # goes to the step output vault-token, which only the token and read steps below use.
     # No composite output exposes it. Each request has a limit of 15 seconds;
     # the OIDC token request is tried up to 3 times, the Vault login one time.
     - name: Log in to Vault
@@ -161,10 +167,31 @@ runs:
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
       run: bash "$GITHUB_ACTION_PATH/login.sh"
 
+    # Only for github-token without '/': finds the engine of the token set and
+    # reads the token, one request per engine, 15 seconds each, no retry. The
+    # first success is the token: vault-action does not read it again. Masks the
+    # token at once. See read-token.sh.
+    - name: Get GitHub token from Vault
+      id: token
+      if: steps.prepare.outputs.token-set != ''
+      shell: bash
+      env:
+        VAULT_URL: ${{ steps.prepare.outputs.url }}
+        VAULT_TOKEN: ${{ steps.login.outputs.vault-token }}
+        TOKEN_SET: ${{ steps.prepare.outputs.token-set }}
+        TOKEN_INPUT: ${{ inputs.github-token }}
+        ROLE: ${{ steps.prepare.outputs.role }}
+        REPOSITORY: ${{ github.repository }}
+        VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
+      run: bash "$GITHUB_ACTION_PATH/read-token.sh"
+
     # Composite steps cannot have timeout-minutes, and vault-action has no
     # request timeout. A background watchdog stops the Vault step at the limit.
+    # The watchdog and the read step run only when there is something for
+    # vault-action to read (secrets, or github-token with '/').
     - name: Start time limit for Vault
       id: watchdog
+      if: steps.prepare.outputs.spec != ''
       shell: bash
       env:
         VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
@@ -175,6 +202,7 @@ runs:
     # no lookup).
     - name: Read from Vault
       id: vault
+      if: steps.prepare.outputs.spec != ''
       uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
       # Empty in kernel mode: the runner's environment is not changed.
       # In userspace mode: a Node preload (proxy-agent.cjs) sends the Vault
@@ -206,9 +234,12 @@ runs:
 
     # Vault can hold an empty string, and vault-action passes it on without an
     # error. An empty value is always an error here. Names only in the log.
+    # Writes output secrets: the vault-action outputs plus the token of the
+    # token step under VAULT_SECRETS_GITHUB_TOKEN.
     - name: Check that no value is empty
       id: check
       shell: bash
       env:
         VAULT_OUTPUTS: ${{ toJSON(steps.vault.outputs) }}
+        TOKEN_VALUE: ${{ steps.token.outputs.token }}
       run: bash "$GITHUB_ACTION_PATH/check-values.sh"

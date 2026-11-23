@@ -4,7 +4,8 @@
 # pre-check refuses its case with its own message, and checks the reserved
 # output name rule: prepare.sh accepts a `secrets` value that only contains the
 # reserved name, and refuses a value that uses it as an output name. Checks
-# the role resolution (default, short and full names) and its refusals.
+# the role resolution (default, short and full names) and its refusals, and
+# the github-token resolution (key, full name, full path) and its refusals.
 # Uses no token and no secret.
 set -euo pipefail
 
@@ -94,7 +95,10 @@ refuses() {
     IN_SECRETS="$secrets" IN_GITHUB_TOKEN=test-token
 }
 
-token_line='github/token/test-token token | VAULT_SECRETS_GITHUB_TOKEN'
+# A github-token with '/' goes to vault-action in the spec. A github-token
+# without '/' goes to output token-set (read-token.sh), not to the spec.
+path_token='github/token/test-token'
+token_line="$path_token token | VAULT_SECRETS_GITHUB_TOKEN"
 
 # One case for each pre-check, in the order of prepare.sh.
 refuses_with 'pull_request_target' 'refused on pull_request_target' \
@@ -126,6 +130,31 @@ refuses_with 'token name with ;' 'input github-token is not a valid token name o
   'IN_GITHUB_TOKEN=bad;name'
 refuses_with 'token path with //' 'input github-token is not a valid token name or path' \
   IN_GITHUB_TOKEN=github//token
+refuses_with 'token key with a space' 'input github-token is not a valid token name or path' \
+  'IN_GITHUB_TOKEN=contents read'
+refuses_with 'token key that starts with -' 'input github-token is not a valid token name or path' \
+  IN_GITHUB_TOKEN=-x
+refuses_with 'token key that starts with .' 'input github-token is not a valid token name or path' \
+  IN_GITHUB_TOKEN=.x
+refuses_with 'token key with a quote' 'input github-token is not a valid token name or path' \
+  "IN_GITHUB_TOKEN=x'y"
+refuses_with 'token of another repository' \
+  "input github-token 'tenstorrent--other--contents-read' is not a token of tenstorrent/.github. Its token names start with tenstorrent--.github--." \
+  IN_GITHUB_TOKEN=tenstorrent--other--contents-read
+refuses_with 'token of another org' \
+  "input github-token 'other--.github--contents-read' is not a token of tenstorrent/.github" \
+  IN_GITHUB_TOKEN=other--.github--contents-read
+refuses_with 'token with -- but without the prefix' \
+  "input github-token 'a--b' is not a token of tenstorrent/.github" IN_GITHUB_TOKEN=a--b
+refuses_with 'token name that is only the prefix' \
+  "input github-token 'tenstorrent--.github' is not a token of tenstorrent/.github" \
+  IN_GITHUB_TOKEN=tenstorrent--.github
+refuses_with 'full token name with an empty key' 'does not give a valid token name (tenstorrent--.github--)' \
+  IN_GITHUB_TOKEN=tenstorrent--.github--
+refuses_with 'token key that ends with -' 'does not give a valid token name (tenstorrent--.github--x-)' \
+  IN_GITHUB_TOKEN=x-
+refuses_with 'nothing to get, github-token only blanks' 'nothing to get' \
+  'IN_GITHUB_TOKEN=   ' IN_SECRETS=
 for url in \
   http://vault-ospo.eng-svc.aws.tenstorrent.com \
   https://vault-ospo.invalid \
@@ -149,19 +178,20 @@ refuses_with 'join without tags' 'input tailscale-tags is empty' \
   IN_JOIN_TAILNET=true IN_TS_TAGS=
 
 # The valid inputs above pass, so each refusal comes from its own check.
-accepts 'valid inputs' '' test-token "$token_line"
+accepts 'valid inputs' '' test-token ''
+accepts 'valid inputs, token path' '' "$path_token" "$token_line"
 
 accepts 'reserved name inside a path' \
-  'kv/data/VAULT_SECRETS_GITHUB_TOKEN_backup value | API_KEY' test-token \
+  'kv/data/VAULT_SECRETS_GITHUB_TOKEN_backup value | API_KEY' "$path_token" \
   "kv/data/VAULT_SECRETS_GITHUB_TOKEN_backup value | API_KEY ;${nl}${token_line}"
 accepts 'reserved name inside a path, no github-token' \
   'kv/data/VAULT_SECRETS_GITHUB_TOKEN/x value | API_KEY ;' '' \
   'kv/data/VAULT_SECRETS_GITHUB_TOKEN/x value | API_KEY'
 accepts 'output name that only starts with the reserved name' \
-  "kv/data/app value | VAULT_SECRETS_GITHUB_TOKEN_2 ;${nl}kv/data/app other | B" test-token \
+  "kv/data/app value | VAULT_SECRETS_GITHUB_TOKEN_2 ;${nl}kv/data/app other | B" "$path_token" \
   "kv/data/app value | VAULT_SECRETS_GITHUB_TOKEN_2 ;${nl}kv/data/app other | B ;${nl}${token_line}"
 accepts 'default name with a dash is not the reserved name' \
-  'kv/data/app VAULT-SECRETS_GITHUB_TOKEN' test-token \
+  'kv/data/app VAULT-SECRETS_GITHUB_TOKEN' "$path_token" \
   "kv/data/app VAULT-SECRETS_GITHUB_TOKEN ;${nl}${token_line}"
 
 # Fails unless prepare.sh, in repository $2 with IN_ROLE=$3, writes role=$4
@@ -193,6 +223,47 @@ role_is 'full name' tenstorrent/.github tenstorrent--.github--vault-action-test 
 role_is 'full default name' tenstorrent/.github tenstorrent--.github tenstorrent--.github full
 role_is 'full name in mixed case' tenstorrent/.github Tenstorrent--.GitHub--X tenstorrent--.github--x full
 role_is 'repository in upper case' tenstorrent/LLM_Perf '' tenstorrent--llm_perf default
+
+# Fails unless prepare.sh, in repository $2 with IN_GITHUB_TOKEN=$3 and
+# IN_SECRETS=$4, writes token-set=$5 and spec $6.
+token_is() {
+  local title="$1" repo="$2" in="$3" secrets="$4" want_set="$5" want_spec="$6"
+  run_env REPOSITORY="$repo" IN_GITHUB_TOKEN="$in" IN_SECRETS="$secrets"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::github-token $title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x -F -- "token-set=$want_set" "$work/out"; then
+    echo "::error::github-token $title: expected token-set=$want_set"
+    grep -E '^token-set=' "$work/out" || true
+    status=1
+  elif [ "$spec" != "$want_spec" ]; then
+    echo "::error::github-token $title: spec output is not as expected"
+    printf 'got:\n%s\nwant:\n%s\n' "$spec" "$want_spec"
+    status=1
+  else
+    echo "OK: github-token $title gives token-set '$want_set'"
+  fi
+}
+kv='kv/data/app value | API_KEY'
+token_is 'short key' tenstorrent/.github contents-read '' tenstorrent--.github--contents-read ''
+token_is 'short key without hyphen' tenstorrent/.github admin '' tenstorrent--.github--admin ''
+token_is 'short key with . and _' tenstorrent/.github members_read.v2 '' tenstorrent--.github--members_read.v2 ''
+token_is 'short key in upper case' tenstorrent/.github Contents-Read '' tenstorrent--.github--contents-read ''
+token_is 'short key with blanks' tenstorrent/.github ' contents-read ' '' tenstorrent--.github--contents-read ''
+token_is 'short key, repository in upper case' tenstorrent/LLM_Perf tt-blaze-read '' \
+  tenstorrent--llm_perf--tt-blaze-read ''
+token_is 'full name' tenstorrent/.github tenstorrent--.github--contents-read '' \
+  tenstorrent--.github--contents-read ''
+token_is 'full name in mixed case' tenstorrent/.github Tenstorrent--.GitHub--Contents-Read '' \
+  tenstorrent--.github--contents-read ''
+token_is 'full path, used as is' tenstorrent/.github github-admin/token/tenstorrent--internal-requests--org-read '' \
+  '' 'github-admin/token/tenstorrent--internal-requests--org-read token | VAULT_SECRETS_GITHUB_TOKEN'
+token_is 'short key and secrets' tenstorrent/.github contents-read "$kv ;" \
+  tenstorrent--.github--contents-read "$kv"
+token_is 'full path and secrets' tenstorrent/.github "$path_token" "$kv" \
+  '' "$kv ;${nl}${token_line}"
+token_is 'secrets only' tenstorrent/.github '' "$kv" '' "$kv"
 
 # Fails unless prepare.sh refuses to run without $1 on PATH. The PATH holds
 # links to the other tools that prepare.sh and this test need.

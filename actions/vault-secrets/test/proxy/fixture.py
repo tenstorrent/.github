@@ -17,7 +17,11 @@ HOST = "vault-ospo-staging.eng-svc.aws.tenstorrent.com"
 OIDC_HOST = "oidc.fixture.invalid"
 ROOT = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "vault-secrets-proxy-fixture"
 # prepare.sh turns the short name `proxy-test` into <org>--<repo>--proxy-test.
-ROLE = os.environ.get("GITHUB_REPOSITORY", "").lower().replace("/", "--") + "--proxy-test"
+PREFIX = os.environ.get("GITHUB_REPOSITORY", "").lower().replace("/", "--")
+ROLE = PREFIX + "--proxy-test"
+# prepare.sh turns the key `proxy-test` into the token set <org>--<repo>--proxy-test;
+# read-token.sh reads it with curl from the first engine (github).
+TOKEN_PATH = "/v1/github/token/" + PREFIX + "--proxy-test"
 
 
 def record(kind, value):
@@ -59,11 +63,11 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         else:
             assert self.headers["X-Vault-Token"] == "fake-vault-token"
             record("secret", self.path)
-            # Give the watchdog time to attach to the real Node process.
-            time.sleep(1)
-            if self.path == "/v1/github/token/proxy-test":
+            if self.path == TOKEN_PATH:
                 self.respond({"data": {"token": "fake-github-token"}})
             elif self.path == "/v1/kv/data/proxy-test":
+                # Give the watchdog time to attach to the real Node process.
+                time.sleep(1)
                 self.respond(
                     {
                         "data": {
@@ -208,7 +212,7 @@ def verify():
     assert sum(event["kind"] == "login" for event in events) == 2
     assert {event["value"] for event in events if event["kind"] == "connect"} == {HOST + ":443"}
     assert {event["value"] for event in events if event["kind"] == "secret"} == {
-        "/v1/github/token/proxy-test",
+        TOKEN_PATH,
         "/v1/kv/data/proxy-test",
     }
     assert sum(event["kind"] == "health" for event in events) == 2
