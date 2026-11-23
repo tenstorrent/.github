@@ -117,12 +117,14 @@ def git(real_git, environ, *arguments, allowed=(0,)):
 
 
 def config_entries(real_git, environ, *selection):
-    """Every (key, value) of `git config <selection> --list`; a key without a value is true."""
+    """Every (key, value) of `git config <selection> --list`. A key without a value
+    has None: Git reads it as true for a boolean but as empty for a string, so it
+    is written back bare."""
     entries = []
     for item in git(real_git, environ, "config", *selection, "--null", "--list").stdout.split("\0"):
         if item:
             key, separator, value = item.partition("\n")
-            entries.append((key, value if separator else "true"))
+            entries.append((key, value if separator else None))
     return entries
 
 
@@ -150,7 +152,8 @@ def render(entries):
         middle, _, name = rest.rpartition(".")
         if not section or not name:
             raise ValueError("Invalid Git configuration key")
-        text.append(f"[{section}{f' {quote(middle)}' if middle else ''}]\n\t{name} = {quote(value)}\n")
+        assignment = "" if value is None else f" = {quote(value)}"
+        text.append(f"[{section}{f' {quote(middle)}' if middle else ''}]\n\t{name}{assignment}\n")
     return "".join(text)
 
 
@@ -574,7 +577,7 @@ def copy_globals(session, real_git, environ, caches):
             header = subsection(key, "http.", ".extraheader")
             if header is not None and cache_host(header, caches):
                 continue
-            if key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower()):
+            if value is not None and (key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower())):
                 # A file that does not exist yet is read once a later step writes it,
                 # as Git does: the directive keeps its absolute path.
                 target = include_target(value, source, environ)
@@ -595,7 +598,10 @@ def flatten(real_git, environ, file, skip, depth=0):
         raise RuntimeError("Git configuration includes nest too deeply")
     entries = []
     for key, value in config_entries(real_git, environ, "--file", str(file), "--no-includes"):
-        if key.lower() == "include.path":
+        if value is None:
+            # Bare, as Git reads it; an include without a path is Git's error to report.
+            entries.append((key, value))
+        elif key.lower() == "include.path":
             included = include_target(value, file, environ)
             entries += flatten(real_git, environ, included, skip, depth + 1) if os.path.exists(included) else []
         elif re.fullmatch(r"includeif\..*\.path", key.lower()):

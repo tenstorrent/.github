@@ -464,6 +464,8 @@ plain `actions/checkout` where cachew can never serve the checkout:
   `action_sha`: set the pin in the `.md` source and recompile with
   `gh aw compile`;
 - paths under an `exclude` prefix.
+- files under a `.github` directory other than the repository root's (a
+  test fixture or vendored repository): GitHub does not run them.
 
 A checkout step written as a flow mapping (`- {uses: actions/checkout@...}`)
 is not rewritten: `--write` and `--check` name each one and exit 1. Write it

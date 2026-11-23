@@ -380,6 +380,30 @@ class RepositoryTests(unittest.TestCase):
     def read(self, name):
         return (self.root / name).read_text()
 
+    def test_nested_github_directories_are_data_not_workflows(self):
+        # GitHub runs only the repository root's .github/workflows. A fixture
+        # repository under tests/ is data: --write must leave its bytes alone.
+        name = "tests/fixtures/repo/.github/workflows/ci.yml"
+        (self.root / name).parent.mkdir(parents=True)
+        (self.root / name).write_text(self.files[".github/workflows/ci.yml"])
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        self.assertEqual(self.run_main("--write")[0], 0)
+        self.assertEqual(self.read(name), self.files[".github/workflows/ci.yml"])
+        self.assertEqual(self.run_main("--check")[0], 0)
+        self.assertEqual(self.run_main("--verify-pins")[0], 0)
+
+    def test_an_unreadable_value_of_another_action_named_cachew_passes(self):
+        # Only text that could spell cachew-checkout fails: another action whose
+        # name merely contains cachew, written as a folded scalar, is not this one.
+        self.assertEqual(self.run_main("--write")[0], 0)
+        name = ".github/workflows/tools.yml"
+        (self.root / name).write_text(
+            "jobs:\n  b:\n    runs-on: self-hosted\n    steps:\n      - uses: >-\n          myorg/cachew-tools@v1\n"
+        )
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        self.assertEqual(self.run_main("--check"), (0, "0 file(s) need migration.\n"))
+        self.assertEqual(self.run_main("--verify-pins")[0], 0)
+
     def test_write_keeps_crlf_line_endings(self):
         name = ".github/workflows/ci.yml"
         crlf = self.files[name].replace("\n", "\r\n")

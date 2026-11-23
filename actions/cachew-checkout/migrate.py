@@ -19,8 +19,9 @@ Modes:
                  step, a ref that is not a commit). --write reports those too.
   --verify-pins  exit 1 unless every reference pins exactly action_sha.
 
-With no paths, --write and --check inspect every tracked .yml/.yaml under a
-.github/actions or .github/workflows directory. --verify-pins also reads every
+With no paths, --write and --check inspect every tracked .yml/.yaml under the
+repository root's .github/actions or .github/workflows; a nested .github (a
+test fixture, a vendored tree) is data GitHub does not run. --verify-pins also reads every
 tracked action.yml/action.yaml, wherever a composite action lives, and accepts
 only a reference written as a plain or quoted value that starts and ends on
 its `uses:` line, since that is the only form whose ref it can read exactly.
@@ -516,11 +517,10 @@ def tracked_consumers(root, exclude=()):
         path = Path(value)
         if not value or value.startswith(tuple(exclude)):
             continue
+        # Only the root's: GitHub runs no workflow from a nested .github, and one
+        # there (a test fixture, a vendored tree) is data to leave unchanged.
         parts = path.parts
-        if ".github" not in parts:
-            continue
-        github = parts.index(".github")
-        if len(parts) <= github + 1 or parts[github + 1] not in ("actions", "workflows"):
+        if len(parts) < 3 or parts[0] != ".github" or parts[1] not in ("actions", "workflows"):
             continue
         if path.suffix.lower() in (".yml", ".yaml"):
             yield path
@@ -576,7 +576,7 @@ def value_extent(text, key):
 def could_name_action(text):
     """Whether YAML text could spell this action, once its escapes are decoded
     and the line breaks and spaces a scalar may fold or join are dropped."""
-    return "cachew" in re.sub(r"\s", "", unescaped(text)).lower()
+    return "cachew-checkout" in re.sub(r"\s", "", unescaped(text)).lower()
 
 
 def anchored(text, value):

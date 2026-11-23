@@ -1083,10 +1083,12 @@ class SessionTests(unittest.TestCase):
         # inside quotes stays a CR (Git has no \\r escape). Neither may stop the
         # session, and the job's copy must read back the same bytes.
         with (self.fixture.home / ".gitconfig").open("ab") as config:
-            config.write(b'[fixture]\n\tlatin = "caf\xe9"\n\tcarriage = "a\rb"\n')
+            config.write(b'[fixture]\n\tlatin = "caf\xe9"\n\tcarriage = "a\rb"\n\tbare\n')
         self.original_global = (self.fixture.home / ".gitconfig").read_bytes()
         self.assertEqual(self.flow(), (True, True))
-        for key, expected in (("fixture.latin", b"caf\xe9"), ("fixture.carriage", b"a\rb")):
+        # A key with no value is true as a boolean but empty as a string: it must
+        # stay bare, not become the string "true".
+        for key, expected in (("fixture.latin", b"caf\xe9"), ("fixture.carriage", b"a\rb"), ("fixture.bare", b"")):
             value = subprocess.run(
                 [self.env["CACHEW_REAL_GIT"], "config", "--null", "--get", key], env=self.env, capture_output=True
             ).stdout
