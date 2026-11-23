@@ -36,6 +36,13 @@ on:
           - https://cachew.yyz2.ci.tenstorrent.net
           - https://cachew.dev.tenstorrent.net
         default: auto
+      private-repository:
+        description: >-
+          owner/name of a private repository this run's token cannot read, to
+          check that cachew refuses it too (no default: a public file names no
+          private repository). Empty skips the check.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -102,7 +109,7 @@ jobs:
       # non-empty destination, and a leftover smoke-untrusted would read as a
       # refused checkout that ran.
       - name: Remove an earlier run's smoke checkouts
-        run: rm -rf -- "$GITHUB_WORKSPACE/smoke-full" "$GITHUB_WORKSPACE/smoke-filtered" "$GITHUB_WORKSPACE/smoke-untrusted"
+        run: rm -rf -- "$GITHUB_WORKSPACE/smoke-full" "$GITHUB_WORKSPACE/smoke-filtered" "$GITHUB_WORKSPACE/smoke-fallback" "$GITHUB_WORKSPACE/smoke-untrusted"
       - name: Bootstrap this commit's action
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -180,6 +187,73 @@ jobs:
           rm -f -- "$trace"
           [ "$hosts" = "${SERVER#https://}" ] || fail "the lazy fetch reached ${hosts:-no host}, not ${SERVER#https://}"
           [ "$authorized" -gt 0 ] || fail "the lazy fetch carried no persisted credentials"
+      # The repository authorization boundary: cachew must not serve a
+      # repository the presented token cannot read upstream, nor serve it with
+      # no token. Upstream's own refusal is checked first, so the check cannot
+      # pass because the repository is readable or does not exist for cachew alone.
+      - name: Cachew refuses a repository the token cannot read
+        if: inputs.private-repository != ''
+        env:
+          PRIVATE: ${{ inputs.private-repository }}
+          TOKEN: ${{ github.token }}
+          SERVER: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          cache=$(git config --global --get-regexp '^url\..*\.insteadof$' | sed -n 's|^url\.\(https://[^/]*\)/git/.*|\1|p' | head -n1)
+          [ -n "$cache" ] || fail "no cache rewrite in the job configuration"
+          header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          # Straight to the real git, with no job configuration: only the header given here.
+          real() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 "$CACHEW_REAL_GIT" "$@"; }
+          with_token() { GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="$header" real "$@"; }
+          if with_token ls-remote "$SERVER/$PRIVATE" >/dev/null 2>&1; then
+            fail "this run's token can read $PRIVATE upstream; name a repository it cannot read"
+          fi
+          if with_token ls-remote "$cache/git/${SERVER#https://}/$PRIVATE" >/dev/null 2>&1; then
+            fail "cachew served $PRIVATE to a token that cannot read it"
+          fi
+          if real ls-remote "$cache/git/${SERVER#https://}/$PRIVATE" >/dev/null 2>&1; then
+            fail "cachew served $PRIVATE with no token"
+          fi
+      # Live fallback: a liveness timeout far below any real answer makes every
+      # probe time out, so the action retries, falls back to actions/checkout
+      # against GitHub, and turns caching off for the rest of the job.
+      - name: A cache that does not answer falls back upstream
+        id: fallback
+        uses: ./action-under-test/actions/cachew-checkout
+        with:
+          cachew-url: ${{ inputs.cachew-url }}
+          cachew-health-timeout: '0.001'
+          ref: ${{ github.sha }}
+          path: smoke-fallback
+          persist-credentials: false
+      - name: Verify the fallback and the job after it
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          SHA: ${{ steps.fallback.outputs.commit }}
+          CACHEW: ${{ steps.fallback.outputs.cachew-checked-out }}
+          CONFIGURED: ${{ steps.fallback.outputs.cachew-configured }}
+          SERVER: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [ "$CACHEW" = false ] || fail "cachew reported the fallback checkout as its own"
+          [ "$CONFIGURED" = false ] || fail "caching stayed on after the cache did not answer"
+          [ "$SHA" = "$EXPECTED_SHA" ] && [ "$(git -C smoke-fallback rev-parse HEAD)" = "$EXPECTED_SHA" ] || fail "wrong commit"
+          case "$(git -C smoke-fallback remote get-url origin)" in "$SERVER"/*) ;; *) fail "origin is not upstream" ;; esac
+          # No cache rewrite or cache credential is left for later steps. (The
+          # empty cache extraHeader that clears inherited headers stays, by design.)
+          if git config --global --get-regexp '^url\..*/git/.*\.insteadof$' | grep -q .; then
+            fail "the job configuration still rewrites reads to the cache"
+          fi
+          if git config --global --get-regexp '^http\..*\.extraheader$' | grep -qi authorization; then
+            fail "the job configuration still holds a cache credential"
+          fi
+          # Later reads, through the wrapper, go upstream.
+          git ls-remote "$SERVER/$REPOSITORY" "$EXPECTED_SHA" >/dev/null
+          git -C smoke-full fetch --quiet origin
       - name: An untrusted cachew-url is refused
         id: untrusted
         continue-on-error: true
