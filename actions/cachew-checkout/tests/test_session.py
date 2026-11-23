@@ -937,6 +937,30 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.fixture.cache.requests, cache_before)
         self.finish()
 
+    def test_a_later_checkout_whose_session_cannot_prepare_keeps_checkout_writes_out(self):
+        # A later checkout's prepare fails (here checkout.config cannot be
+        # written). The standard checkout then runs, and with submodules it
+        # writes an include of its credentials file to the global file: that
+        # must be a throwaway copy, and later steps get the job's file back.
+        self.assertEqual(self.flow(), (True, True))
+        session = Path(self.env["CACHEW_SESSION_DIR"])
+        global_config = session / "global.config"
+        (session / "checkout.config").unlink()
+        (session / "checkout.config").mkdir()
+        self.env.update(CACHEW_PATH="second", CACHEW_SUBMODULES="true")
+        self.run_step("session")
+        outputs = fixtures.runner_file(self.fixture.root / "output")
+        self.assertNotEqual(outputs.get("ready"), "true")
+        self.env["CACHEW_RESTORE_GLOBAL"] = outputs["restore-global"]
+        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertNotEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        self.checkout()
+        self.run_step("restore")
+        self.env.update(fixtures.runner_file(self.fixture.root / "env"))
+        self.assertEqual(self.env["GIT_CONFIG_GLOBAL"], str(global_config))
+        self.assertNotIn("git-credentials", global_config.read_text())
+        self.assertNotIn(self.fixture.cache.url, global_config.read_text())
+
     def assert_lazy_fetches_stay_upstream(self, cached):
         self.fixture.update_main()
         old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")

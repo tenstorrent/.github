@@ -275,6 +275,12 @@ cachew keeps its `includeIf` entries; once the file is gone they include nothing
 steps and other actions' post steps keep a working `GIT_CONFIG_GLOBAL`. If the
 runner process itself dies, the files remain until that runner's next job starts.
 
+If a later checkout's session cannot be prepared, the standard checkout runs on
+a private copy of the job's Git configuration file, and the step after it hands
+the job's own file back to later steps. With submodules, that checkout writes an
+include of its credentials file to the global file, which would otherwise apply
+to every later step.
+
 The session directory and its files are private to the runner user because the
 configuration holds cache-scoped tokens. A step that runs Git as another user
 with this environment must set its own `GIT_CONFIG_GLOBAL`, or the job should use
@@ -435,7 +441,9 @@ flow-style step (`- {uses: ...}`), a branch or tag instead of a commit, or a
 
 `--write` replaces `actions/checkout` v7.0.1 steps (the version this action
 forwards to), pins to any other commit of this action, and pins to its old
-`tenstorrent/tt-metal/.github/actions/cachew-checkout` location. It leaves
+`tenstorrent/tt-metal/.github/actions/cachew-checkout` location, and steps that
+run a copy kept in the repository (`uses: ./.github/actions/cachew-checkout`),
+which every mode reports until they are moved. It leaves
 plain `actions/checkout` where cachew can never serve the checkout:
 
 - steps with a trailing `# cachew: keep` comment (a bootstrap checkout, or a

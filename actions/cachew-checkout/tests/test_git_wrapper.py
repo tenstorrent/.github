@@ -255,6 +255,22 @@ class DownstreamGitTests(unittest.TestCase):
         self.assertEqual(self.run_git("-C", str(target), "rev-parse", "origin/main"), sha)
         self.assert_disabled()
 
+    def test_clone_inside_a_repository_with_its_own_rewrite_still_retries_upstream(self):
+        # git clone ignores the configuration of the repository it runs in, so a
+        # rewrite there (cachew's promisor pin at the workspace root, or a token
+        # in a URL) must not make the wrapper think the clone skips the cache.
+        self.dependency("cmake-dependency")
+        workspace = self.root / "workspace"
+        self.run_git("init", "-q", str(workspace))
+        url = self.upstream.url + "/org/cmake-dependency"
+        self.run_git("-C", str(workspace), "config", "--local", f"url.{url}.insteadOf", url)
+        self.cache.fail_repo = "cmake-dependency"
+        self.run_git("clone", "-q", self.upstream.url + "/org/cmake-dependency", "cloned", cwd=workspace)
+        self.assertTrue((workspace / "cloned/.git").is_dir())
+        self.assertEqual(len(self.cache.discoveries()), 1)
+        self.assertEqual(len(self.upstream.discoveries()), 1)
+        self.assert_disabled()
+
     def test_stalled_cache_clone_falls_back_after_deadline(self):
         sha = self.dependency("cmake-dependency")
         self.env["CACHEW_GIT_FETCH_TIMEOUT"] = "0.4"

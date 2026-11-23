@@ -225,6 +225,16 @@ runs:
         set-safe-directory: ${{ inputs.set-safe-directory }}
         github-server-url: ${{ inputs.github-server-url }}
         allow-unsafe-pr-checkout: ${{ inputs.allow-unsafe-pr-checkout }}
+    # Only after a later checkout's session could not prepare: the standard
+    # checkout ran on a throwaway copy of the job's Git file, so its global
+    # writes (a credentials include, with submodules) stay out of later steps.
+    - name: Restore the job's Git configuration
+      id: restore
+      if: always() && steps.session.outputs.restore-global != ''
+      shell: bash
+      env:
+        CACHEW_RESTORE_GLOBAL: ${{ steps.session.outputs.restore-global }}
+      run: printf 'GIT_CONFIG_GLOBAL=%s\n' "$CACHEW_RESTORE_GLOBAL" >>"$GITHUB_ENV"
     - name: Configure job-global cachew Git transport
       id: configure
       # always(): after a failed checkout too, or later steps keep checkout's

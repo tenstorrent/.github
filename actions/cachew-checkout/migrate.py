@@ -64,15 +64,20 @@ MIGRATABLE_REFS = (FORWARDED_CHECKOUT, "v7.0.1")
 CONFIG = Path(".github/cachew-checkout.json")
 SHA = re.compile(r"[0-9a-f]{40}")
 
+# A step that runs a copy of the action kept in the consumer repository, where
+# it lived before it moved to tenstorrent/.github: never the pinned action.
+LOCAL_COPY = re.compile(r"(?i:\./+\.github/+actions/+cachew-checkout/*)")
 CHECKOUT = re.compile(
     r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*)(?P<quote>['\"]?)"
-    r"(?:(?i:actions/checkout)@(?:"
+    r"(?P<value>(?i:actions/checkout)@(?:"
     + "|".join(map(re.escape, MIGRATABLE_REFS))
     + r")|(?i:"
     + re.escape(ACTION_REPO)
     + "|"
     + re.escape(LEGACY_REPO)
-    + r")@[0-9a-f]{40})"
+    + r")@[0-9a-f]{40}|"
+    + LOCAL_COPY.pattern
+    + r")"
     r"(?P=quote)(?:[ \t]+#[^\n]*)?[ \t]*$"
 )
 # The pin itself in a CHECKOUT match: the action, at either location, and its commit.
@@ -439,7 +444,7 @@ def rewrite(text, action_sha):
     def replace(match):
         if "cachew: keep" in match[0]:
             return match[0]
-        pinned = "cachew-checkout@" in match[0].lower()
+        pinned = not match["value"].lower().startswith("actions/checkout@")
         if match.start() not in steps:
             # Text a script writes or prints, or data that is not a step of this
             # file: a checkout there is not migrated. A pin to the action is still
@@ -693,6 +698,9 @@ def file_problems(path, text, action_sha, fix=None):
             if not could_name_action(text[start:end] + anchored(text, text[start:end])):
                 continue
             problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
+            continue
+        if LOCAL_COPY.fullmatch(value):
+            problems.append(f"{path}:{line} runs {value}, a copy of the action in this repository; {fix or 'run --write'}")
             continue
         reference = action_reference(value)
         if not reference:

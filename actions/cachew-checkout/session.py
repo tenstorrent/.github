@@ -919,6 +919,20 @@ def activate(environ):
     output("configured", str(state["active"]).lower())
 
 
+def keep_job_file(session):
+    """After a later checkout's prepare failed: the standard checkout that runs
+    instead writes to the global file (with submodules, an include of its
+    credentials file, which would then apply to every later step). Give it a
+    private copy of the job's file, and have the restore step hand the job's
+    file back to later steps, as configure would have."""
+    global_config = session / "global.config"
+    copy = session / f"fallback-{uuid.uuid4().hex}.config"
+    copy.touch(mode=0o600)
+    shutil.copyfile(global_config, copy)
+    environment("GIT_CONFIG_GLOBAL", str(copy))
+    output("restore-global", str(global_config))
+
+
 def main(phase):
     environ = dict(os.environ)
     try:
@@ -941,6 +955,11 @@ def main(phase):
         if phase == "prepare":
             print("Cachew session could not start; using standard checkout only.")
             output("ready", "false")
+            try:
+                if environ.get("CACHEW_SESSION_DIR"):
+                    keep_job_file(owned_session(environ))
+            except Exception:
+                pass
         else:
             print("Cachew configuration unavailable; later Git operations use upstream.")
             output("configured", "false")

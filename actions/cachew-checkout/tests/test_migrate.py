@@ -426,6 +426,29 @@ class RepositoryTests(unittest.TestCase):
             code, out = self.run_main(mode)
             self.assertEqual(code, 0, out)
 
+    def test_steps_that_run_an_in_repo_copy_of_the_action_are_migrated(self):
+        # Before the move, consumers ran the action from their own repository: a
+        # local copy left there is never the pin, so every mode sees it.
+        workflow = self.root / ".github/workflows/ci.yml"
+        (self.root / ".github/actions/setup/action.yml").write_text(f"runs:\n  using: composite\n  steps:\n    - uses: {PINNED}\n")
+        head = "jobs:\n  build:\n    runs-on: {runner}\n    steps:\n"
+        for local in ("./.github/actions/cachew-checkout", "./.github/actions/cachew-checkout/", "'./.github/actions/cachew-checkout'"):
+            for runner, expected in (("self-hosted", PINNED), ("ubuntu-latest", PLAIN)):
+                with self.subTest(local=local, runner=runner):
+                    workflow.write_text(head.format(runner=runner) + f"      - uses: {local}\n        with:\n          fetch-depth: 0\n")
+                    for mode in ("--check", "--verify-pins"):
+                        code, out = self.run_main(mode)
+                        self.assertEqual(code, 1, out)
+                        self.assertIn(".github/workflows/ci.yml", out)
+                    self.assertEqual(self.run_main("--write")[0], 0)
+                    self.assertEqual(
+                        workflow.read_text(),
+                        head.format(runner=runner) + f"      - uses: {expected}\n        with:\n          fetch-depth: 0\n",
+                    )
+                    for mode in ("--check", "--verify-pins"):
+                        code, out = self.run_main(mode)
+                        self.assertEqual(code, 0, out)
+
     def test_flow_style_checkout_steps_are_reported_not_skipped(self):
         # --write does not migrate a step written as a flow mapping; it and
         # --check name each one, and fail, so none is left behind unnoticed.

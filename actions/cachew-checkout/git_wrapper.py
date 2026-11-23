@@ -431,15 +431,47 @@ def reaches_cache(real_git, arguments, index, environ, cache, repository=""):
     repository = repository or repository_argument(arguments, index)
     if repository is None or not cache:
         return True
-    result = subprocess.run(
-        [real_git, *arguments[:index], "ls-remote", "--get-url", *([repository] if repository else [])],
-        env=environ,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    if arguments[index] == "clone":
+        # A clone reads no configuration of the repository it runs in (a pin or
+        # a token-in-URL rewrite there would hide the cache rewrite): resolve its
+        # URL outside any repository, with the settings it does read, Git's -c
+        # options before the command and its own -c/--config before it fetches.
+        options = [option for pair in clone_options(arguments, index) for option in pair]
+        options += [option for setting in clone_settings(arguments[index + 1 :])[0] for option in ("-c", setting)]
+        environ = {key: value for key, value in environ.items() if key not in REPOSITORY_ENVIRONMENT}
+        with tempfile.TemporaryDirectory() as empty:
+            environ["GIT_CEILING_DIRECTORIES"] = os.path.dirname(empty)
+            result = subprocess.run(
+                [real_git, *options, "ls-remote", "--get-url", repository],
+                env=environ,
+                cwd=empty,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+    else:
+        result = subprocess.run(
+            [real_git, *arguments[:index], "ls-remote", "--get-url", *([repository] if repository else [])],
+            env=environ,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
     if result.returncode:
         return True
     return result.stdout.decode(errors="replace").strip().startswith(cache.rstrip("/") + "/git/")
+
+
+def clone_options(arguments, index):
+    """The configuration options among Git's options before the command, as
+    (option, value) pairs or one-element tuples for an attached value; -C,
+    --git-dir and the others that choose a repository are left out."""
+    position = 0
+    while position < index:
+        argument = arguments[position]
+        if argument in ("-c", "--config-env") and position + 1 < index:
+            yield argument, arguments[position + 1]
+        elif argument.startswith("--config-env="):
+            yield (argument,)
+        position += 2 if argument in OPTIONS_WITH_VALUE else 1
 
 
 def clone_settings(tail):
