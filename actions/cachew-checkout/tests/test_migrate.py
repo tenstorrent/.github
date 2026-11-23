@@ -576,6 +576,17 @@ class RepositoryTests(unittest.TestCase):
             (f"jobs:\n  build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}\n", 2),
             (f"jobs:\n  build: {{runs-on: [self-hosted, gpu],\n    steps: [{{uses: {checkout}}}]}}\n", 3),
             (f"jobs: {{build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}}}\n", 1),
+            # A hosted job beside it on the same line covers only itself.
+            (
+                "jobs: {hosted: {runs-on: ubuntu-latest, steps: [{run: echo}]},"
+                f" build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}}}\n",
+                1,
+            ),
+            (
+                f"jobs: {{build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}},"
+                " hosted: {runs-on: ubuntu-latest, steps: [{run: echo}]}}\n",
+                1,
+            ),
         )
         for text, line in cases:
             with self.subTest(text=text):
@@ -592,6 +603,25 @@ class RepositoryTests(unittest.TestCase):
             "jobs:\n  build:\n    runs-on: ubuntu-latest\n" f"    steps: [{{uses: {checkout}}}]\n",
             f"jobs:\n  build: {{runs-on: ubuntu-latest, steps: [{{uses: {checkout}}}]}}\n",
             f"jobs: {{\n  build: {{\n    runs-on: ubuntu-latest,\n    steps: [\n      {{uses: {checkout}}}\n    ]\n  }}\n}}\n",
+            # A comment after a flow job's runs-on is not part of its label.
+            "jobs:\n  build: {\n    runs-on: ubuntu-latest, # hosted runner\n"
+            f"    steps: [{{uses: {checkout}}}]\n  }}\n",
+            "jobs:\n  build: {\n    runs-on: [ubuntu-latest], # hosted runner\n"
+            f"    steps: [{{uses: {checkout}}}]\n  }}\n",
+            # An aliased step whose anchor runs only a script, or whose checkout
+            # is data under another key, and aliases kept by their own comment.
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - &script\n        run: echo {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps:\n      - *script\n",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - &step\n        uses: ./local\n        with:\n          uses: {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps:\n      - *step\n",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - &co\n        uses: {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps:\n      - *co # cachew: keep\n",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps: &st\n"
+            f"      - uses: {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps: *st # cachew: keep\n",
             # Aliased steps whose anchor --write migrates, or a hosted job's.
             "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
             f"      - &co\n        uses: {checkout} # cachew: keep\n"
