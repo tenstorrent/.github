@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
 
       - id: vault
-        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
+        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
         with:
           role: <role>
           github-token: <token-name>
@@ -89,9 +89,11 @@ jobs:
 ```
 
 Pin the action by the full SHA of a commit on `main` of `tenstorrent/.github`.
-The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9a261e462179fe13`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+The current release is `vault-secrets-v1.1.0`. The section [Releases](../../actions/vault-secrets/README.md#releases) of the README gives its commit. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 Remove `secrets:` if there is no other secret. Remove `github-token:` if there
-is no token.
+is no token. Remove `role:` if OSPO gave the default role `<org>--<repo>` of
+this repository. For a named workflow entry, the short name is enough, for
+example `role: nightly`.
 
 ## 4. Which events can log in
 
@@ -143,8 +145,10 @@ The README lists every message in
 |---|---|---|
 | `job needs permissions: id-token: write` | No `id-token: write`, or a fork pull request. | Failures |
 | `refused on pull_request_target` | Wrong event. | Failures |
-| `role "..." could not be found` | Wrong role, or the grant is not applied. | Failures |
-| `error validating claims` | Wrong branch, environment or event. | Failures |
+| `Vault has no role ...` | Wrong role, or the grant is not applied. | Failures |
+| `This repository has no default Vault role` | `role` is empty, and the grant has no default role. | Failures |
+| `input role '...' is not a role of <repo>` | `role` names a role of another repository. | Failures |
+| `This run does not match role ...` | Wrong branch, environment, workflow file or event. | Failures |
 | `permission denied` on a token or `kv` path | Wrong name or path, or no access. | Failures |
 | `Vault ... is not reachable` | Runner not on the tailnet. | Failures |
 | `Vault did not answer within N seconds` | The Vault step took longer than the time limit. | Failures |

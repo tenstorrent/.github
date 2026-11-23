@@ -22,14 +22,14 @@ Stop and go to section 4 if the job is on the list there.
 
 ## 2. Map old to new
 
-The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9a261e462179fe13`. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+The current release is `vault-secrets-v1.1.0`. The section [Releases](README.md#releases) of the README gives its commit. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
 
 | Old | New |
 |---|---|
 | Step `Join tailnet` (`tailscale/github-action`) | Removed. The action joins when needed. |
 | Step `Wait for Vault` (curl loop) | Removed. The action waits. |
 | Step with `hashicorp/vault-action` | One step with `uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>`. |
-| `role: <name>` | `role: <name>`. Do not change it. |
+| `role: <name>` | `role: <name>`. Do not change the role. You may remove `role` when it is the default role `<org>--<repo>` of the repository that runs the workflow. |
 | `url`, `method`, `path`, `jwtGithubAudience` | Removed. The action sets them. |
 | `exportEnv: false`, `exportToken: false`, `outputToken: false` | Removed. The action always sets these values. |
 | No `exportEnv`, or `exportEnv: true` | Removed, but do step 2a first. vault-action exports by default; the action does not. |
@@ -123,7 +123,7 @@ steps:
 
   - name: Get secrets
     id: vault
-    uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
+    uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
     with:
       role: example-org--example-app
       github-token: example-org--example-app--lib-read
@@ -144,7 +144,7 @@ A token path with `/` is a full path. The action does not add `github/token/`.
 ```yaml
 steps:
   - id: vault
-    uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
+    uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
     with:
       role: example-org--example-app--nightly
       secrets: |
@@ -188,13 +188,13 @@ steps:
    ```yaml
    steps:
      - id: vault
-       uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
+       uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
        with:
          role: example-org--example-app
          github-token: example-org--example-app--lib-read
 
      - id: vault_deploy
-       uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
+       uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
        with:
          role: example-org--example-app--deploy
          secrets: |
@@ -208,6 +208,8 @@ steps:
    Search the file first: `grep -n VAULT_URL <file>`.
 9. Do not change the role name, the token names, or the secret paths. OSPO sets
    them in the grant (see the OSPO ticket). If a name looks wrong, ask OSPO.
+   Removing `role` for the default role `<org>--<repo>` is not a change of the
+   role. Keep `role` when you are not sure.
 10. Never print a value. Do not use `echo`, `set -x`, or debug output on a
     value. Print lengths or key names only.
 
