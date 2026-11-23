@@ -484,8 +484,9 @@ def flow_steps(text):
     rows = content_rows(text, block_scalars(text))
     found = []
     for index, (offset, line, indent) in enumerate(rows):
-        entries = ENTRIES.match(line)[0]
-        if entries.count("-") != 1 or not line[len(entries) :].startswith("{") or not steps_item(rows, index):
+        # An item may carry a tag or anchor before its mapping: `- &a {...}`.
+        entries = re.match(ENTRIES.pattern + PROPERTIES, line)[0]
+        if ENTRIES.match(line)[0].count("-") != 1 or not line[len(entries) :].startswith("{") or not steps_item(rows, index):
             continue
         if any(start <= offset < end for start, end in hosted):
             continue
@@ -500,11 +501,21 @@ def flow_steps(text):
     return found
 
 
+# A checkout --write migrates, as a whole word of decoded YAML text: not
+# actions/checkout@v7.0.10, not myactions/checkout@v7.0.1.
+MIGRATABLE = re.compile(
+    r"(?<![\w./\\-])(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r""")(?=$|[\s'",}\]])"""
+)
+# Properties a YAML node may carry before its content: tags and anchors.
+PROPERTIES = r"(?:[!&][^\s,\[\]{}]*[ \t\r\n]+)*"
+
+
 def migratable(text):
     """Whether YAML text could spell a checkout --write migrates, once its
-    escapes are decoded and the spaces a scalar may fold or join are dropped."""
-    spelled = re.sub(r"\s", "", unescaped(text)).lower()
-    return "actions/checkout@" in spelled and any(ref.lower() in spelled for ref in MIGRATABLE_REFS)
+    comments are dropped and its escapes decoded. Line breaks stay white space,
+    as YAML folds them: a ref split over two lines is not this one."""
+    without_comments = "\n".join(COMMENT.split(line, maxsplit=1)[0] for line in text.split("\n"))
+    return bool(MIGRATABLE.search(unescaped(without_comments)))
 
 
 def open_bracket(text, at):
@@ -541,11 +552,12 @@ def hidden_checkouts(text):
             if key["flow"]:
                 mapping = key.start("flow") if key["flow"] == "{" else open_bracket(text, key.start("flow"))
                 holder = open_bracket(text, mapping) if mapping >= 0 else -1
+                # `steps: [...]`, or with a tag or anchor: `steps: &s [...]`.
                 in_sequence = holder >= 0 and text[holder] == "[" and bool(
-                    re.search(r"""(?:^|[\s{,])(['"]?)steps\1[ \t]*:[ \t\r\n]*$""", text[:holder])
+                    re.search(r"""(?:^|[\s{,])(['"]?)steps\1[ \t]*:[ \t\r\n]*""" + PROPERTIES + "$", text[:holder])
                 )
                 item_start = text.rfind("\n", 0, mapping) + 1
-                entries = ENTRIES.fullmatch(text[item_start:mapping])
+                entries = re.fullmatch(ENTRIES.pattern + PROPERTIES, text[item_start:mapping])
                 row = next((i for i, (offset, _, _) in enumerate(rows) if offset == item_start), None)
                 item = entries and entries[0].count("-") == 1 and row is not None and steps_item(rows, row)
                 # flow_steps reports a readable one in a `- {...}` step.

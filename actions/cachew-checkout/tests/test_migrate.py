@@ -541,6 +541,10 @@ class RepositoryTests(unittest.TestCase):
             (head + f"      - {{uses: !!str {checkout}}}\n", 5),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: [{{uses: {checkout}}}]\n", 4),
             ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      [{{run: echo}},\n       {{uses: {checkout}}}]\n", 6),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: &s [{{uses: {checkout}}}]\n", 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: !!seq [{{uses: {checkout}}}]\n", 4),
+            (head + f"      - &a {{uses: {checkout}}}\n", 5),
+            (head + f"      - !!map {{uses: !!str {checkout}}}\n", 5),
         )
         for text, line in cases:
             with self.subTest(text=text):
@@ -559,6 +563,14 @@ class RepositoryTests(unittest.TestCase):
             head + f"      - uses: ./local\n        with:\n          uses: !!str {checkout}\n",
             head + f"      - {{run: echo, with: {{uses: !!str {checkout}}}}}\n",
             "jobs:\n  build:\n    runs-on: self-hosted\n" f"    env: [{{uses: {checkout}}}]\n    steps:\n      - run: echo\n",
+            # Another version, a ref that only starts like this one, or the
+            # checkout named only in a comment.
+            head + f"      - uses: !!str {checkout.replace('3d3c42e5', '00000000')}\n",
+            head + "      - uses: !!str actions/checkout@v7.0.10\n",
+            head + f"      - uses: !!str {checkout}0\n",
+            head + "      - uses: !!str myactions/checkout@v7.0.1\n",
+            head + f"      - uses: !!str ./local # was {checkout}\n",
+            head + f"      - uses: # was {checkout}\n          ./local\n",
         ):
             with self.subTest(text=text):
                 workflow.write_text(text)
