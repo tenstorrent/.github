@@ -173,8 +173,8 @@ fi
 
 # Network mode (release 1.2). kernel: the runner reaches Vault through its own
 # routes (default, as in 1.1). userspace: tailscaled runs without TUN and
-# NET_ADMIN, and Vault traffic goes through its loopback proxy. tailscaled
-# serves SOCKS5 and HTTP on one port when both flags give the same address.
+# NET_ADMIN, and Vault traffic goes through its loopback HTTP proxy. The
+# action starts no SOCKS5 proxy: no client of the action uses one.
 # The GitHub OIDC request keeps the runner's own proxy environment.
 network_mode="${IN_NETWORK_MODE:-kernel}"
 proxy_port="${IN_PROXY_PORT:-1055}"
@@ -189,7 +189,7 @@ case "$network_mode" in
       fail "input proxy-port must be a whole number from 1 to 65535."
     fi
     proxy_url="http://127.0.0.1:$proxy_port"
-    tailscaled_args="--tun=userspace-networking --socks5-server=127.0.0.1:$proxy_port --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
+    tailscaled_args="--tun=userspace-networking --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
     # hashicorp/vault-action has no proxy input. A step-local Node preload
     # gives its HTTP client (got, Node global agents) the Tailscale proxy.
     preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"

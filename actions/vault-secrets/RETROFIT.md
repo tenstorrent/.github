@@ -225,9 +225,11 @@ Stop. Do not change the workflow. Tell the human why, and ask OSPO.
   `network-mode: userspace` (release 1.2 and later) for a Linux pod without
   TUN or NET_ADMIN. `join-tailnet: false` uses a route or proxy that the runner
   already has; `auto` uses an active connection or joins. For userspace, the
-  runner must run actions with Node 24.5 or newer, and `proxy-port` must match
-  a proxy that already runs. Read the README section "Linux runner pods without
-  TUN" before you replace inline userspace or curl blocks.
+  runner must run actions with Node 24.5 or newer. Only with
+  `join-tailnet: false` must `proxy-port` match a Tailscale HTTP proxy that
+  already runs; when the action joins, it starts the proxy on `proxy-port`
+  itself. Read the README section "Linux runner pods without TUN" before you
+  replace inline userspace or curl blocks.
 - The job sets its own tailnet tags (for example, it joins with a different
   tag for other access). A second join can break the first.
 - The old `hashicorp/vault-action` step uses an input that the action does not

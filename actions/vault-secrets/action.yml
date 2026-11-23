@@ -48,8 +48,8 @@ inputs:
     default: kernel
   proxy-port:
     description: >-
-      Since release 1.2. Port of the Tailscale proxy on 127.0.0.1 in `userspace`
-      mode (1 to 65535). One port serves HTTP and SOCKS5. Not used in `kernel` mode.
+      Since release 1.2. Port of the Tailscale HTTP proxy on 127.0.0.1 in
+      `userspace` mode (1 to 65535). Not used in `kernel` mode.
     required: false
     default: "1055"
   tailscale-client-id:

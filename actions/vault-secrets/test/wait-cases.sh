@@ -47,7 +47,7 @@ if [ "$rc" -eq 0 ]; then
   cat "$log"
   exit 1
 fi
-if ! grep -q -F -- "$want" "$log" || ! grep -q -F -- 'Failed to connect to 127.0.0.1 port 9' "$log"; then
+if ! grep -q -F -- "$want" "$log" || ! grep -q -E -- '^curl: \(7\) .*127\.0\.0\.1' "$log"; then
   echo "::error::wait-for-vault.sh in userspace mode did not try $proxy or did not say '$want'"
   cat "$log"
   exit 1

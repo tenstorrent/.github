@@ -275,7 +275,7 @@ kernel_is_plain 'kernel ignores proxy-port' IN_NETWORK_MODE=kernel IN_PROXY_PORT
 kernel_is_plain 'kernel on macOS' IN_NETWORK_MODE=kernel RUNNER_OS=macOS
 
 # Fails unless userspace mode with proxy-port $1 gives the proxy on loopback
-# port $2, one port for SOCKS5 and HTTP, and an environment for vault-action
+# port $2, only an HTTP proxy (no SOCKS5), and an environment for vault-action
 # that holds only the preload. The runner's own proxy variables stay out of it.
 userspace_is() {
   local port="$1" want="$2" proxy_env
@@ -289,7 +289,7 @@ userspace_is() {
   elif ! grep -q -x "proxy-url=http://127.0.0.1:$want" "$work/out"; then
     echo "::error::userspace proxy-port '$port': output proxy-url is not http://127.0.0.1:$want"
     status=1
-  elif ! grep -q -x -- "tailscaled-args=--tun=userspace-networking --socks5-server=127.0.0.1:$want --outbound-http-proxy-listen=127.0.0.1:$want" "$work/out"; then
+  elif ! grep -q -x -- "tailscaled-args=--tun=userspace-networking --outbound-http-proxy-listen=127.0.0.1:$want" "$work/out"; then
     echo "::error::userspace proxy-port '$port': output tailscaled-args is not as expected"
     status=1
   elif ! printf '%s' "$proxy_env" | jq -e --arg url "http://127.0.0.1:$want" '

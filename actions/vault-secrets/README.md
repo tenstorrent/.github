@@ -102,10 +102,11 @@ release 1.1.
 
 In `userspace` mode:
 
-- The action starts Tailscale with `--tun=userspace-networking`. Tailscale
-  then opens one proxy port on 127.0.0.1 (`proxy-port`) for HTTP and SOCKS5.
-  Tailscale supports one port for both
+- The action starts Tailscale with `--tun=userspace-networking` and
+  `--outbound-http-proxy-listen=127.0.0.1:<proxy-port>`
   ([userspace networking](https://tailscale.com/kb/1112/userspace-networking)).
+  Tailscale then opens an HTTP proxy on 127.0.0.1. The action starts no SOCKS5
+  proxy.
 - All requests to Vault go through this proxy: the wait for Vault, the login
   (`login.sh`, curl `--proxy`) and the read (`hashicorp/vault-action`). A
   `NO_PROXY` value of the runner, also `NO_PROXY=*`, does not change this.

@@ -17,11 +17,10 @@ const proxy = process.env.VAULT_SECRETS_PROXY_URL;
 if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(proxy || '')) {
   throw new Error('vault-secrets userspace proxy setting is missing or invalid');
 }
-const options = {
-  keepAlive: true,
-  scheduling: 'lifo',
-  timeout: 5000,
-  proxyEnv: { http_proxy: proxy, https_proxy: proxy, no_proxy: '', NO_PROXY: '' },
-};
-http.globalAgent = new http.Agent(options);
-https.globalAgent = new https.Agent(options);
+// Copy the options of Node's own global agents and add only the proxy. The
+// preload sets no timeout of its own: the agents keep the same options as in
+// network-mode kernel, and the action's watchdog (vault-timeout-seconds)
+// stays the time limit of the step.
+const proxyEnv = { http_proxy: proxy, https_proxy: proxy, no_proxy: '', NO_PROXY: '' };
+http.globalAgent = new http.Agent({ ...http.globalAgent.options, proxyEnv });
+https.globalAgent = new https.Agent({ ...https.globalAgent.options, proxyEnv });
