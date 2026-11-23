@@ -150,7 +150,9 @@ container against a fake Vault, a fake OIDC endpoint and fake proxies on
 127.0.0.1, with fake values only. They test the Vault route through the proxy,
 the OIDC route (direct and through an outbound proxy), a refused login, empty
 outputs on failure and the time limit. They do not start Tailscale and do not
-log in to OSPO Vault. Test that on the target runner.
+log in to OSPO Vault. The `userspace-live` and `fails-vault-denied-userspace`
+jobs do that on a GitHub-hosted runner with the test role, after an approval
+of the `vault-action-test` environment. Also test on the target runner.
 
 ## Outputs
 
