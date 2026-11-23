@@ -39,14 +39,17 @@ inputs:
     default: auto
   network-mode:
     description: >-
-      `kernel` preserves routed networking (default). `userspace` reaches Vault
-      through a local Tailscale HTTP proxy without TUN or NET_ADMIN. Userspace
-      needs Linux and a runner whose Node 24 runtime supports explicit proxy agents
-      (Node 24.5 or newer). Use join-tailnet: false to reuse an existing route/proxy.
+      Since release 1.2. `kernel` (default): the runner reaches Vault through its
+      own routes, as in 1.1. `userspace`: for Linux runner pods without /dev/net/tun
+      or NET_ADMIN. Tailscale runs in userspace mode, and all Vault requests go
+      through its loopback proxy on `proxy-port`. The GitHub OIDC request keeps the
+      runner's own proxy settings. Needs a Linux runner with Node 24.5 or newer.
     required: false
     default: kernel
   proxy-port:
-    description: Loopback HTTP/SOCKS proxy port in userspace mode (1 to 65535).
+    description: >-
+      Since release 1.2. Port of the Tailscale proxy on 127.0.0.1 in `userspace`
+      mode (1 to 65535). One port serves HTTP and SOCKS5. Not used in `kernel` mode.
     required: false
     default: "1055"
   tailscale-client-id:
@@ -155,6 +158,7 @@ runs:
         ROLE_INPUT: ${{ inputs.role }}
         PREFIX: ${{ steps.prepare.outputs.prefix }}
         REPOSITORY: ${{ github.repository }}
+        VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
       run: bash "$GITHUB_ACTION_PATH/login.sh"
 
     # Composite steps cannot have timeout-minutes, and vault-action has no
@@ -172,9 +176,9 @@ runs:
     - name: Read from Vault
       id: vault
       uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
-      # Empty in kernel mode: preserve the runner's existing environment.
-      # Give Vault a Tailscale global agent while preserving the original
-      # outbound proxy environment for the GitHub OIDC client.
+      # Empty in kernel mode: the runner's environment is not changed.
+      # In userspace mode: a Node preload (proxy-agent.cjs) sends the Vault
+      # requests of this step through the Tailscale loopback proxy.
       env: ${{ fromJSON(steps.prepare.outputs.proxy-env) }}
       with:
         url: ${{ steps.prepare.outputs.url }}

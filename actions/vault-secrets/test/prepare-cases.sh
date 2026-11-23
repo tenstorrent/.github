@@ -235,36 +235,77 @@ refuses 'output name in the second entry' \
 refuses 'default name from the selector' 'kv/data/app VAULT_SECRETS_GITHUB_TOKEN'
 refuses 'default name from a quoted selector' 'kv/data/app "vault_secrets_github_token"'
 
-refuses_with 'bad network mode' 'network-mode must be kernel or userspace' IN_NETWORK_MODE=auto
-refuses_with 'userspace on unsupported OS' 'requires a Linux runner' IN_NETWORK_MODE=userspace RUNNER_OS=macOS
-for port in 0 65536 -1 12.5 01055 '1055;echo bad'; do
-  refuses_with "bad proxy port $port" 'proxy-port must be a whole number' \
+# Network mode (release 1.2).
+refuses_with 'bad network mode' 'input network-mode must be kernel or userspace' IN_NETWORK_MODE=auto
+refuses_with 'network mode in upper case' 'input network-mode must be kernel or userspace' IN_NETWORK_MODE=USERSPACE
+refuses_with 'userspace on macOS' 'input network-mode userspace needs a Linux runner' \
+  IN_NETWORK_MODE=userspace RUNNER_OS=macOS
+refuses_with 'userspace without RUNNER_OS' 'input network-mode userspace needs a Linux runner' \
+  IN_NETWORK_MODE=userspace
+for port in 0 65536 99999 -1 12.5 01055 ' 1055' '1055;echo bad' x; do
+  refuses_with "proxy-port '$port'" 'input proxy-port must be a whole number from 1 to 65535' \
     IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$port"
 done
-run_env IN_NETWORK_MODE=kernel
-if ! grep -q -x 'proxy-env={}' "$work/out" || ! grep -q -x 'proxy-url=' "$work/out"; then
-  echo '::error::kernel mode changed the proxy environment'
-  status=1
-fi
-run_env IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT=21055 \
-  NODE_OPTIONS=--trace-warnings NO_PROXY='*' no_proxy='*' HTTPS_PROXY=http://egress.invalid:3128
-if [ "$rc" -ne 0 ]; then
-  cat "$work/log"
-  status=1
-else
+
+# Fails unless the kernel outputs are the same as in release 1.1: no
+# tailscaled arguments, no proxy, no environment change for vault-action.
+kernel_is_plain() {
+  local title="$1"
+  shift
+  run_env "$@"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::$title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x 'proxy-env={}' "$work/out" || ! grep -q -x 'proxy-url=' "$work/out" \
+    || ! grep -q -x 'tailscaled-args=' "$work/out"; then
+    echo "::error::$title: kernel mode has proxy or tailscaled outputs"
+    status=1
+  elif [ -s "$work/log" ]; then
+    echo "::error::$title: kernel mode printed a message"
+    cat "$work/log"
+    status=1
+  else
+    echo "OK: $title: no proxy, no tailscaled arguments"
+  fi
+}
+kernel_is_plain 'network-mode not set'
+kernel_is_plain 'network-mode kernel' IN_NETWORK_MODE=kernel
+kernel_is_plain 'kernel ignores proxy-port' IN_NETWORK_MODE=kernel IN_PROXY_PORT=x
+kernel_is_plain 'kernel on macOS' IN_NETWORK_MODE=kernel RUNNER_OS=macOS
+
+# Fails unless userspace mode with proxy-port $1 gives the proxy on loopback
+# port $2, one port for SOCKS5 and HTTP, and an environment for vault-action
+# that holds only the preload. The runner's own proxy variables stay out of it.
+userspace_is() {
+  local port="$1" want="$2" proxy_env
+  run_env IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$port" \
+    NODE_OPTIONS=--trace-warnings NO_PROXY='*' no_proxy='*' HTTPS_PROXY=http://egress.invalid:3128
   proxy_env="$(sed -n 's/^proxy-env=//p' "$work/out")"
-  if ! printf '%s' "$proxy_env" | jq -e '
-    .VAULT_SECRETS_PROXY_URL == "http://127.0.0.1:21055" and
-    .VAULT_SECRETS_OIDC_HOST == "example.invalid" and
-    (has("http_proxy") | not) and (has("https_proxy") | not) and (has("no_proxy") | not) and
-    (has("HTTP_PROXY") | not) and (has("HTTPS_PROXY") | not) and (has("NO_PROXY") | not) and
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::userspace proxy-port '$port': prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x "proxy-url=http://127.0.0.1:$want" "$work/out"; then
+    echo "::error::userspace proxy-port '$port': output proxy-url is not http://127.0.0.1:$want"
+    status=1
+  elif ! grep -q -x -- "tailscaled-args=--tun=userspace-networking --socks5-server=127.0.0.1:$want --outbound-http-proxy-listen=127.0.0.1:$want" "$work/out"; then
+    echo "::error::userspace proxy-port '$port': output tailscaled-args is not as expected"
+    status=1
+  elif ! printf '%s' "$proxy_env" | jq -e --arg url "http://127.0.0.1:$want" '
+    (keys == ["NODE_OPTIONS", "VAULT_SECRETS_PROXY_URL"]) and
+    .VAULT_SECRETS_PROXY_URL == $url and
     (.NODE_OPTIONS | startswith("--trace-warnings --require=\"")) and
     (.NODE_OPTIONS | endswith("/proxy-agent.cjs\""))' >/dev/null; then
-    echo '::error::userspace mode did not scope proxy settings correctly'
+    echo "::error::userspace proxy-port '$port': output proxy-env is not as expected: $proxy_env"
     status=1
+  else
+    echo "OK: userspace proxy-port '$port' gives 127.0.0.1:$want"
   fi
-  grep -q -x 'proxy-url=http://127.0.0.1:21055' "$work/out" || status=1
-  grep -q -- '--tun=userspace-networking' "$work/out" || status=1
-fi
+}
+userspace_is '' 1055
+userspace_is 1 1
+userspace_is 21055 21055
+userspace_is 65535 65535
 
 exit "$status"

@@ -10,7 +10,10 @@
 #   - every '::add-mask::' comes before the first write to GITHUB_OUTPUT;
 #   - the JWT, the Vault token and the request token never appear in the log
 #     except in '::add-mask::' lines, and never in argv;
-#   - one login request, no retry, no revoke-self.
+#   - one login request, no retry, no revoke-self;
+#   - network-mode userspace (VAULT_PROXY): the Vault login goes through the
+#     loopback proxy and ignores NO_PROXY, the OIDC request keeps the runner's
+#     proxy environment, and a proxy that is not on loopback gets no request.
 # Uses only dummy values: no token and no secret.
 set -euo pipefail
 
@@ -49,6 +52,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ "$data" = true ]; then cat >>"$FAKE_BODY"; printf '\n' >>"$FAKE_BODY"; fi
+printf '%s https_proxy=%s\n' "$target" "${HTTPS_PROXY:-}" >>"$FAKE_ENV"
 answer() { printf '%s\n%s' "$2" "$1"; }
 case "$target" in
   *'audience='*)
@@ -87,6 +91,7 @@ run_login() {
   : >"$work/argv"
   : >"$work/headers"
   : >"$work/body"
+  : >"$work/env"
   rc=0
   env -i PATH="$work/bin:$PATH" \
     VAULT_URL="$url" \
@@ -98,7 +103,7 @@ run_login() {
     ACTIONS_ID_TOKEN_REQUEST_URL='https://token.invalid/oidc?api-version=2.0' \
     ACTIONS_ID_TOKEN_REQUEST_TOKEN="$request_token" \
     GITHUB_OUTPUT="$all" \
-    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" \
+    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" FAKE_ENV="$work/env" \
     FAKE_JWT="$jwt" FAKE_VAULT_TOKEN="$vault_token" FAKE_OIDC=ok FAKE_LOGIN=ok \
     "$@" \
     bash "$login" >>"$all" 2>&1 || rc=$?
@@ -272,6 +277,52 @@ if [ "$rc" -ne 0 ] || ! grep -q -F -- 'https://vault-ospo-staging.eng-svc.aws.te
 else
   echo "OK: staging URL is allowed"
 fi
+
+# ── Network mode userspace (release 1.2) ────────────────────────────────────
+# Kernel mode (VAULT_PROXY not set): curl gets no proxy option, as in 1.1.
+run_login
+if [ "$rc" -ne 0 ]; then
+  bad "kernel: login.sh failed (exit $rc), expected exit 0"
+elif grep -q -E -- '--(no)?proxy' "$work/argv"; then
+  bad "kernel: curl got a proxy option"
+else
+  echo "OK: kernel: no proxy option on any request"
+fi
+
+# Userspace: the login goes through the loopback proxy, also with NO_PROXY=*.
+# The OIDC request has no proxy option, so curl uses the runner's HTTPS_PROXY.
+proxy='http://127.0.0.1:1055'
+run_login VAULT_PROXY="$proxy" HTTPS_PROXY=http://egress.invalid:3128 NO_PROXY='*' no_proxy='*'
+oidc_argv="$(grep -F -- 'audience=' "$work/argv" || true)"
+login_argv="$(grep -F -- '/v1/auth/jwt-github/login' "$work/argv" || true)"
+if [ "$rc" -ne 0 ]; then
+  bad "userspace: login.sh failed (exit $rc), expected exit 0"
+elif [[ "$login_argv" != *"--proxy $proxy --noproxy "* ]]; then
+  bad "userspace: the Vault login does not go through $proxy with --noproxy"
+elif [[ "$oidc_argv" == *--proxy* || "$oidc_argv" == *--noproxy* ]]; then
+  bad "userspace: the OIDC request got a proxy option"
+elif ! grep -q -F -- 'audience=' "$work/env" \
+  || grep -F -- 'audience=' "$work/env" | grep -v -q -F -- 'https_proxy=http://egress.invalid:3128'; then
+  bad "userspace: the OIDC request did not keep the runner's HTTPS_PROXY"
+elif [ "$(login_calls)" -ne 1 ]; then
+  bad "userspace: expected one login request, got $(login_calls)"
+else
+  echo "OK: userspace: Vault login through $proxy, OIDC with the runner's proxy"
+fi
+no_leaks userspace
+refused 'userspace: claim mismatch' 'Vault refused claim environment.' \
+  VAULT_PROXY="$proxy" FAKE_LOGIN=claim-env
+refused 'userspace: login timeout' 'Vault did not answer the login within 15 seconds.' \
+  VAULT_PROXY="$proxy" FAKE_LOGIN=timeout
+
+# Only a proxy on 127.0.0.1 gets the OIDC token: no request at all otherwise.
+for other in http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 \
+  http://127.0.0.1:1055/x http://127.0.0.1: 'http://127.0.0.1:1055 -k'; do
+  refused "proxy '$other'" 'is not a loopback Tailscale proxy' VAULT_PROXY="$other"
+  if [ -s "$work/argv" ]; then
+    bad "proxy '$other': login.sh sent a request"
+  fi
+done
 
 # No 'set -x' and no echo of a secret variable in the script.
 if grep -n -E '^[[:space:]]*set[[:space:]]+-[a-z]*x' "$login"; then

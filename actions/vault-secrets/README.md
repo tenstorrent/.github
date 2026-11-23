@@ -67,8 +67,8 @@ Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github
 | `secrets` | no | | Secrets in [hashicorp/vault-action](https://github.com/hashicorp/vault-action) `secrets` syntax: `<path> <field> \| <NAME> ;` per line. |
 | `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
 | `join-tailnet` | no | `auto` | `auto` joins unless the runner is already on the tailnet. `true` always joins. `false` never joins. |
-| `network-mode` | no | `kernel` | `kernel` keeps existing routed networking. `userspace` uses a loopback HTTP proxy for Vault on Linux runners without TUN/NET_ADMIN. |
-| `proxy-port` | no | `1055` | Local HTTP/SOCKS proxy port in userspace mode, from 1 to 65535. |
+| `network-mode` | no | `kernel` | Since release 1.2. `kernel`: the runner reaches Vault through its own routes, as in 1.1. `userspace`: for Linux runner pods without `/dev/net/tun` or `NET_ADMIN`; all Vault requests go through a Tailscale proxy on 127.0.0.1. See [Linux runner pods without TUN](#linux-runner-pods-without-tun-release-12). |
+| `proxy-port` | no | `1055` | Since release 1.2. Port of the Tailscale proxy on 127.0.0.1 in `userspace` mode, from 1 to 65535. Not used in `kernel` mode. |
 | `tailscale-client-id` | no | value of org variable `TS_VAULT_OSPO_CLIENT_ID` | Tailscale OAuth client ID. Not a secret. |
 | `tailscale-audience` | no | value of org variable `TS_VAULT_OSPO_AUDIENCE` | Tailscale OIDC audience. Not a secret. |
 | `tailscale-tags` | no | `tag:tt-gha-vault-ospo` | Tags of the runner node. |
@@ -85,54 +85,62 @@ holds a copy. If an org variable changes, pass the new value:
           tailscale-audience: ${{ vars.TS_VAULT_OSPO_AUDIENCE }}
 ```
 
-## Linux containers and existing connections
+## Linux runner pods without TUN (release 1.2)
 
-For an exabox-style Linux runner pod without `/dev/net/tun` or `NET_ADMIN`, add:
+`network-mode` and `proxy-port` come with release 1.2. Release 1.1 does not
+have them.
+
+Use `network-mode: userspace` only on a Linux runner pod that has no
+`/dev/net/tun` or no `NET_ADMIN`, for example Exabox and CIv2 runner pods. On
+all other runners, do not set it: the default `kernel` does the same steps as
+release 1.1.
 
 ```yaml
           network-mode: userspace
           # proxy-port: '1055' # Change only if this port is already in use.
 ```
 
-The action starts Tailscale with userspace networking and a loopback HTTP/SOCKS
-proxy. Both the readiness probe and the existing pinned Vault action use this
-proxy. Token paths, KV selectors, multiline values, masks, failure outputs, and
-the watchdog keep the same behavior; there is no second secret-reading client.
+In `userspace` mode:
 
-This uses [Node's built-in proxy support](https://nodejs.org/docs/latest-v24.x/api/http.html#built-in-proxy-support)
-in the Vault action's Node 24 runtime (24.5 or newer). Update the Actions runner
-on older self-hosted hosts: changing the `node` executable on PATH with
-setup-node does not replace the runtime used by `uses:` actions. The
-preload checks this version before making requests and fails on an unsupported
-runtime. Userspace mode still needs the pinned Tailscale
-action's normal installation privileges/tools, including sudo; it removes the
-TUN and NET_ADMIN requirements.
+- The action starts Tailscale with `--tun=userspace-networking`. Tailscale
+  then opens one proxy port on 127.0.0.1 (`proxy-port`) for HTTP and SOCKS5.
+  Tailscale supports one port for both
+  ([userspace networking](https://tailscale.com/kb/1112/userspace-networking)).
+- All requests to Vault go through this proxy: the wait for Vault, the login
+  (`login.sh`, curl `--proxy`) and the read (`hashicorp/vault-action`). A
+  `NO_PROXY` value of the runner, also `NO_PROXY=*`, does not change this.
+- The request for the GitHub OIDC token does not use the Tailscale proxy. It
+  uses the proxy settings of the runner (`HTTPS_PROXY`, `NO_PROXY`), the same
+  as in `kernel` mode. This works on runners that need an outbound proxy for
+  GitHub (CIv2) and on runners with direct access.
+- `hashicorp/vault-action` has no proxy input. The action loads a small Node
+  preload (`proxy-agent.cjs`) into the read step only. It gives the Node
+  HTTP client of that step the Tailscale proxy.
 
-A step-local Node preload gives the Vault client's global agents an explicit
-Tailscale proxy configuration, so inherited `NO_PROXY=*` cannot bypass that route.
-The GitHub OIDC client retains the runner's original `HTTP_PROXY`, `HTTPS_PROXY`,
-and `NO_PROXY` settings, including lowercase variants. This supports CIv2 runners
-that require an outbound proxy for GitHub, as well as runners with direct access.
-The OIDC host bypasses the Vault proxy when the client uses a global agent.
-Kernel mode passes an empty environment mapping and does not load the preload.
+Limits:
 
-`join-tailnet` continues to control connection ownership separately from the
-network mode. With `auto`, a second call reuses the active connection; it must
-already have the selected route/proxy and port. With `false`, the action never
-creates a connection: use kernel mode for an existing route, or userspace mode
-for an existing loopback proxy. A mismatched mode/port fails the readiness probe
-instead of reconfiguring an active session. Tailscale's existing post-job
-cleanup handles connections created by the action; borrowed connections stay
-under their owner's control.
+- Linux only. The action fails on other runners.
+- The Actions runner must run actions with Node 24.5 or newer. `setup-node`
+  does not change this Node. The preload stops the read step on an older Node.
+- The Tailscale action still needs `sudo` to install Tailscale. Userspace mode
+  removes only the need for TUN and `NET_ADMIN`.
+- The runner's outbound proxy must let the Tailscale downloads and the
+  Tailscale control plane (`*.tailscale.com`) through.
 
-The `userspace-proxy` tests run the actual composite and pinned Vault action on
-Ubuntu and in an Ubuntu container with local HTTPS/OIDC/CONNECT fixtures and
-fake credentials. They cover direct and corporate-proxied OIDC access, Vault
-proxy routing, JSONata selectors, multiline
-values, successful output propagation, denied login, empty failure outputs,
-and watchdog attachment without requiring an OSPO grant. They do not exercise
-live Tailscale bootstrap or OSPO authorization; test those on the target runner
-after its grant is provisioned.
+`join-tailnet` works the same in both modes. With `auto`, a second call in the
+same job uses the connection of the first call; both calls must use the same
+`network-mode` and `proxy-port`. With `false`, the action never joins: use
+`kernel` for a route that the runner already has, or `userspace` with the port
+of a Tailscale proxy that already runs. When the mode or port does not match,
+the wait for Vault fails. The action does not change a connection that it did
+not make.
+
+The `userspace-proxy` test jobs run the action on Ubuntu and in an Ubuntu
+container against a fake Vault, a fake OIDC endpoint and fake proxies on
+127.0.0.1, with fake values only. They test the Vault route through the proxy,
+the OIDC route (direct and through an outbound proxy), a refused login, empty
+outputs on failure and the time limit. They do not start Tailscale and do not
+log in to OSPO Vault. Test that on the target runner.
 
 ## Outputs
 

@@ -16,6 +16,8 @@ import time
 HOST = "vault-ospo-staging.eng-svc.aws.tenstorrent.com"
 OIDC_HOST = "oidc.fixture.invalid"
 ROOT = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "vault-secrets-proxy-fixture"
+# prepare.sh turns the short name `proxy-test` into <org>--<repo>--proxy-test.
+ROLE = os.environ.get("GITHUB_REPOSITORY", "").lower().replace("/", "--") + "--proxy-test"
 
 
 def record(kind, value):
@@ -38,10 +40,8 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         assert self.path == "/v1/auth/jwt-github/login"
-        assert body == {"role": "proxy-test", "jwt": "fake-oidc-jwt"}
+        assert body == {"role": ROLE, "jwt": "fake-oidc-jwt"}
         record("login", self.path)
-        # Give the existing watchdog enough time to attach to the real Node process.
-        time.sleep(1)
         if (ROOT / "deny-login").exists():
             self.respond({"errors": ["fixture: permission denied"]}, 403)
         else:
@@ -49,7 +49,8 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/oidc?"):
-            assert self.headers["Authorization"] == "Bearer fake-request-token"
+            # login.sh sends "bearer"; the scheme is not case-sensitive.
+            assert self.headers["Authorization"].lower() == "bearer fake-request-token"
             record("oidc", self.path)
             self.respond({"value": "fake-oidc-jwt"})
         elif self.path.startswith("/v1/sys/health?"):
@@ -58,6 +59,8 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
         else:
             assert self.headers["X-Vault-Token"] == "fake-vault-token"
             record("secret", self.path)
+            # Give the watchdog time to attach to the real Node process.
+            time.sleep(1)
             if self.path == "/v1/github/token/proxy-test":
                 self.respond({"data": {"token": "fake-github-token"}})
             elif self.path == "/v1/kv/data/proxy-test":

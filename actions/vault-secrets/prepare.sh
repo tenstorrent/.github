@@ -171,6 +171,11 @@ if [ "$join" = true ]; then
   [ -n "${IN_TS_TAGS:-}" ] || fail "input tailscale-tags is empty. It is needed to join the tailnet."
 fi
 
+# Network mode (release 1.2). kernel: the runner reaches Vault through its own
+# routes (default, as in 1.1). userspace: tailscaled runs without TUN and
+# NET_ADMIN, and Vault traffic goes through its loopback proxy. tailscaled
+# serves SOCKS5 and HTTP on one port when both flags give the same address.
+# The GitHub OIDC request keeps the runner's own proxy environment.
 network_mode="${IN_NETWORK_MODE:-kernel}"
 proxy_port="${IN_PROXY_PORT:-1055}"
 proxy_url=""
@@ -179,25 +184,21 @@ proxy_env='{}'
 case "$network_mode" in
   kernel) ;;
   userspace)
-    [ "${RUNNER_OS:-}" = Linux ] || fail "network-mode userspace currently requires a Linux runner."
-    [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$proxy_port" -le 65535 ] \
-      || fail "proxy-port must be a whole number from 1 to 65535."
-    command -v jq >/dev/null 2>&1 || fail "network-mode userspace needs jq on the runner."
+    [ "${RUNNER_OS:-}" = Linux ] || fail "input network-mode userspace needs a Linux runner (this runner: ${RUNNER_OS:-unknown})."
+    if ! [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$proxy_port" -gt 65535 ]; then
+      fail "input proxy-port must be a whole number from 1 to 65535."
+    fi
     proxy_url="http://127.0.0.1:$proxy_port"
     tailscaled_args="--tun=userspace-networking --socks5-server=127.0.0.1:$proxy_port --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
-    # Vault uses a dedicated global agent. The GitHub OIDC client must retain
-    # the runner's original proxy settings (CIv2 requires an outbound proxy).
-    oidc_host="${ACTIONS_ID_TOKEN_REQUEST_URL#*://}"
-    oidc_host="${oidc_host%%[/?#]*}"
-    oidc_host="${oidc_host%%:*}"
-    [[ "$oidc_host" =~ ^[A-Za-z0-9.-]+$ ]] || fail "cannot determine the GitHub OIDC host for proxy bypass."
+    # hashicorp/vault-action has no proxy input. A step-local Node preload
+    # gives its HTTP client (got, Node global agents) the Tailscale proxy.
     preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"
     # NODE_OPTIONS accepts double-quoted paths; escape quotes and backslashes.
     preload="${preload//\\/\\\\}"
     preload="${preload//\"/\\\"}"
-    proxy_env="$(jq -cn --arg proxy "$proxy_url" --arg bypass "$oidc_host" \
+    proxy_env="$(jq -cn --arg proxy "$proxy_url" \
       --arg options "${NODE_OPTIONS:+$NODE_OPTIONS }--require=\"$preload\"" \
-      '{VAULT_SECRETS_PROXY_URL:$proxy, VAULT_SECRETS_OIDC_HOST:$bypass, NODE_OPTIONS:$options}')"
+      '{VAULT_SECRETS_PROXY_URL:$proxy, NODE_OPTIONS:$options}')"
     ;;
   *) fail "input network-mode must be kernel or userspace." ;;
 esac
