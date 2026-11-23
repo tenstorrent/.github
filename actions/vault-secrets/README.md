@@ -61,7 +61,8 @@ uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secret
 
 Current release: [`vault-secrets-v1.1.0`](https://github.com/tenstorrent/.github/releases/tag/vault-secrets-v1.1.0). New releases are listed on the [Releases page](https://github.com/tenstorrent/.github/releases).
 To get the commit of a tag, run
-`git ls-remote https://github.com/tenstorrent/.github refs/tags/vault-secrets-v1.1.0`.
+`gh api repos/tenstorrent/.github/commits/vault-secrets-v1.1.0 --jq .sha`.
+This gives the commit also when the tag is an annotated tag.
 
 | Release | Commit |
 |---|---|
