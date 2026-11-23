@@ -92,9 +92,13 @@ jobs:
           # Test-only: the fixtures are plain-HTTP loopback servers. The action
           # itself clears this variable, so it cannot affect real checkouts.
           CACHEW_TEST_ALLOW_LOOPBACK_HTTP: '1'
+          # test_migrate_parser fails instead of skipping without PyYAML.
+          CACHEW_REQUIRE_PYYAML: '1'
         run: |
           # Without this file the tests that compare with actions/checkout skip.
           test -f "$CHECKOUT_ACTION_JS"
+          # PyYAML is the reference parser for migrate.py's step finder.
+          python3 -c 'import yaml' 2>/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q python3-yaml; }
           cmake --version
           python3 -m unittest discover -s actions/cachew-checkout/tests -v
 
