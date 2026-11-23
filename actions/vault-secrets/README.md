@@ -32,7 +32,7 @@ Pin the action to a full commit SHA. The current release is `vault-secrets-v1.0.
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
         with:
           role: tenstorrent--example-app
-          github-token: tenstorrent--example-app--lib-read
+          github-token: lib-read
           secrets: |
             kv/data/tenstorrent/example-app/upload api_key | UPLOAD_API_KEY
 
@@ -63,7 +63,7 @@ Current release: [`vault-secrets-v1.0.0`](https://github.com/tenstorrent/.github
 | Input | Required | Default | Meaning |
 |---|---|---|---|
 | `role` | no | | Vault role of the workflow. Empty: the default role `<org>--<repo>` of the repository that runs the workflow. A short name, for example `nightly`: the role `<org>--<repo>--nightly` of a named workflow entry. A full name `<org>--<repo>--<name>` is used as is. The action uses lower case. A role of another repository is refused. |
-| `github-token` | no | | Token name. A bare name reads `github/token/<name>`. A value with `/` is the full path, for example `github-members/token/<name>`. |
+| `github-token` | no | | Key of the token in the grant of this repository, for example `lib-read`. The action reads token set `<org>--<repo>--<key>` and finds where Vault keeps it. Still accepted: the full name `<org>--<repo>--<key>`, and (1.0 form) a full Vault path with `/`, which the action reads as is. A name of another repository is refused. |
 | `secrets` | no | | Secrets in [hashicorp/vault-action](https://github.com/hashicorp/vault-action) `secrets` syntax: `<path> <field> \| <NAME> ;` per line. |
 | `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
 | `join-tailnet` | no | `auto` | `auto` joins unless the runner is already on the tailnet. `true` always joins. `false` never joins. |
@@ -146,7 +146,7 @@ on the tailnet and does not join again (`join-tailnet: auto`).
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
         with:
           role: tenstorrent--example-app
-          github-token: tenstorrent--example-app--lib-read
+          github-token: lib-read
 
       - id: vault_kv
         uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
@@ -176,13 +176,16 @@ one job.
 | `This run does not match role ...: Vault refused claim ...` | The run does not match the role: wrong branch, wrong `environment:`, wrong workflow file, or an event the role does not allow. The message shows the facts of the run. | Run from the bound ref, environment or workflow file, or ask OSPO to change the grant. |
 | `Vault refused the login: too many logins (rate limit)` | Too many logins in a short time. | Run the job again in a minute. |
 | `Vault did not answer the login within 15 seconds` | A stalled network connection. | Run the job again. |
-| `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the token name only, without `token` or `\|`. |
+| `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the key of the token only, for example `lib-read`. |
+| `input github-token '...' is not a token of <repo>` | `github-token` is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
+| `Role ... has no grant for GitHub token set ...` | Vault refused the token set in every place where a token can be. The role has no grant for it, the key is wrong, or the grant is not applied yet. | Check the key in `github_tokens` of your workflow entry in your grant. |
+| `Vault did not answer the read of GitHub token set ...` / `Vault refused the read of GitHub token set ...` | A stalled network connection, or a Vault error other than "permission denied". | Run the job again. If it occurs again, report it to OSPO. |
 | `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
 | `Vault ... is not reachable` | The runner is not on the tailnet, the join failed, the tag has no route to Vault, or the URL is wrong. | Read the "Join tailnet" step log. Use `join-tailnet: auto`. |
 | `Vault did not answer within N seconds` | The Vault step took longer than `vault-timeout-seconds`. The likely cause is a stalled network connection on the tailnet. | Run the job again. If it occurs again, report it to OSPO. |
 | `input vault-timeout-seconds must be a whole number from 10 to 600` | Wrong value. | Use a number from 10 to 600, or remove the input to use 120. |
-| Vault: `permission denied` (403) on a `github/token/...` path | The role may not mint that token, or the name is wrong. | Check `github_tokens` in your grant. |
+| Vault: `permission denied` (403) on a `.../token/...` path | Only with a full path in `github-token` or `secrets`. The role may not mint that token, or the path is wrong. | Use `github-token: <key>`, or check `github_tokens` in your grant. |
 | Vault: `permission denied` (403) or not found on a `kv/...` path, or field missing | Wrong path or field, or no read access. | Check the path (`kv/data/...`) and the field name. |
 
 ## Security notes
@@ -194,6 +197,12 @@ one job.
   Vault token before it prints anything, and never puts them in a command
   line. The Vault token goes to the read step as a step output inside the
   action. No output of the action has it.
+- For `github-token` without `/`, the action reads the token with curl
+  (`read-token.sh`). It asks the token engines in a fixed order, least
+  privilege first, and stops at the first token. It masks the token at once and
+  never reads it a second time. Each refused try is a `permission denied`
+  entry in the Vault audit log. The role needs no access that it does not
+  already have.
 - Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
   Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
 
