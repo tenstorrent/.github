@@ -15,7 +15,9 @@ join=auto
 case "$CASE" in
   # Pre-checks: fail before any network call.
   no-inputs) token="" ;;
-  empty-role) role="" ;;
+  # A role of another repository: Vault binds the claim repository, so it
+  # can never work. Refused before any network call.
+  foreign-role) role="${VAULT_ROLE%%--*}--no-such-repo--x" ;;
   bad-token-name) token="bad;name" ;;
   bad-join-value) join=maybe ;;
   http-url) url="http://${VAULT_URL#https://}" ;;
@@ -33,6 +35,12 @@ case "$CASE" in
   wrong-kv-path)
     token=""
     secrets="${VAULT_KV_PATH}-no-such-path $VAULT_KV_FIELD | KV_TEST"
+    ;;
+  # No role: the default role has no metadata-read token. Proves the default
+  # role is used, not the named role (which has this token).
+  default-role-denied)
+    role=""
+    token="${VAULT_ROLE%--vault-action-test}--metadata-read"
     ;;
   wrong-kv-field)
     token=""

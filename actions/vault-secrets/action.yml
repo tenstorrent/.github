@@ -6,8 +6,12 @@ description: >-
 
 inputs:
   role:
-    description: Vault role of this workflow (jwt-github), for example `<org>--<repo>` or `<org>--<repo>--<name>`.
-    required: true
+    description: >-
+      Vault role of this workflow (jwt-github). Empty: the default role `<org>--<repo>`
+      of this repository (lower case). A short name such as `nightly`: `<org>--<repo>--nightly`.
+      A full name `<org>--<repo>--<name>` is used as is (lower case).
+    required: false
+    default: ""
   github-token:
     description: >-
       Name of a GitHub token in Vault. A bare name reads `github/token/<name>`.
@@ -63,8 +67,10 @@ inputs:
     default: tag:tt-gha-vault-ospo
   vault-timeout-seconds:
     description: >-
-      Time limit of the Vault login and read, in seconds (10 to 600). After this
-      time the action stops the Vault step and fails with failed-step `vault`.
+      Time limit of the Vault read, in seconds (10 to 600). After this time the
+      action stops the Vault step and fails with failed-step `vault`. Each request
+      of the Vault login has its own limit of 15 seconds; the OIDC token request
+      is tried up to 3 times.
     required: false
     default: "120"
 
@@ -87,6 +93,7 @@ outputs:
         steps.prepare.outcome == 'failure' && 'prepare' ||
         steps.join.outcome == 'failure' && 'join' ||
         steps.wait.outcome == 'failure' && 'wait' ||
+        steps.login.outcome == 'failure' && 'vault' ||
         steps.watchdog.outcome == 'failure' && 'vault' ||
         steps.vault.outcome == 'failure' && 'vault' ||
         steps.watchdog_stop.outcome == 'failure' && 'vault' ||
@@ -112,6 +119,7 @@ runs:
         IN_TS_TAGS: ${{ inputs.tailscale-tags }}
         IN_VAULT_TIMEOUT: ${{ inputs.vault-timeout-seconds }}
         EVENT_NAME: ${{ github.event_name }}
+        REPOSITORY: ${{ github.repository }}
       run: bash "$GITHUB_ACTION_PATH/prepare.sh"
 
     # Do not pass `args: --accept-routes`: the action sets it, and a second copy fails.
@@ -133,6 +141,22 @@ runs:
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
       run: bash "$GITHUB_ACTION_PATH/wait-for-vault.sh"
 
+    # login.sh masks the OIDC JWT and the Vault token at once. The Vault token
+    # goes to the step output vault-token, which only the read step below uses.
+    # No composite output exposes it. Each request has a limit of 15 seconds;
+    # the OIDC token request is tried up to 3 times, the Vault login one time.
+    - name: Log in to Vault
+      id: login
+      shell: bash
+      env:
+        VAULT_URL: ${{ steps.prepare.outputs.url }}
+        ROLE: ${{ steps.prepare.outputs.role }}
+        ROLE_SOURCE: ${{ steps.prepare.outputs.role-source }}
+        ROLE_INPUT: ${{ inputs.role }}
+        PREFIX: ${{ steps.prepare.outputs.prefix }}
+        REPOSITORY: ${{ github.repository }}
+      run: bash "$GITHUB_ACTION_PATH/login.sh"
+
     # Composite steps cannot have timeout-minutes, and vault-action has no
     # request timeout. A background watchdog stops the Vault step at the limit.
     - name: Start time limit for Vault
@@ -143,7 +167,9 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/watchdog.sh" start
 
     # vault-action masks every value it reads (core.setSecret, per line).
-    - name: Log in to Vault and read
+    # It uses the Vault token from the login step as is (method token: no login,
+    # no lookup).
+    - name: Read from Vault
       id: vault
       uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
       # Empty in kernel mode: preserve the runner's existing environment.
@@ -152,10 +178,8 @@ runs:
       env: ${{ fromJSON(steps.prepare.outputs.proxy-env) }}
       with:
         url: ${{ steps.prepare.outputs.url }}
-        method: jwt
-        path: jwt-github
-        role: ${{ inputs.role }}
-        jwtGithubAudience: ${{ steps.prepare.outputs.url }}
+        method: token
+        token: ${{ steps.login.outputs.vault-token }}
         exportEnv: false
         # Defaults of vault-action v4.0.0, set here so that a later version cannot change them:
         # the Vault login token never goes to the environment or to the outputs.
