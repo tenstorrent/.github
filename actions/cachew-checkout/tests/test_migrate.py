@@ -97,6 +97,10 @@ class RewriteTests(unittest.TestCase):
             "four-space indentation": workflow("runs-on: ubuntu-latest", indent="    "),
             "another case": workflow("runs-on: Ubuntu-Latest"),
             "quoted keys": workflow('"runs-on": windows-2022', jobs='"jobs"'),
+            "an anchored label": workflow("runs-on: &os ubuntu-latest"),
+            "a tagged label": workflow("runs-on: !!str ubuntu-latest"),
+            "an anchored flow sequence": workflow("runs-on: &os [ubuntu-latest]"),
+            "an anchored block sequence": workflow("runs-on: &os\n    - ubuntu-latest"),
         }
         for name, before in hosted.items():
             with self.subTest(hosted=name):
@@ -552,6 +556,26 @@ class RepositoryTests(unittest.TestCase):
             (head + f'      - {{"uses":"{checkout}"}}\n', 5),
             (head + f"      - &a {{uses: {checkout}}}\n", 5),
             (head + f"      - !!map {{uses: !!str {checkout}}}\n", 5),
+            # An explicit key.
+            (head + f"      - ? uses\n        : {checkout}\n", 5),
+            (head + f"      - name: x\n        ? uses\n        : {checkout}\n", 6),
+            # A step a hosted job anchors, run again through an alias here.
+            (
+                "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - &co\n        uses: {checkout}\n"
+                "  build:\n    runs-on: self-hosted\n    steps:\n      - *co\n",
+                10,
+            ),
+            (
+                "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps: &st\n"
+                f"      - uses: {checkout}\n"
+                "  build:\n    runs-on: self-hosted\n    steps: *st\n",
+                8,
+            ),
+            # A job written as a flow mapping.
+            (f"jobs:\n  build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}\n", 2),
+            (f"jobs:\n  build: {{runs-on: [self-hosted, gpu],\n    steps: [{{uses: {checkout}}}]}}\n", 3),
+            (f"jobs: {{build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}}}\n", 1),
         )
         for text, line in cases:
             with self.subTest(text=text):
@@ -566,6 +590,13 @@ class RepositoryTests(unittest.TestCase):
             head + f"      - uses: !!str {checkout} # cachew: keep\n",
             head.replace("self-hosted", "ubuntu-latest") + f"      - uses: !!str {checkout}\n",
             "jobs:\n  build:\n    runs-on: ubuntu-latest\n" f"    steps: [{{uses: {checkout}}}]\n",
+            f"jobs:\n  build: {{runs-on: ubuntu-latest, steps: [{{uses: {checkout}}}]}}\n",
+            f"jobs: {{\n  build: {{\n    runs-on: ubuntu-latest,\n    steps: [\n      {{uses: {checkout}}}\n    ]\n  }}\n}}\n",
+            # Aliased steps whose anchor --write migrates, or a hosted job's.
+            "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+            f"      - &co\n        uses: {checkout} # cachew: keep\n"
+            "  hosted:\n    runs-on: ubuntu-latest\n    steps:\n      - *co\n",
+            head + f"      - ? uses\n        : {checkout} # cachew: keep\n",
             head + f"      - run: |\n          uses: !!str {checkout}\n",
             head + f"      - uses: ./local\n        with:\n          uses: !!str {checkout}\n",
             head + f"      - {{run: echo, with: {{uses: !!str {checkout}}}}}\n",
@@ -595,6 +626,24 @@ class RepositoryTests(unittest.TestCase):
                 for mode in ("--write", "--check"):
                     code, out = self.run_main(mode)
                     self.assertNotIn("ci.yml:", out)
+
+    def test_a_step_item_whose_keys_start_on_a_later_line_or_after_properties_migrates(self):
+        head = "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+        for item in (
+            "      -\n        uses: {}\n",
+            "      - # checkout\n        uses: {}\n",
+            "      - &s\n        uses: {}\n",
+            "      - !!map\n        name: x\n        uses: {}\n",
+            "      - &s uses: {}\n",
+            "      - !!str uses: {}\n",
+            "      - name: &n x\n        uses: {}\n",
+        ):
+            before = head + item.format(PLAIN)
+            with self.subTest(item=item):
+                self.assertEqual(migrate.rewrite(before, SHA), head + item.format(PINNED))
+        # Under another key of the item, it is data.
+        data = head + f"      -\n        with:\n          uses: {PLAIN}\n"
+        self.assertEqual(migrate.rewrite(data, SHA), data)
 
     def test_a_steps_own_comment_survives_migration(self):
         # The version tag comment is replaced; anything else the author wrote

@@ -73,7 +73,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 # it lived before it moved to tenstorrent/.github: never the pinned action.
 LOCAL_COPY = re.compile(r"(?i:\./+\.github/+actions/+cachew-checkout/*)")
 CHECKOUT = re.compile(
-    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*)(?P<quote>['\"]?)"
+    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?:[!&][^\s,\[\]{}]*[ \t]+)*(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*)(?P<quote>['\"]?)"
     r"(?P<value>(?i:actions/checkout)@(?:"
     + "|".join(map(re.escape, MIGRATABLE_REFS))
     + r")|(?i:"
@@ -111,7 +111,7 @@ ACTION_PATHS = {
 ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(\r?\n[ \t]*)|([/\\]))")
 # A uses: key in block style (`uses:` or `- uses:`) or inside a flow mapping
 # (`{uses: ...}`), its key optionally quoted.
-USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
+USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?(?:[!&][^\s,\[\]{}]*[ \t]+)*|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
 # GitHub matches runner labels in any case.
 HOSTED_LABEL = re.compile(r"(?i:ubuntu|windows|macos)-[\w.-]+")
@@ -119,6 +119,8 @@ TOP_LEVEL = re.compile(r"^(?P<quote>['\"]?)(?P<key>[\w-]+)(?P=quote)[ \t]*:")
 # A job's runs-on key, with the value on its line (empty before a block sequence).
 RUNS_ON = re.compile(r"(?P<quote>['\"]?)runs-on(?P=quote)[ \t]*:(?:[ \t]+(?P<value>.*))?")
 TRAILING_COMMENT = re.compile(r"(?:^|[ \t]+)#.*$")
+# Tags and anchors that start a node's text.
+LEADING_PROPERTIES = re.compile(r"^(?:[!&][^\s,\[\]{}]*(?:[ \t]+|$))*")
 
 
 # A line whose value is a block scalar: `key: |`, `- >-`, `key: !!str |2`, with
@@ -200,7 +202,7 @@ def generated(path):
 
 def scalar(text):
     """A label as written: without its comment and its quotes."""
-    text = TRAILING_COMMENT.sub("", text).strip()
+    text = LEADING_PROPERTIES.sub("", TRAILING_COMMENT.sub("", text).strip())
     return text[1:-1] if len(text) > 1 and text[0] in "'\"" and text[-1] == text[0] else text
 
 
@@ -240,16 +242,86 @@ def hosted_jobs(text):
                 listing = False
                 runs_on = RUNS_ON.fullmatch(content)
                 if runs_on:
-                    value = TRAILING_COMMENT.sub("", runs_on["value"] or "").strip()
+                    value = LEADING_PROPERTIES.sub("", TRAILING_COMMENT.sub("", runs_on["value"] or "").strip())
                     if not value:
                         labels, listing = [], True
-                    elif value.startswith("[") and value.endswith("]"):
-                        labels = [scalar(item) for item in value[1:-1].split(",")]
                     else:
-                        labels = [scalar(value)]
+                        labels = runner_labels(value)
         offset += len(line)
     close(offset)
+    for start, end, mapping in flow_jobs(text):
+        labels = None
+        for key, value in flow_entries(text, mapping):
+            if re.fullmatch(r"""(['"]?)runs-on\1""", key):
+                labels = runner_labels(LEADING_PROPERTIES.sub("", TRAILING_COMMENT.sub("", value).strip()))
+        if labels and all(HOSTED_LABEL.fullmatch(label) for label in labels):
+            spans.append((start, end))
     return spans
+
+
+def runner_labels(value):
+    """The labels of a runs-on value on one line: a scalar or a flow sequence."""
+    if value.startswith("[") and value.endswith("]"):
+        return [scalar(item) for item in value[1:-1].split(",")]
+    return [scalar(value)]
+
+
+# From a key's colon to the `{` of a flow mapping value, as SEQUENCE_START.
+MAPPING_START = re.compile(r"(?:[ \t\r\n]+|(?<=[ \t\n])#[^\n]*|[!&][^\s,\[\]{}]*)*\{")
+
+
+def flow_jobs(text):
+    """(start, end, mapping) for each workflow job written as a flow mapping,
+    `build: {runs-on: ..., steps: [...]}`, in a block or flow `jobs:` mapping:
+    start is its line, end the index after its `}`, mapping where its `{` is."""
+    found = []
+    offset = 0
+    for line in lines(text):
+        top = TOP_LEVEL.match(line)
+        if top and top["key"] == "jobs":
+            colon = offset + top.end()
+            start = MAPPING_START.match(text, colon)
+            if start:
+                # jobs: {build: {...}, ...}
+                parent = flow_mapping(text, start.end() - 1)
+                keys = parent[1] if parent else []
+            else:
+                # Block jobs: keys at the indentation of the first one.
+                keys, indent = [], None
+                for row_offset, row, row_indent in content_rows(text[colon:], block_scalars(text[colon:])):
+                    if not row_indent:
+                        break
+                    indent = row_indent if indent is None else indent
+                    if row_indent == indent:
+                        keys.append(colon + row_offset + row_indent)
+            for key in keys:
+                name = re.compile(r"""(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^\s:#,{}\[\]]+)[ \t]*:""").match(text, key)
+                value = name and MAPPING_START.match(text, name.end())
+                mapping = value and flow_mapping(text, value.end() - 1)
+                if mapping:
+                    found.append((text.rfind("\n", 0, key) + 1, mapping[0], value.end() - 1))
+        offset += len(line)
+    return found
+
+
+def flow_entries(text, at):
+    """(key, value) texts of the flow mapping whose `{` is text[at], each value
+    without the `,` or `}` after it."""
+    mapping = flow_mapping(text, at)
+    if not mapping:
+        return []
+    end, keys = mapping
+    entries = []
+    for number, key in enumerate(keys):
+        stop = keys[number + 1] if number + 1 < len(keys) else end
+        name = re.compile(r"""(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^\s:#,{}\[\]]+)""").match(text, key)
+        if not name:
+            continue
+        rest = text[name.end() : stop]
+        colon = re.match(r"[ \t]*:", rest)
+        value = rest[colon.end() :] if colon else ""
+        entries.append((name[0], re.sub(r"[ \t\r\n]*[,}][ \t\r\n]*$", "", value.rstrip()).strip()))
+    return entries
 
 
 def quote_end(text, at, quote):
@@ -362,24 +434,41 @@ def step_lines(text, embedded):
     steps = set()
     for index, (offset, line, indent) in enumerate(rows):
         entries = ENTRIES.match(line)[0]
-        if not re.match(r"""(['"]?)uses\1[ \t]*:""", line[len(entries):]):
-            continue
-        if entries.count("-") > 1:
-            continue
-        key = len(entries)
-        at = index
-        if "-" not in entries:
-            # The item that holds this key: the nearest line indented less, which
-            # must be a `- ` entry whose first key is at this key's column.
-            at = next((i for i in range(index - 1, -1, -1) if rows[i][2] < key), None)
-            if at is None:
-                continue
-            item = ENTRIES.match(rows[at][1])[0]
-            if item.count("-") != 1 or len(item) != key:
-                continue
-        if steps_item(rows, at):
+        # Tags and anchors may come before the key: `- &s uses: ...`.
+        node = NODE_START.match(line, len(entries)).end()
+        if re.match(r"""(['"]?)uses\1[ \t]*:""", line[node:]) and step_item(rows, index):
             steps.add(offset)
     return steps
+
+
+# A sequence entry with no node on its line but properties or a comment: its
+# mapping's keys start on the next line.
+LONE_ENTRY = re.compile(r"[ \t]*-(?:[ \t]+[!&][^\s,\[\]{}]*)*[ \t]*(?:[ \t]#.*)?")
+
+
+def step_item(rows, index):
+    """Whether the key that starts rows[index] (after any `- `) is a key of a
+    mapping that is an item of a block sequence under a `steps:` key."""
+    line = rows[index][1]
+    entries = ENTRIES.match(line)[0]
+    if entries.count("-") > 1:
+        return False
+    key = len(entries)
+    at = index
+    if "-" not in entries:
+        # The item that holds this key: the nearest line indented less, which
+        # must be a `- ` entry whose first key is at this key's column, or a
+        # `-` with nothing after it but properties or a comment.
+        at = next((i for i in range(index - 1, -1, -1) if rows[i][2] < key), None)
+        if at is None:
+            return False
+        item = ENTRIES.match(rows[at][1])[0]
+        lone = LONE_ENTRY.fullmatch(rows[at][1])
+        if not lone and (item.count("-") != 1 or len(item) != key):
+            return False
+        if lone and rows[at + 1][2] != key:
+            return False
+    return steps_item(rows, at)
 
 
 def content_rows(text, embedded):
@@ -548,8 +637,10 @@ def hidden_checkouts(text):
     """Line numbers of checkout steps --write cannot rewrite in place and the
     flow-mapping report (flow_steps) does not name: a step's uses: value that
     is tagged, anchored, an alias, escaped, a block scalar or on a later line,
-    and any uses: key of a step in a flow sequence (`steps: [{uses: ...}]`).
-    Not in GitHub-hosted jobs, scripts or data, or with `# cachew: keep`."""
+    any uses: key of a step in a flow sequence (`steps: [{uses: ...}]`), an
+    explicit `? uses` key, and a step or steps alias whose anchor --write left
+    unchanged (in a hosted job). Not in GitHub-hosted jobs, scripts or data,
+    or with `# cachew: keep`."""
     hosted = hosted_jobs(text)
     embedded = block_scalars(text)
     steps = step_lines(text, embedded)
@@ -581,7 +672,33 @@ def hidden_checkouts(text):
             if "cachew: keep" in text[line_start : len(text) if line_end < 0 else line_end]:
                 continue
             found.append(text.count("\n", 0, at) + 1)
+    for index, (offset, line, indent) in enumerate(rows):
+        if any(start <= offset < end for start, end in hosted):
+            continue
+        explicit = EXPLICIT_USES.fullmatch(line)
+        alias = ALIAS_ITEM.fullmatch(line) or STEPS_ALIAS.fullmatch(line)
+        if explicit and step_item(rows, index):
+            # `? uses` and its `: value` on the lines after it, up to the next
+            # key of this mapping.
+            column = len(ENTRIES.match(line)[0])
+            following = next((o for o, l, i in rows[index + 1 :] if i < column or (i == column and not l.lstrip().startswith(":"))), len(text))
+            fragment = text[offset + len(line) : following]
+            if migratable(fragment + anchored(text, fragment.strip().lstrip(":").strip())) and "cachew: keep" not in fragment:
+                found.append(text.count("\n", 0, offset) + 1)
+        elif alias and (STEPS_LINE.match(line) or steps_item(rows, index)):
+            # A step, or all of a job's steps, another job anchors: an alias
+            # --write cannot rewrite here, whose anchor it left (a hosted job's).
+            target = anchored(text, alias["alias"])
+            if migratable(target) and "cachew: keep" not in target:
+                found.append(text.count("\n", 0, offset) + 1)
     return sorted(set(found + sequence_steps(text, rows, hosted)))
+
+
+# An explicit `? uses` key, its value on a later `: ` line.
+EXPLICIT_USES = re.compile(r"""[ \t]*(?:-[ \t]+)?\?[ \t]+(?:[!&][^\s,\[\]{}]*[ \t]+)*(['"]?)uses\1[ \t]*(?:[ \t]#.*)?""")
+# A sequence entry that is an alias, and a steps: key whose value is one.
+ALIAS_ITEM = re.compile(r"[ \t]*-[ \t]+(?P<alias>(?:![^\s]*[ \t]+)*\*[^\s,\[\]{}]+)[ \t]*(?:[ \t]#.*)?")
+STEPS_ALIAS = re.compile(r"""[ \t]*(?:-[ \t]+)?(['"]?)steps\1[ \t]*:[ \t]+(?P<alias>(?:![^\s]*[ \t]+)*\*[^\s,\[\]{}]+)[ \t]*(?:[ \t]#.*)?""")
 
 
 # A block `steps:` key that starts its line, up to its colon.
@@ -598,14 +715,23 @@ def sequence_steps(text, rows, hosted):
     real `steps:` keys, quote-aware, so brackets in quoted scalars and script
     text that only looks like a steps sequence are not taken for one."""
     found = []
+    sequences = set()
     for offset, line, _ in rows:
         match = STEPS_LINE.match(line)
         if not match or any(start <= offset < end for start, end in hosted):
             continue
         start = SEQUENCE_START.match(text, offset + match.end())
-        if not start:
+        if start:
+            sequences.add(start.end() - 1)
+    for job, _, mapping in flow_jobs(text):
+        if any(start <= job < end for start, end in hosted):
             continue
-        at = start.end() - 1
+        for key in flow_mapping(text, mapping)[1]:
+            name = re.compile(r"""(['"]?)steps\1[ \t]*:""").match(text, key)
+            start = name and SEQUENCE_START.match(text, name.end())
+            if start:
+                sequences.add(start.end() - 1)
+    for at in sorted(sequences):
         children = []
         sequence = flow_mapping(text, at, children)
         if not sequence:
