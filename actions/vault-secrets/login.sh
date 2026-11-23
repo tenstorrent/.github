@@ -6,7 +6,8 @@
 # Secrets: the OIDC JWT and the Vault token. Each gets '::add-mask::' at once,
 # before anything else can print it. Neither is ever echoed, in argv, or in a
 # file. The one exception: the Vault token goes to the step output vault-token,
-# which the next step (hashicorp/vault-action, method token) reads. The action
+# which the token step (read-token.sh) and the read step (hashicorp/vault-action,
+# method token) read. The action
 # exposes no composite output with it. Do not use 'set -x' here.
 #
 # One login, no retry: each refused login is an audit entry and counts against

@@ -34,9 +34,9 @@ The current release is `vault-secrets-v1.0.0`, commit `a697f1bb22ad8b488b0ac63f9
 | `exportEnv: false`, `exportToken: false`, `outputToken: false` | Removed. The action always sets these values. |
 | No `exportEnv`, or `exportEnv: true` | Removed, but do step 2a first. vault-action exports by default; the action does not. |
 | Any other `hashicorp/vault-action` input | Stop. See section 4. |
-| `github/token/<name> token \| GH_TOKEN` | `github-token: <name>`. Read it with `steps.<id>.outputs.token`. |
+| `github/token/<org>--<repo>--<key> token \| GH_TOKEN` | `github-token: <key>` (the part after `<org>--<repo>--`). Read it with `steps.<id>.outputs.token`. |
 | Other lines in `secrets` | Same lines in the `secrets:` input. Read them with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. |
-| Token on another mount, for example `github-members/token/<name> token \| NAME` | One token: `github-token: github-members/token/<name>` (a value with `/` is the full path). More than one token: keep each as a line in `secrets:`. |
+| Token on another mount, for example `github-members/token/<org>--<repo>--<key> token \| NAME` | One token: `github-token: <key>`. The action finds the mount. More than one token: keep each as a line in `secrets:`. |
 | `steps.<id>.outputs.<NAME>` | `fromJSON(steps.<id>.outputs.secrets).<NAME>`. Use `steps.<id>.outputs.token` for the `github-token` value. |
 
 Keep the `;` at the end of each `secrets` line except the last. A `;` after the last line is optional.
@@ -126,7 +126,7 @@ steps:
     uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
     with:
       role: example-org--example-app
-      github-token: example-org--example-app--lib-read
+      github-token: lib-read
       secrets: |
         kv/data/example-org/example-app/upload api_key | UPLOAD_API_KEY
 
@@ -139,7 +139,9 @@ steps:
 
 ### Tokens on another mount
 
-A token path with `/` is a full path. The action does not add `github/token/`.
+For one token, use `github-token: <key>`: the action finds the mount. For more
+than one token, use `secrets` with full paths. A token path with `/` is a full
+path. The action does not add `github/token/`.
 
 ```yaml
 steps:
@@ -191,7 +193,7 @@ steps:
        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
        with:
          role: example-org--example-app
-         github-token: example-org--example-app--lib-read
+         github-token: lib-read
 
      - id: vault_deploy
        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # <date or tag>
@@ -208,6 +210,8 @@ steps:
    Search the file first: `grep -n VAULT_URL <file>`.
 9. Do not change the role name, the token names, or the secret paths. OSPO sets
    them in the grant (see the OSPO ticket). If a name looks wrong, ask OSPO.
+   The one change: `github-token` takes the token key, the part of the token
+   name after `<org>--<repo>--`.
 10. Never print a value. Do not use `echo`, `set -x`, or debug output on a
     value. Print lengths or key names only.
 

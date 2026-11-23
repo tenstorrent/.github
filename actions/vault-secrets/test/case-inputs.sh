@@ -2,7 +2,7 @@
 # Test helper for .github/workflows/vault-secrets-test.yml. Not used by the action.
 # Turns a negative test case name into action inputs.
 #
-# Reads:  CASE VAULT_URL VAULT_ROLE VAULT_TOKEN_NAME VAULT_KV_PATH VAULT_KV_FIELD GITHUB_OUTPUT
+# Reads:  CASE VAULT_URL VAULT_ROLE VAULT_TOKEN_NAME VAULT_TOKEN_KEY VAULT_KV_PATH VAULT_KV_FIELD GITHUB_OUTPUT
 # Writes: outputs role, github-token, secrets, vault-url, join-tailnet
 set -euo pipefail
 
@@ -18,6 +18,9 @@ case "$CASE" in
   # A role of another repository: Vault binds the claim repository, so it
   # can never work. Refused before any network call.
   foreign-role) role="${VAULT_ROLE%%--*}--no-such-repo--x" ;;
+  # A token name of another repository: never in a grant of this repository.
+  # Refused before any network call.
+  foreign-token) token="${VAULT_ROLE%%--*}--no-such-repo--${VAULT_TOKEN_KEY}" ;;
   bad-token-name) token="bad;name" ;;
   bad-join-value) join=maybe ;;
   http-url) url="http://${VAULT_URL#https://}" ;;
@@ -32,6 +35,8 @@ case "$CASE" in
   # Vault refuses (needs the grant to be meaningful).
   wrong-role) role="${VAULT_ROLE}--no-such-role" ;;
   wrong-token) token="${VAULT_TOKEN_NAME}-no-such-token" ;;
+  # A short key that the role has no grant for: denied in every engine.
+  short-key-no-grant) token="no-such-key" ;;
   wrong-kv-path)
     token=""
     secrets="${VAULT_KV_PATH}-no-such-path $VAULT_KV_FIELD | KV_TEST"

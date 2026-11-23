@@ -5,7 +5,7 @@
 # Reads:  IN_ROLE IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
 #         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
 #         REPOSITORY (github.repository) ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
-# Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix
+# Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix, token-set
 set -euo pipefail
 
 DEFAULT_URL='https://vault-ospo.eng-svc.aws.tenstorrent.com'
@@ -76,6 +76,8 @@ while [[ "$secrets" =~ [[:space:]\;]$ ]]; do secrets="${secrets%?}"; done
 while [[ "$secrets" =~ ^[[:space:]\;] ]]; do secrets="${secrets#?}"; done
 
 github_token="${IN_GITHUB_TOKEN:-}"
+github_token="${github_token#"${github_token%%[![:space:]]*}"}"
+github_token="${github_token%"${github_token##*[![:space:]]}"}"
 if [ -z "$github_token" ] && [ -z "$secrets" ]; then
   fail "nothing to get: set github-token, secrets, or both."
 fi
@@ -118,21 +120,41 @@ for entry in "${entries[@]+"${entries[@]}"}"; do
   fi
 done
 
+# GitHub token. The grant module names token sets <org>--<repo>--<key> (lower
+# case), and a role can only have token sets of its own repository. So the
+# rules are the same as for role:
+#   key (no '--')            <prefix>--<key>; read-token.sh finds the engine
+#   <prefix>--<key>          full name; read-token.sh finds the engine
+#   name of another repo     refused here, before any request
+#   value with '/'           full Vault path, read as is by vault-action (1.0 form)
+token_set=""
 spec="$secrets"
-if [ -n "$github_token" ]; then
+if [[ "$github_token" == */* ]]; then
   [[ "$github_token" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] \
-    || fail "input github-token is not a valid token name or path. Use a name such as <org>--<repo>--<key>, or a full path such as github-members/token/<org>--<repo>--<key>."
-  if [[ "$github_token" == */* ]]; then
-    token_path="$github_token"
-  else
-    token_path="github/token/$github_token"
-  fi
-  token_line="$token_path token | $TOKEN_OUTPUT"
+    || fail "input github-token is not a valid token name or path. Use the key of the token in your grant, for example contents-read."
+  token_line="$github_token token | $TOKEN_OUTPUT"
   if [ -n "$spec" ]; then
     spec="$spec ;"$'\n'"$token_line"
   else
     spec="$token_line"
   fi
+elif [ -n "$github_token" ]; then
+  if ! [[ "$github_token" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$github_token" == [-.]* ]]; then
+    fail "input github-token is not a valid token name or path. Allowed: letters, digits, '.', '_', '-'. Use the key of the token in your grant, for example contents-read."
+  fi
+  token_lower="$(lower "$github_token")"
+  if [[ "$token_lower" == "$prefix--"* ]]; then
+    token_set="$token_lower"
+  elif [ "$token_lower" = "$prefix" ] || [[ "$token_lower" == *--* ]]; then
+    fail "input github-token '$github_token' is not a token of $repository. Its token names start with $prefix--. Use the key of the token in your grant, the part after '$prefix--'."
+  else
+    token_set="$prefix--$token_lower"
+  fi
+  token_key="${token_set#"$prefix--"}"
+  if ! [[ "$token_key" =~ ^[a-z0-9_]([a-z0-9._-]*[a-z0-9_])?$ ]]; then
+    fail "input github-token '$github_token' does not give a valid token name ($token_set). Use the key of the token in your grant, for example contents-read."
+  fi
+  [ "${#token_set}" -le 255 ] || fail "input github-token is too long for a token name."
 fi
 
 url="${IN_VAULT_URL:-$DEFAULT_URL}"
@@ -177,5 +199,6 @@ delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   printf 'role=%s\n' "$role"
   printf 'role-source=%s\n' "$role_source"
   printf 'prefix=%s\n' "$prefix"
+  printf 'token-set=%s\n' "$token_set"
   printf 'spec<<%s\n%s\n%s\n' "$delimiter" "$spec" "$delimiter"
 } >>"$GITHUB_OUTPUT"
