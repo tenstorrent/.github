@@ -1,0 +1,811 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Migrate a repository's checkouts to cachew-checkout and verify its pins.
+
+Run from inside the consumer repository (or pass --root). The pin and any
+excluded paths come from that repository's .github/cachew-checkout.json:
+
+    {"action_sha": "<full commit of tenstorrent/.github>",
+     "exclude": ["vendored/tree/"]}
+
+Modes:
+  --write        migrate: actions/checkout v7.0.1 steps and pins to any other
+                 commit (or to the action's old tt-metal location) become
+                 tenstorrent/.github/actions/cachew-checkout@<action_sha>.
+                 With --action-sha, the new pin is saved to the config first.
+  --check        exit 1 if any file still needs --write, or holds a reference
+                 --verify-pins rejects that --write cannot change (a flow-style
+                 step, a ref that is not a commit). --write reports those too.
+  --verify-pins  exit 1 unless every reference pins exactly action_sha.
+
+With no paths, --write and --check inspect every tracked .yml/.yaml under the
+repository root's .github/actions or .github/workflows; a nested .github (a
+test fixture, a vendored tree) is data GitHub does not run. --verify-pins also reads every
+tracked action.yml/action.yaml, wherever a composite action lives, and accepts
+only a reference written as a plain or quoted value that starts and ends on
+its `uses:` line, since that is the only form whose ref it can read exactly.
+A `uses:` value in any other form fails only when its text (or the anchor an
+alias names) could spell the action; other actions' steps, data under a
+`uses:` key and script text are left alone.
+
+Only checkouts of the exact version the action forwards to (actions/checkout
+v7.0.1, by commit or tag) are migrated, so no step changes checkout version. Left
+as plain actions/checkout on purpose:
+  * `uses:` lines inside a block scalar (a `run: |` script that writes another
+    workflow, say): they are text, not steps of this file. A pin to the action
+    there is still moved to action_sha, never turned back into actions/checkout;
+  * steps with a trailing `# cachew: keep` comment;
+  * jobs whose runs-on is a literal GitHub-hosted label (ubuntu-*, windows-*,
+    macos-*, in any case) or a list of only such labels, where cachew is a
+    no-op; --write turns cachew pins there back into actions/checkout;
+  * gh-aw generated lock files (*.lock.yml) and their .md sources, which pin
+    their own checkout version and run on GitHub-hosted runners. --verify-pins
+    still holds a lock file's pins to this action to action_sha, since GitHub
+    runs it: set the pin in the .md source and recompile;
+  * paths under a configured "exclude" prefix (e.g. vendored trees whose
+    workflows run in another repository).
+"""
+
+import argparse
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+ACTION_REPO = "tenstorrent/.github/actions/cachew-checkout"
+# Where the action lived before it moved to tenstorrent/.github. --write repins
+# these; --verify-pins rejects them.
+LEGACY_REPO = "tenstorrent/tt-metal/.github/actions/cachew-checkout"
+# The actions/checkout commit action.yml forwards to (checked by the tests).
+FORWARDED_CHECKOUT = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+MIGRATABLE_REFS = (FORWARDED_CHECKOUT, "v7.0.1")
+CONFIG = Path(".github/cachew-checkout.json")
+SHA = re.compile(r"[0-9a-f]{40}")
+
+# A step that runs a copy of the action kept in the consumer repository, where
+# it lived before it moved to tenstorrent/.github: never the pinned action.
+LOCAL_COPY = re.compile(r"(?i:\./+\.github/+actions/+cachew-checkout/*)")
+CHECKOUT = re.compile(
+    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*)(?P<quote>['\"]?)"
+    r"(?P<value>(?i:actions/checkout)@(?:"
+    + "|".join(map(re.escape, MIGRATABLE_REFS))
+    + r")|(?i:"
+    + re.escape(ACTION_REPO)
+    + "|"
+    + re.escape(LEGACY_REPO)
+    + r")@[0-9a-f]{40}|"
+    + LOCAL_COPY.pattern
+    + r")"
+    r"(?P=quote)(?:[ \t]+#[^\n]*)?[ \t]*$"
+)
+# The pin itself in a CHECKOUT match: the action, at either location, and its commit.
+PIN = re.compile(r"(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")@[0-9a-f]{40}")
+# A flow mapping's uses: key whose value is a checkout --write would migrate,
+# matched where the key starts.
+FLOW_CHECKOUT = re.compile(
+    r"(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t\r\n]*(?P<quote>['\"]?)"
+    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=[ \t\r\n]*[,}])"
+)
+# Any mention of the action with a ref, wherever it appears in a file and however
+# its path is spelled: one word that starts at the owner, names the action and
+# ends in @<ref>. GitHub resolves owner and repository names in any case, so a
+# reference spelled Tenstorrent/.GitHub/... is held to the pin as well.
+ANY_PIN = re.compile(r"(?i:tenstorrent[/\\][^\s@'\"#]*cachew-checkout)[^\s@'\"#]*@[^\s'\"#]+")
+# The action's directory in each repository it has lived in, in lower case.
+ACTION_PATHS = {
+    tuple(repo.lower().split("/")[:2]): tuple(repo.lower().split("/")[2:]) for repo in (ACTION_REPO, LEGACY_REPO)
+}
+# Escape sequences of a double-quoted YAML scalar that can spell a character of
+# the action's name or its @: \xNN, \uNNNN, \UNNNNNNNN, an escaped line break
+# (which joins two lines) and an escaped / or \.
+ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(\r?\n[ \t]*)|([/\\]))")
+# A uses: key in block style (`uses:` or `- uses:`) or inside a flow mapping
+# (`{uses: ...}`), its key optionally quoted.
+USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
+PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
+# GitHub matches runner labels in any case.
+HOSTED_LABEL = re.compile(r"(?i:ubuntu|windows|macos)-[\w.-]+")
+TOP_LEVEL = re.compile(r"^(?P<quote>['\"]?)(?P<key>[\w-]+)(?P=quote)[ \t]*:")
+# A job's runs-on key, with the value on its line (empty before a block sequence).
+RUNS_ON = re.compile(r"(?P<quote>['\"]?)runs-on(?P=quote)[ \t]*:(?:[ \t]+(?P<value>.*))?")
+TRAILING_COMMENT = re.compile(r"(?:^|[ \t]+)#.*$")
+
+
+# A line whose value is a block scalar: `key: |`, `- >-`, `key: !!str |2`, with
+# an optional comment. Its content is every following line indented more deeply.
+BLOCK_SCALAR = re.compile(r"(?:^[ \t]*|[:\-][ \t]+)(?:[!&]\S*[ \t]+)*[|>](?:[+-][1-9]?|[1-9][+-]?)?[ \t]*(?:#.*)?$")
+# The start of a line that holds block sequence entries: `- `, `- - `.
+ENTRIES = re.compile(r"[ \t]*(?:-[ \t]+)*")
+ITEM_SCALAR = re.compile(r"(?:[!&]\S*[ \t]+)*[|>]")
+# Where a node starts on a line: after white space and any tags and anchors.
+NODE_START = re.compile(r"[ \t]*(?:[!&]\S*[ \t]+)*")
+# A plain key and the `: ` after it; the `:` that follows a quoted key.
+PLAIN_KEY = re.compile(r"[^\s#'\"{\[|>][^#]*?:(?:[ \t]+|$)")
+KEY_END = re.compile(r"[ \t]*:(?:[ \t]+|$)")
+# In a flow collection, a quote that starts a node, and a comment.
+FLOW_QUOTE = re.compile(r"(?:^|[{\[,:])[ \t]*(?P<quote>['\"])")
+COMMENT = re.compile(r"(?:^|[ \t])#")
+
+
+def lines(text):
+    """The lines of a file, each with its line feed. Not str.splitlines, which
+    also splits at form feed, U+0085, U+2028 and others that YAML keeps in a line."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
+class ConfigError(Exception):
+    pass
+
+
+def load_config(root, path=None):
+    """{"action_sha": str, "exclude": [str]} from the consumer's config file."""
+    file = Path(path) if path else root / CONFIG
+    try:
+        data = json.loads(file.read_text())
+    except FileNotFoundError:
+        raise ConfigError(f"{file} not found; create it with an action_sha (see --help)")
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise ConfigError(f"{file}: invalid JSON: {error}")
+    except OSError as error:
+        raise ConfigError(f"{file}: cannot be read: {error}")
+    if not isinstance(data, dict):
+        raise ConfigError(f"{file}: must be a JSON object with an action_sha")
+    sha = data.get("action_sha", "")
+    if not isinstance(sha, str) or not SHA.fullmatch(sha):
+        raise ConfigError(f"{file}: action_sha must be a full 40-character commit SHA, got {sha!r}")
+    exclude = data.get("exclude", [])
+    if not isinstance(exclude, list) or not all(isinstance(p, str) and p for p in exclude):
+        raise ConfigError(f"{file}: exclude must be a list of path prefixes")
+    return {"action_sha": sha, "exclude": tuple(exclude), "file": file, "data": data}
+
+
+def save_sha(config, sha):
+    config["data"]["action_sha"] = sha
+    config["file"].write_text(json.dumps(config["data"], indent=2) + "\n")
+    config["action_sha"] = sha
+
+
+def repository_root(start=None):
+    start = start or Path.cwd()
+    return Path(subprocess.check_output(["git", "-C", str(start), "rev-parse", "--show-toplevel"], text=True).strip())
+
+
+def excluded(path, prefixes=()):
+    relative = path.as_posix()
+    if relative.startswith(tuple(prefixes)) or generated(path):
+        return True
+    return path.suffix.lower() == ".md"
+
+
+def generated(path):
+    """A gh-aw lock file, which gh-aw writes from its .md source."""
+    return path.name.lower().endswith(".lock.yml")
+
+
+def scalar(text):
+    """A label as written: without its comment and its quotes."""
+    text = TRAILING_COMMENT.sub("", text).strip()
+    return text[1:-1] if len(text) > 1 and text[0] in "'\"" and text[-1] == text[0] else text
+
+
+def hosted_jobs(text):
+    """Character ranges of the workflow jobs whose runs-on is one or more literal
+    GitHub-hosted labels: a scalar, a flow sequence (`[ubuntu-latest]`) or a block
+    sequence of them. Jobs and their keys are found by their indentation, whatever
+    its width; any key at the jobs' indentation starts a job, however it is
+    written (quoted, anchored), since a job that is not seen would take the next
+    job's runs-on."""
+    spans, start, labels, in_jobs, offset = [], None, None, False, 0
+    job_indent = key_indent = None
+    listing = False
+
+    def close(end):
+        if start is not None and labels and all(HOSTED_LABEL.fullmatch(label) for label in labels):
+            spans.append((start, end))
+
+    for line in lines(text):
+        content = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        top = TOP_LEVEL.match(line)
+        if top:
+            close(offset)
+            start, labels, in_jobs, job_indent = None, None, top["key"] == "jobs", None
+        elif not in_jobs or not content or content.startswith("#") or not indent:
+            pass
+        elif job_indent is None or indent == job_indent:
+            close(offset)
+            start, labels, job_indent, key_indent, listing = offset, None, indent, None, False
+        elif start is not None and indent > job_indent:
+            if key_indent is None:
+                key_indent = indent
+            if listing and indent >= key_indent and (content == "-" or content.startswith("- ")):
+                labels.append(scalar(content[1:]))
+            elif indent == key_indent:
+                listing = False
+                runs_on = RUNS_ON.fullmatch(content)
+                if runs_on:
+                    value = TRAILING_COMMENT.sub("", runs_on["value"] or "").strip()
+                    if not value:
+                        labels, listing = [], True
+                    elif value.startswith("[") and value.endswith("]"):
+                        labels = [scalar(item) for item in value[1:-1].split(",")]
+                    else:
+                        labels = [scalar(value)]
+        offset += len(line)
+    close(offset)
+    return spans
+
+
+def quote_end(text, at, quote):
+    """The index after the quote that closes a quoted scalar whose content starts
+    at `at`, or -1 if the scalar goes on past this line."""
+    while at < len(text):
+        if text[at] == "\\" and quote == '"':
+            at += 2
+        elif text[at] != quote:
+            at += 1
+        elif quote == "'" and text[at + 1 : at + 2] == "'":
+            at += 2
+        else:
+            return at + 1
+    return -1
+
+
+def open_quote(text, at=0, state=None):
+    """(quote, flow) for the quoted scalar still open at the end of a line, or
+    None. `state` is that of a scalar already open where the line starts.
+
+    A quote opens a scalar only where a node starts: after the `- ` entries, after
+    a key's `: `, and in a flow collection after `{`, `[`, `,` or `:`. Anywhere
+    else it is a character of a plain scalar."""
+    quote, flow = state or (None, False)
+    key_seen = False
+    while True:
+        if quote:
+            at = quote_end(text, at, quote)
+            if at < 0:
+                return quote, flow
+            quote = None
+            if not flow:
+                # A quoted key (`"run": ...`) is followed by its value.
+                after = KEY_END.match(text, at)
+                if not after or key_seen:
+                    return None
+                key_seen, at = True, after.end()
+                continue
+        if flow:
+            # To the next quote that starts a node of the flow collection.
+            opener = FLOW_QUOTE.search(text, at)
+            if not opener or COMMENT.search(text, at, opener.start()):
+                return None
+            quote, at = opener["quote"], opener.end()
+            continue
+        at = NODE_START.match(text, at).end()
+        if text[at : at + 1] in ('"', "'"):
+            quote, at = text[at], at + 1
+        elif text[at : at + 1] in ("{", "["):
+            flow = True
+        else:
+            # A plain key, then its value; a plain value holds no quoted scalar.
+            after = PLAIN_KEY.match(text, at)
+            if not after or key_seen:
+                return None
+            key_seen, at = True, after.end()
+
+
+def block_scalars(text):
+    """Character ranges of scalar content that is not on its key's line: block
+    scalars and the later lines of quoted scalars. They hold scripts and other
+    embedded text, where a `uses:` line is not a step."""
+    spans, parent, start, offset, quoted, previous = [], None, None, 0, None, -1
+    for line in lines(text):
+        content = line.strip()
+        indent = len(line) - len(line.lstrip(" \t"))
+        bare = line.rstrip("\r\n")
+        if quoted:
+            spans.append((offset, offset + len(line)))
+            quoted = open_quote(bare, 0, quoted)
+            offset += len(line)
+            continue
+        if parent is not None and content and indent <= parent:
+            spans.append((start, offset))
+            parent = None
+        if parent is None and content and not content.startswith("#"):
+            entries = ENTRIES.match(line)[0]
+            if BLOCK_SCALAR.search(bare):
+                # The scalar's content is indented past the node that holds it: the
+                # key after `- ` (so a sibling key of that step ends it), the `-`
+                # itself when the entry is the scalar, or the line before when the
+                # indicator stands alone on its line.
+                item = ITEM_SCALAR.match(line, len(entries))
+                if item and "-" not in entries:
+                    parent = previous
+                else:
+                    parent = max(indent, len(entries.rstrip()) - 1 if item else len(entries))
+                start = offset + len(line)
+            else:
+                quoted = open_quote(bare, len(entries))
+            previous = len(entries)
+        offset += len(line)
+    if parent is not None:
+        spans.append((start, offset))
+    return spans
+
+
+# A steps: key that opens a block sequence, optionally quoted, anchored or commented.
+STEPS_KEY = re.compile(r"""[ \t]*(?:-[ \t]+)?(?P<q>['"]?)steps(?P=q)[ \t]*:[ \t]*(?:[!&]\S*[ \t]*)*(?:#.*)?""")
+
+
+def step_lines(text, embedded):
+    """Offsets of the lines whose block `uses:` key belongs to a step: a key of a
+    mapping that is an item of a block sequence under a `steps:` key. A uses:
+    key anywhere else (an input, a variable, a matrix entry, a data file) is
+    data, not a step. Lines of block and multi-line quoted scalars, blank lines
+    and comments are passed over."""
+    rows = content_rows(text, embedded)
+    steps = set()
+    for index, (offset, line, indent) in enumerate(rows):
+        entries = ENTRIES.match(line)[0]
+        if not re.match(r"""(['"]?)uses\1[ \t]*:""", line[len(entries):]):
+            continue
+        if entries.count("-") > 1:
+            continue
+        key = len(entries)
+        at = index
+        if "-" not in entries:
+            # The item that holds this key: the nearest line indented less, which
+            # must be a `- ` entry whose first key is at this key's column.
+            at = next((i for i in range(index - 1, -1, -1) if rows[i][2] < key), None)
+            if at is None:
+                continue
+            item = ENTRIES.match(rows[at][1])[0]
+            if item.count("-") != 1 or len(item) != key:
+                continue
+        if steps_item(rows, at):
+            steps.add(offset)
+    return steps
+
+
+def content_rows(text, embedded):
+    """(offset, line, indent) for each line that holds YAML nodes: not blank, not
+    a comment, not inside a block or multi-line quoted scalar."""
+    rows, offset = [], 0
+    for line in lines(text):
+        content = line.strip()
+        inside = any(start <= offset < end for start, end in embedded)
+        if content and not content.startswith("#") and not inside:
+            rows.append((offset, line.rstrip("\r\n"), len(line) - len(line.lstrip(" "))))
+        offset += len(line)
+    return rows
+
+
+def steps_item(rows, at):
+    """Whether the `- ` entry on rows[at] is an item of a sequence under a
+    `steps:` key."""
+    dash = rows[at][2]
+    # The sequence's key: the nearest earlier line that is not an item of it.
+    parent = next(
+        (i for i in range(at - 1, -1, -1) if rows[i][2] < dash or (rows[i][2] == dash and not rows[i][1].lstrip().startswith("-"))),
+        None,
+    )
+    return parent is not None and bool(STEPS_KEY.fullmatch(rows[parent][1]))
+
+
+def flow_mapping(text, at):
+    """(end, keys) for the flow mapping whose `{` is text[at]: the index after
+    its `}` and where each of its own keys starts, leaving out the keys of nested
+    collections and anything in quoted or plain scalars. None if it does not end."""
+    depth, keys, node, key, i = 0, [], True, False, at
+    while i < len(text):
+        c = text[i]
+        if c in "'\"" and node:
+            if key and depth == 1:
+                keys.append(i)
+            i = quote_end(text, i + 1, c)
+            if i < 0:
+                return None
+            node = key = False
+            continue
+        if c in "{[":
+            depth += 1
+            node, key = True, c == "{" and depth == 1
+        elif c in "}]":
+            depth -= 1
+            if depth == 0:
+                return i + 1, keys
+            node = key = False
+        elif c == ",":
+            node, key = True, depth == 1
+        elif c == ":" and text[i + 1 : i + 2] in ("", " ", "\t", "\r", "\n", ",", "}", "]"):
+            node, key = True, False
+        elif c == "#" and text[i - 1 : i] in (" ", "\t", "\n"):
+            i = text.find("\n", i)
+            if i < 0:
+                return None
+        elif c not in " \t\r\n" and node:
+            # A plain scalar: its quotes, braces and colons up to an indicator are text.
+            if key and depth == 1:
+                keys.append(i)
+            node = key = False
+        i += 1
+    return None
+
+
+def rewrite(text, action_sha):
+    if not SHA.fullmatch(action_sha):
+        raise ValueError(f"action_sha must be a full commit SHA, got {action_sha!r}")
+    action = f"{ACTION_REPO}@{action_sha}"
+    hosted = hosted_jobs(text)
+    embedded = block_scalars(text)
+    steps = step_lines(text, embedded)
+
+    def replace(match):
+        if "cachew: keep" in match[0]:
+            return match[0]
+        pinned = not match["value"].lower().startswith("actions/checkout@")
+        if match.start() not in steps:
+            # Text a script writes or prints, or data that is not a step of this
+            # file: a checkout there is not migrated. A pin to the action is still
+            # moved to the current commit, as --verify-pins holds every mention to it,
+            # and nothing else on the line changes: inside a quoted scalar its
+            # quotes and its comment are part of the value.
+            return PIN.sub(action, match[0], count=1) if pinned else match[0]
+        if any(start <= match.start() < end for start, end in hosted):
+            return f"{match['prefix']}{PLAIN_CHECKOUT}" if pinned else match[0]
+        return f"{match['prefix']}{action} # cachew checkout"
+
+    return CHECKOUT.sub(replace, text)
+
+
+def flow_steps(text):
+    """Line numbers of checkout steps written as flow mappings, which --write
+    leaves alone: a uses: key of a flow mapping that is an item of a steps:
+    sequence, in a job that is not GitHub-hosted, without `# cachew: keep` on
+    the mapping's last line."""
+    hosted = hosted_jobs(text)
+    rows = content_rows(text, block_scalars(text))
+    found = []
+    for index, (offset, line, indent) in enumerate(rows):
+        entries = ENTRIES.match(line)[0]
+        if entries.count("-") != 1 or not line[len(entries) :].startswith("{") or not steps_item(rows, index):
+            continue
+        if any(start <= offset < end for start, end in hosted):
+            continue
+        mapping = flow_mapping(text, offset + len(entries))
+        if not mapping:
+            continue
+        end, keys = mapping
+        line_end = text.find("\n", end)
+        if "cachew: keep" in text[end : len(text) if line_end < 0 else line_end]:
+            continue
+        found += [text.count("\n", 0, key) + 1 for key in keys if FLOW_CHECKOUT.match(text, key)]
+    return found
+
+
+def migrate_file(path, action_sha, write=False, root=None, exclude=()):
+    """(changed, flow, left) for one file: whether --write changes it, the line
+    numbers of the flow-style checkout steps it leaves alone, and what
+    --verify-pins would still reject once it is written."""
+    root = root or repository_root()
+    path = Path(path)
+    absolute = path if path.is_absolute() else root / path
+    relative = absolute.resolve().relative_to(root.resolve())
+    if excluded(relative, exclude):
+        return False, [], []
+    before = absolute.read_text()
+    after = rewrite(before, action_sha)
+    if write and before != after:
+        # Keep a file's CRLF line endings, so the diff is only the reference.
+        raw = absolute.read_bytes()
+        crlf = raw.count(b"\r\n") == raw.count(b"\n") > 0
+        with open(absolute, "w", newline="\r\n" if crlf else None) as stream:
+            stream.write(after)
+    # What --write leaves for --verify-pins to reject: a flow-style step, a ref
+    # that is not a commit, a value it cannot read exactly.
+    left = file_problems(
+        relative.as_posix(), after, action_sha, f"--write cannot change it; write uses: {ACTION_REPO}@<sha> on a block-style step"
+    )
+    return before != after, flow_steps(before), left
+
+
+def tracked_consumers(root, exclude=()):
+    paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
+    for value in paths:
+        path = Path(value)
+        if not value or value.startswith(tuple(exclude)):
+            continue
+        # Only the root's: GitHub runs no workflow from a nested .github, and one
+        # there (a test fixture, a vendored tree) is data to leave unchanged.
+        parts = path.parts
+        if len(parts) < 3 or parts[0] != ".github" or parts[1] not in ("actions", "workflows"):
+            continue
+        if path.suffix.lower() in (".yml", ".yaml"):
+            yield path
+
+
+def pinned_files(root, exclude=()):
+    """Every file whose uses: lines GitHub runs: the migrated workflow and action
+    directories, and composite actions (action.yml/action.yaml) anywhere."""
+    paths = set(tracked_consumers(root, exclude))
+    tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
+    for value in tracked:
+        if value and not value.startswith(tuple(exclude)) and Path(value).name in ("action.yml", "action.yaml"):
+            paths.add(Path(value))
+    return sorted(paths)
+
+
+def uses_values(text):
+    """(start, end, value, problem) for each uses: value in YAML text. value is
+    decoded when it is a plain, single-quoted, or escape-free double-quoted scalar
+    on the key's own line; otherwise problem says why it cannot be read exactly,
+    and start:end is all the text the value could take in (see value_extent)."""
+    for key in USES_KEY.finditer(text):
+        for start, end, value, problem in uses_value(text, key):
+            yield (start, value_extent(text, key), value, problem) if problem else (start, end, value, problem)
+
+
+def value_extent(text, key):
+    """The end of the text a uses: value could take in: its own line and every
+    following line indented more deeply than the key (in a flow mapping, than
+    the line where its flow collection starts), as YAML requires of a block or
+    flow scalar's continuation, blank lines included."""
+    holder = key.start("q")
+    if key["flow"]:
+        # The line where the innermost open flow collection starts.
+        depth = 0
+        for holder in range(key.start(), -1, -1):
+            depth += {"}": 1, "]": 1, "{": -1, "[": -1}.get(text[holder], 0)
+            if depth < 0:
+                break
+    line_start = text.rfind("\n", 0, holder) + 1
+    line = text[line_start:holder]
+    column = len(line) - len(line.lstrip(" ")) if key["flow"] else holder - line_start
+    end = text.find("\n", key.end())
+    while end >= 0:
+        following = text.find("\n", end + 1)
+        line = text[end + 1 : len(text) if following < 0 else following]
+        if line.strip() and len(line) - len(line.lstrip(" ")) <= column:
+            return end
+        end = following
+    return len(text)
+
+
+def could_name_action(text):
+    """Whether YAML text could spell this action, once its escapes are decoded
+    and the line breaks and spaces a scalar may fold or join are dropped."""
+    return "cachew-checkout" in re.sub(r"\s", "", unescaped(text)).lower()
+
+
+def anchored(text, value):
+    """The text of every anchor an alias value (`*name`, after any tags) could
+    take: each line that defines &name, from the anchor on, and the lines after
+    it indented more deeply than that line."""
+    alias = re.match(r"(?:![^\s]*[ \t]+)*\*([^\s,\[\]{}]+)", value)
+    if not alias:
+        return ""
+    found = []
+    for definition in re.finditer(r"&" + re.escape(alias[1]) + r"(?=[\s,\[\]{}]|$)", text):
+        line_start = text.rfind("\n", 0, definition.start()) + 1
+        line = text[line_start : definition.start()]
+        column = len(line) - len(line.lstrip(" "))
+        end = text.find("\n", definition.end())
+        while end >= 0:
+            following = text.find("\n", end + 1)
+            line = text[end + 1 : len(text) if following < 0 else following]
+            if line.strip() and len(line) - len(line.lstrip(" ")) <= column:
+                break
+            end = following
+        found.append(text[definition.start() : len(text) if end < 0 else end])
+    return "".join(found)
+
+
+def uses_value(text, key):
+    """uses_values for one uses: key."""
+    start = key.end()
+    while start < len(text) and text[start] in " \t":
+        start += 1
+    line_end = text.find("\n", start)
+    line_end = len(text) if line_end < 0 else line_end
+    line = text[start:line_end].rstrip("\r")
+    if not line or line.startswith("#"):
+        yield start, start, None, "its value is not on the uses: line"
+    elif line[0] in "|>&*!{[":
+        yield start, start, None, "its value is not a plain or quoted scalar"
+    elif line[0] == "'":
+        match = re.match(r"'((?:[^']|'')*)'", line)
+        if not match:
+            yield start, start, None, "its quoted value does not end on the uses: line"
+        else:
+            yield start, start + match.end(), match[1].replace("''", "'"), None
+    elif line[0] == '"':
+        match = re.match(r'"((?:[^"\\]|\\.)*)"', line)
+        if not match:
+            yield start, start, None, "its quoted value does not end on the uses: line"
+        elif "\\" in match[1]:
+            yield start, start, None, "its quoted value contains escape sequences"
+        else:
+            yield start, start + match.end(), match[1], None
+    else:
+        # A plain scalar ends at a comment (` #`) and, in a flow mapping, at , or }.
+        # Only spaces and tabs around it are not part of it: str.rstrip() would also
+        # drop Unicode spaces (U+00A0, U+2028, ...), which Git allows in branch names.
+        end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
+        value = line[: end.start() if end else len(line)].rstrip(" \t")
+        if not end and plain_continues(text, line_end, key):
+            yield start, start, None, "its plain value goes on past the uses: line"
+        else:
+            yield start, start + len(value), value, None
+
+
+def plain_continues(text, line_end, key):
+    """Whether a plain scalar that runs to the end of its uses: line goes on over
+    the next line that is not blank, as YAML reads it: a more deeply indented line
+    in a block mapping, any line in a flow mapping, unless that line is a comment
+    or, in a flow mapping, starts with , } or ]. YAML joins the lines with a space,
+    so the value GitHub runs is not the one on the uses: line."""
+    key_column = key.start("q") - (text.rfind("\n", 0, key.start("q")) + 1)
+    for line in text[line_end + 1 :].split("\n"):
+        content = line.strip(" \t\r")
+        if not content:
+            continue
+        if content.startswith("#"):
+            return False
+        if key["flow"]:
+            return content[0] not in ",}]"
+        return len(line) - len(line.lstrip(" ")) > key_column
+    return False
+
+
+def action_reference(value):
+    """How GitHub reads a decoded uses: value that names the action: (legacy,
+    subdirectory, ref, problem), or None for any other value. The runner splits
+    the part before the @ on / and \\ and drops empty segments, so
+    owner//repo\\actions/cachew-checkout is the action too. The ref is everything
+    after the @, so a branch, short SHA or padded SHA is compared as written, and
+    so is a SHA followed by more characters (`<sha>#x`, `<sha>'x`): Git allows
+    those in branch names, so they are mutable refs that only look like the pin."""
+    path, at, ref = value.partition("@")
+    segments = [segment.lower() for segment in re.split(r"[/\\]", path) if segment]
+    expected = ACTION_PATHS.get(tuple(segments[:2]))
+    if not at or expected is None:
+        return None
+    rest = tuple(segments[2:])
+    if "." in rest or ".." in rest:
+        # They resolve on the runner's disk, to the action's directory or any other.
+        return False, False, ref, "its path has . or .. segments"
+    if rest[: len(expected)] != expected:
+        return None
+    return expected is ACTION_PATHS[tuple(LEGACY_REPO.lower().split("/")[:2])], len(rest) > len(expected), ref, None
+
+
+def unescaped(text):
+    def decode(match):
+        code = match[1] or match[2] or match[3]
+        if code:
+            return chr(int(code, 16)) if int(code, 16) < 0x110000 else match[0]
+        return "" if match[4] else match[5]
+
+    return ESCAPE.sub(decode, text)
+
+
+def file_problems(path, text, action_sha, fix=None):
+    """What --verify-pins rejects in one file's text, one message each. fix, when
+    given, replaces the advice for a reference to another commit or location."""
+    problems = []
+    read = []
+    for start, end, value, problem in uses_values(text):
+        line = text.count("\n", 0, start) + 1
+        if problem:
+            if not could_name_action(text[start:end] + anchored(text, text[start:end])):
+                continue
+            problems.append(f"{path}:{line}: a uses: entry cannot be verified: {problem}; write it as one plain line")
+            continue
+        if LOCAL_COPY.fullmatch(value):
+            problems.append(f"{path}:{line} runs {value}, a copy of the action in this repository; {fix or 'run --write'}")
+            continue
+        reference = action_reference(value)
+        if not reference:
+            continue
+        legacy, subdirectory, ref, problem = reference
+        read.append((start, end))
+        if problem:
+            problems.append(f"{path}:{line} references {value}: {problem}; write {ACTION_REPO}@<sha>")
+        elif legacy:
+            problems.append(f"{path}:{line} references {value}; the action moved to {ACTION_REPO} ({fix or 'run --write'})")
+        elif subdirectory:
+            problems.append(f"{path}:{line} references {value}; reference the action itself, not a subdirectory")
+        elif ref != action_sha:
+            if not fix:
+                fix = "set the pin in its .md source and recompile it with gh aw compile" if generated(Path(path)) else "run --write"
+            problems.append(f"{path}:{line} pins {ref}, expected action_sha {action_sha}; {fix}")
+    # A mention the uses: values above do not account for (a comment, an
+    # anchor, a multi-line value) could still be what GitHub runs.
+    for match in ANY_PIN.finditer(text):
+        if not any(start <= match.start() < end for start, end in read):
+            line = text.count("\n", 0, match.start()) + 1
+            problems.append(f"{path}:{line} mentions {match[0]} outside a uses: value it can verify")
+    # A double-quoted scalar can spell the action with escape sequences
+    # (\x65 for e), under a key the reader above does not take for uses:.
+    if len(ANY_PIN.findall(unescaped(text))) != len(ANY_PIN.findall(text)):
+        problems.append(f"{path} names the action through escape sequences; write it as one plain line")
+    return problems
+
+
+def verify_pins(root, action_sha, exclude=()):
+    """Every reference pins exactly action_sha in tenstorrent/.github: no other
+    commit, no reference to the old tt-metal location, no subdirectory.
+    Whether action_sha exists there is for the caller's CI to check."""
+    problems = []
+    # Excluded prefixes are left out; gh-aw lock files are not, since GitHub
+    # runs them here although --write leaves them to gh-aw.
+    for path in pinned_files(root, exclude):
+        try:
+            text = (root / path).read_text(encoding="utf-8")
+        except (OSError, ValueError) as error:
+            problems.append(f"{path}: cannot be read ({error})")
+            continue
+        problems += file_problems(path.as_posix(), text, action_sha)
+    for problem in problems:
+        print(problem)
+    print("Pins verified." if not problems else f"{len(problems)} pin problem(s).")
+    return 1 if problems else 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--write", action="store_true")
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--verify-pins", action="store_true")
+    parser.add_argument("--root", type=Path, help="consumer repository (default: the Git repository containing the current directory)")
+    parser.add_argument("--config", type=Path, help=f"config file (default: <root>/{CONFIG})")
+    parser.add_argument("--action-sha", help="pin to use instead of the config's; saved to the config with --write")
+    parser.add_argument("paths", nargs="*", type=Path)
+    args = parser.parse_args(argv)
+    root = repository_root(args.root)
+    try:
+        config = load_config(root, args.config)
+    except ConfigError as error:
+        print(error, file=sys.stderr)
+        return 2
+    if args.action_sha:
+        if not SHA.fullmatch(args.action_sha):
+            print(f"--action-sha must be a full 40-character commit SHA, got {args.action_sha!r}", file=sys.stderr)
+            return 2
+        if args.write:
+            save_sha(config, args.action_sha)
+        else:
+            config["action_sha"] = args.action_sha
+    sha, exclude = config["action_sha"], config["exclude"]
+    if args.verify_pins:
+        return verify_pins(root, sha, exclude)
+    # A path argument is relative to the current directory, as in any command.
+    candidates = [Path.cwd() / path for path in args.paths] or tracked_consumers(root, exclude)
+    changed, flow, left, failed = [], [], [], False
+    for path in candidates:
+        try:
+            migrated, lines, problems = migrate_file(path, sha, args.write, root, exclude)
+            if migrated:
+                changed.append(path)
+            flow += [f"{path}:{line}" for line in lines]
+            left += problems
+        except (OSError, ValueError) as error:
+            # One unreadable file (not UTF-8, deleted, outside the repository)
+            # must not stop the run midway with the others unvisited.
+            failed = True
+            print(f"Cannot migrate {path}: {error}", file=sys.stderr)
+    for path in changed:
+        print(f"{'Migrated' if args.write else 'Needs cachew migration:'} {path}")
+    print(f"{len(changed)} file(s) {'updated' if args.write else 'need migration'}.")
+    for place in flow:
+        print(f"{place}: a checkout step written as a flow mapping is not migrated; write it as a block mapping, or add # cachew: keep")
+    for problem in left:
+        print(problem)
+    return 1 if failed or flow or left or (changed and args.check) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
