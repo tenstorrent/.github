@@ -383,6 +383,56 @@ class DownstreamGitTests(unittest.TestCase):
                 self.assert_disabled()
                 self.assertNotIn(b"AUTHORIZATION", active.read_bytes())
 
+    def test_an_appending_fetch_retried_upstream_records_each_remote_once(self):
+        # The cache attempt appends the first remote's refs to FETCH_HEAD before
+        # the second fails; the upstream retry appends them again unless the
+        # wrapper puts FETCH_HEAD back as it was before the attempt.
+        target = self.cloned_dependency()
+        self.dependency("next-dependency")
+        self.run_git("-C", str(target), "remote", "add", "next", self.upstream.url + "/org/next-dependency")
+        (target / ".git/FETCH_HEAD").write_text("earlier\n")
+        self.cache.fail_repo = "next-dependency"
+        self.run_git("-C", str(target), "fetch", "--all", "--append")
+        lines = (target / ".git/FETCH_HEAD").read_text().splitlines()
+        self.assertEqual(lines[0], "earlier")
+        for name in ("cmake-dependency", "next-dependency"):
+            self.assertEqual(sum(line.endswith(f"/org/{name}") for line in lines), 1, lines)
+        # The lines left are the upstream fetch's, not the abandoned cache attempt's.
+        self.assertNotIn(self.cache.url, "\n".join(lines))
+        self.assert_disabled()
+
+    def test_a_cache_attempt_killed_by_a_signal_is_retried_upstream(self):
+        # An OOM kill of the cache attempt's Git is not the cache failing: the
+        # read is retried upstream once and caching stays on.
+        self.dependency("cmake-dependency")
+        killer = self.root / "killing-git"
+        killer.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in *http.lowSpeedLimit=*) kill -9 $$ ;; esac\n'
+            f"exec {shlex.quote(self.real_git)} \"$@\"\n"
+        )
+        killer.chmod(0o700)
+        self.env["CACHEW_REAL_GIT"] = str(killer)
+        target = self.root / "cloned"
+        self.run_git("clone", self.upstream.url + "/org/cmake-dependency", str(target))
+        self.assertTrue((target / "CMakeLists.txt").is_file())
+        self.assertEqual(len(self.upstream.discoveries()), 1)
+        self.assertFalse((self.session / "cache-disabled").exists())
+
+    def test_an_upstream_view_leaves_no_file_when_the_job_file_is_gone(self):
+        # The job file can disappear between the wrapper's check and the copy
+        # (the runner emptying RUNNER_TEMP): the private copy must not be left.
+        sys.path.insert(0, str(fixture.ACTION))
+        self.addCleanup(sys.path.remove, str(fixture.ACTION))
+        import git_wrapper
+
+        (self.session / "global.config").unlink()
+        state = json.loads((self.session / "state.json").read_text())
+        with self.assertRaises(OSError):
+            with git_wrapper.UpstreamView(self.real_git, self.env, self.session, state):
+                pass
+        self.assertEqual(list(self.session.glob("upstream-view-*")), [])
+
     def test_disabled_partial_clone_with_a_stuck_rewrite_lazy_fetches_upstream(self):
         # The rewrite stays in the job file (still locked), so the partial clone
         # made upstream must be pinned there, or its lazy fetches go to the cache.

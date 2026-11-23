@@ -16,7 +16,10 @@ Modes:
                  With --action-sha, the new pin is saved to the config first.
   --check        exit 1 if any file still needs --write, or holds a reference
                  --verify-pins rejects that --write cannot change (a flow-style
-                 step, a ref that is not a commit). --write reports those too.
+                 step, a ref that is not a commit), or a v7.0.1 checkout step it
+                 cannot rewrite in place (a tagged, anchored, aliased, escaped
+                 or multi-line value, a flow-sequence step). --write reports
+                 those too.
   --verify-pins  exit 1 unless every reference pins exactly action_sha.
 
 With no paths, --write and --check inspect every tracked .yml/.yaml under the
@@ -43,8 +46,9 @@ as plain actions/checkout on purpose:
     their own checkout version and run on GitHub-hosted runners. --verify-pins
     still holds a lock file's pins to this action to action_sha, since GitHub
     runs it: set the pin in the .md source and recompile;
-  * paths under a configured "exclude" prefix (e.g. vendored trees whose
-    workflows run in another repository).
+  * paths under a configured "exclude" directory, or that file (e.g. vendored
+    trees whose workflows run in another repository). `tools` excludes tools/,
+    not tools-extra/.
 """
 
 import argparse
@@ -79,8 +83,11 @@ CHECKOUT = re.compile(
     + r")@[0-9a-f]{40}|"
     + LOCAL_COPY.pattern
     + r")"
-    r"(?P=quote)(?:[ \t]+#[^\n]*)?[ \t]*$"
+    r"(?P=quote)(?:[ \t]+#(?P<comment>[^\n]*))?[ \t]*$"
 )
+# The tag comment --write writes after a reference it rewrites, which is
+# replaced; the rest of a step's comment is the author's and stays.
+TAG_COMMENT = re.compile(r"(?i:[ \t]*(?:v\d+(?:\.\d+)*|cachew checkout)(?![\w.])[ \t;,:-]*)*")
 # The pin itself in a CHECKOUT match: the action, at either location, and its commit.
 PIN = re.compile(r"(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")@[0-9a-f]{40}")
 # A flow mapping's uses: key whose value is a checkout --write would migrate,
@@ -158,7 +165,7 @@ def load_config(root, path=None):
         raise ConfigError(f"{file}: action_sha must be a full 40-character commit SHA, got {sha!r}")
     exclude = data.get("exclude", [])
     if not isinstance(exclude, list) or not all(isinstance(p, str) and p for p in exclude):
-        raise ConfigError(f"{file}: exclude must be a list of path prefixes")
+        raise ConfigError(f"{file}: exclude must be a list of directories or files")
     return {"action_sha": sha, "exclude": tuple(exclude), "file": file, "data": data}
 
 
@@ -173,9 +180,15 @@ def repository_root(start=None):
     return Path(subprocess.check_output(["git", "-C", str(start), "rev-parse", "--show-toplevel"], text=True).strip())
 
 
+def under(relative, prefixes):
+    """Whether a repository-relative path is in one of the excluded directories
+    (or is one of the excluded files): `tools` excludes tools/, not tools-extra/."""
+    return any(relative == prefix.rstrip("/") or relative.startswith(prefix.rstrip("/") + "/") for prefix in prefixes)
+
+
 def excluded(path, prefixes=()):
     relative = path.as_posix()
-    if relative.startswith(tuple(prefixes)) or generated(path):
+    if under(relative, prefixes) or generated(path):
         return True
     return path.suffix.lower() == ".md"
 
@@ -453,9 +466,11 @@ def rewrite(text, action_sha):
             # and nothing else on the line changes: inside a quoted scalar its
             # quotes and its comment are part of the value.
             return PIN.sub(action, match[0], count=1) if pinned else match[0]
+        own = TAG_COMMENT.sub("", match["comment"] or "", count=1).strip()
+        own = f"; {own}" if own else ""
         if any(start <= match.start() < end for start, end in hosted):
-            return f"{match['prefix']}{PLAIN_CHECKOUT}" if pinned else match[0]
-        return f"{match['prefix']}{action} # cachew checkout"
+            return f"{match['prefix']}{PLAIN_CHECKOUT}{own}" if pinned else match[0]
+        return f"{match['prefix']}{action} # cachew checkout{own}"
 
     return CHECKOUT.sub(replace, text)
 
@@ -485,6 +500,66 @@ def flow_steps(text):
     return found
 
 
+def migratable(text):
+    """Whether YAML text could spell a checkout --write migrates, once its
+    escapes are decoded and the spaces a scalar may fold or join are dropped."""
+    spelled = re.sub(r"\s", "", unescaped(text)).lower()
+    return "actions/checkout@" in spelled and any(ref.lower() in spelled for ref in MIGRATABLE_REFS)
+
+
+def open_bracket(text, at):
+    """The innermost flow collection still open at text[at], or -1."""
+    depth = 0
+    for i in range(at - 1, -1, -1):
+        depth += {"}": 1, "]": 1, "{": -1, "[": -1}.get(text[i], 0)
+        if depth < 0:
+            return i
+    return -1
+
+
+def hidden_checkouts(text):
+    """Line numbers of checkout steps --write cannot rewrite in place and the
+    flow-mapping report (flow_steps) does not name: a step's uses: value that
+    is tagged, anchored, an alias, escaped, a block scalar or on a later line,
+    and any uses: key of a step in a flow sequence (`steps: [{uses: ...}]`).
+    Not in GitHub-hosted jobs, scripts or data, or with `# cachew: keep`."""
+    hosted = hosted_jobs(text)
+    embedded = block_scalars(text)
+    steps = step_lines(text, embedded)
+    rows = content_rows(text, embedded)
+    found = []
+    for key in USES_KEY.finditer(text):
+        at = key.start("q")
+        if any(start <= at < end for start, end in embedded + hosted):
+            continue
+        for start, end, value, problem in uses_value(text, key):
+            extent = value_extent(text, key) if problem else end
+            fragment = text[start:extent]
+            if not migratable(fragment + (anchored(text, fragment) if problem else "")):
+                continue
+            line_start = text.rfind("\n", 0, at) + 1
+            if key["flow"]:
+                mapping = key.start("flow") if key["flow"] == "{" else open_bracket(text, key.start("flow"))
+                holder = open_bracket(text, mapping) if mapping >= 0 else -1
+                in_sequence = holder >= 0 and text[holder] == "[" and bool(
+                    re.search(r"""(?:^|[\s{,])(['"]?)steps\1[ \t]*:[ \t\r\n]*$""", text[:holder])
+                )
+                item_start = text.rfind("\n", 0, mapping) + 1
+                entries = ENTRIES.fullmatch(text[item_start:mapping])
+                row = next((i for i, (offset, _, _) in enumerate(rows) if offset == item_start), None)
+                item = entries and entries[0].count("-") == 1 and row is not None and steps_item(rows, row)
+                # flow_steps reports a readable one in a `- {...}` step.
+                if not (in_sequence or (item and problem)):
+                    continue
+            elif line_start not in steps or not problem:
+                continue
+            line_end = text.find("\n", extent)
+            if "cachew: keep" in text[line_start : len(text) if line_end < 0 else line_end]:
+                continue
+            found.append(text.count("\n", 0, at) + 1)
+    return found
+
+
 def migrate_file(path, action_sha, write=False, root=None, exclude=()):
     """(changed, flow, left) for one file: whether --write changes it, the line
     numbers of the flow-style checkout steps it leaves alone, and what
@@ -508,6 +583,11 @@ def migrate_file(path, action_sha, write=False, root=None, exclude=()):
     left = file_problems(
         relative.as_posix(), after, action_sha, f"--write cannot change it; write uses: {ACTION_REPO}@<sha> on a block-style step"
     )
+    left += [
+        f"{relative.as_posix()}:{line}: a checkout step --write cannot rewrite in place; write its uses: as one plain"
+        " value on a block-style step, or add # cachew: keep"
+        for line in hidden_checkouts(after)
+    ]
     return before != after, flow_steps(before), left
 
 
@@ -515,7 +595,7 @@ def tracked_consumers(root, exclude=()):
     paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
     for value in paths:
         path = Path(value)
-        if not value or value.startswith(tuple(exclude)):
+        if not value or under(value, exclude):
             continue
         # Only the root's: GitHub runs no workflow from a nested .github, and one
         # there (a test fixture, a vendored tree) is data to leave unchanged.
@@ -532,7 +612,7 @@ def pinned_files(root, exclude=()):
     paths = set(tracked_consumers(root, exclude))
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
     for value in tracked:
-        if value and not value.startswith(tuple(exclude)) and Path(value).name in ("action.yml", "action.yaml"):
+        if value and not under(value, exclude) and Path(value).name in ("action.yml", "action.yaml"):
             paths.add(Path(value))
     return sorted(paths)
 
