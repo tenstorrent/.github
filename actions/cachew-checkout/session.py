@@ -447,6 +447,25 @@ def pin_promisor_remotes(real_git, location, environ, cache, session=None):
         return False
 
 
+WORKSPACE_SCAN_LIMIT = 100_000
+
+
+def workspace_repositories(workspace):
+    """The work trees under the workspace, its own included, and whether every
+    directory was read within WORKSPACE_SCAN_LIMIT. Submodule work trees are
+    found by their .git file. Symbolic links are not followed, and .git
+    directories are not entered."""
+    found, visited = [], 0
+    for directory, subdirectories, files in os.walk(workspace):
+        visited += 1
+        if visited > WORKSPACE_SCAN_LIMIT:
+            return found, False
+        if ".git" in subdirectories or ".git" in files:
+            found.append(Path(directory))
+        subdirectories[:] = [name for name in subdirectories if name != ".git"]
+    return found, True
+
+
 def unpinned(real_git, session, state, environ):
     """Turn caching off after a partial clone could not be pinned: its lazy
     fetches would follow the rewrite with no upstream retry."""
@@ -873,8 +892,21 @@ def activate(environ):
         write_state(session, state)
         append_locked(global_config, render(entries))
         state["active"] = True
-        if inside and not pin_promisor_remotes(real_git, ["-C", str(checkout)], view, cache, session):
-            state = unpinned(real_git, session, state, environ)
+        # Partial clones the wrapper never saw (an earlier step's filtered
+        # checkout or clone, or one a self-hosted runner kept from an earlier
+        # job) would now send their lazy fetches through the new rewrite.
+        repositories, complete = workspace_repositories(workspace)
+        if not complete:
+            print(
+                f"::warning::Cachew checked only the first {WORKSPACE_SCAN_LIMIT} directories of the workspace for "
+                "partial clones to pin; lazy fetches of one it did not reach use the cache with no upstream retry."
+            )
+        if inside:
+            repositories.insert(0, checkout)
+        for repository in dict.fromkeys(repositories):
+            if not pin_promisor_remotes(real_git, ["-C", str(repository)], view, cache, session):
+                state = unpinned(real_git, session, state, environ)
+                break
         write_state(session, state)
         wrapper = session / "bin"
         wrapper.mkdir(mode=0o700, exist_ok=True)

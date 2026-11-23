@@ -915,6 +915,28 @@ class SessionTests(unittest.TestCase):
         self.assertNotIn(self.fixture.cache.url, global_config.read_text())
         self.finish()
 
+    def test_partial_clone_made_before_the_session_keeps_lazy_fetches_upstream(self):
+        # An earlier step made a partial clone (actions/checkout with a filter, or
+        # git clone --filter) before any cachew activation: no wrapper saw it, so
+        # nothing pinned it. Activation's job-wide rewrite must not take its lazy
+        # fetches to the cache, where a failure has no upstream retry.
+        self.fixture.update_main()
+        old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")
+        early = self.fixture.workspace / "early"
+        cloned = subprocess.run(
+            ["git", "clone", "-q", "--filter=blob:none", "--no-checkout", f"{self.fixture.upstream.url}/org/main", str(early)],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(cloned.returncode, 0, cloned.stderr)
+        self.env["CACHEW_PATH"] = "second"
+        self.assertEqual(self.flow(), (True, True))
+        cache_before = list(self.fixture.cache.requests)
+        self.assertEqual(self.real_git("-C", str(early), "cat-file", "-p", old_blob), "main")
+        self.assertEqual(self.fixture.cache.requests, cache_before)
+        self.finish()
+
     def assert_lazy_fetches_stay_upstream(self, cached):
         self.fixture.update_main()
         old_blob = self.real_git("-C", str(self.fixture.project_root / "org/main"), "rev-parse", "HEAD~1:content.txt")

@@ -117,7 +117,12 @@ therefore needs no lazy fetches. `origin` is recorded as the promisor remote wit
 the same filter, as standard checkout does, and an `insteadOf` the repository
 includes pins it upstream, so objects missing later are fetched lazily from upstream
 rather than through the job's cache rewrite. The same applies to sparse
-checkouts and to partial clones the Git wrapper makes. The pin is the URL Git
+checkouts and to partial clones the Git wrapper makes. Each activation also pins
+partial clones already under the workspace that the wrapper never saw: an
+earlier step's filtered checkout or clone, or one a self-hosted runner kept from
+an earlier job. It reads up to 100,000 directories, without following symbolic
+links, and warns when the workspace has more. A partial clone outside the
+workspace made before caching was on is not pinned. The pin is the URL Git
 would use without cachew when it is written, applying the job's own `insteadOf`
 for it at that time. It maps the whole remote URL, so it outranks any rewrite the
 job adds later for that remote, such as a mirror or a token in a URL: while
