@@ -87,8 +87,9 @@ This gives the commit also when the tag is an annotated tag.
 
 ### Upgrade from 1.0
 
-No change is required. Change the pin to the commit of `vault-secrets-v1.1.0`
-and the comment to `# vault-secrets-v1.1.0`.
+To upgrade, change the pin to the commit of `vault-secrets-v1.1.0` and the
+comment to `# vault-secrets-v1.1.0`. No change to the inputs or to the steps
+that use the outputs is required.
 
 You can remove `role` when it is the default role of the repository
 (`<org>--<repo>`). You can change a full role name to its short name, for
