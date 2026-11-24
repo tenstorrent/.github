@@ -28,7 +28,7 @@ STAGE_PREFIX = ".cachew-checkout-"
 # Git messages that mean the cache endpoint itself is unusable, as opposed to a
 # per-repository or per-ref answer. Only these turn caching off for the job.
 TRANSPORT_ERRORS = re.compile(
-    rb"could not resolve|failed to connect|connection (?:refused|reset|timed out)|"
+    rb"could not resolve|failed to connect|connection (?:refused|reset)|"
     rb"ssl certificate|ssl_connect|ssl_read|handshake|certificate verif|server certificate|rpc failed|early eof|remote end hung up|operation too slow|timed out|"
     rb"returned error: (?:3|5)\d\d",
     re.IGNORECASE,
@@ -128,7 +128,7 @@ def loopback_http_allowed(environ):
 # A server origin ends up in Git configuration keys, cache URL paths and the
 # shell command of `git submodule foreach`, so its host is limited to DNS names
 # and IP literals: no quotes, spaces or shell metacharacters.
-HOST = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])(?::[0-9]{1,5})?")
+HOST = re.compile(r"(?P<name>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])(?::(?P<port>[0-9]{1,5}))?")
 # Never handed to child processes as such. Git still receives the token as an
 # Authorization header in command-scoped configuration (GIT_CONFIG_VALUE_n),
 # which every process Git starts inherits: the job's hooks, filter drivers and
@@ -141,10 +141,16 @@ SECRET_ENVIRONMENT = ("CACHEW_TOKEN",)
 TLS_OVERRIDES = ("GIT_SSL_NO_VERIFY",)
 
 
+def as_parsed(value):
+    """A URL as every parser reads it: tabs and line breaks dropped, then C0
+    controls and spaces trimmed from both ends."""
+    return re.sub(r"[\t\n\r]", "", value).strip("".join(map(chr, range(0x21))))
+
+
 # The authority of a URL as written: after the scheme and its slashes, up to the
 # first character that ends it for any of Python, Git or a WHATWG parser.
 AUTHORITY = re.compile(r"[^:/?#\\]*:[/\\]*([^/?#\\]*)")
-METACHARACTER_FREE_HOST = re.compile(r"[A-Za-z0-9.:\[\]-]+")
+METACHARACTER_FREE_HOST = re.compile(r"[A-Za-z0-9.:\[\]-]*")
 
 
 def origin(value, environ):
@@ -155,7 +161,7 @@ def origin(value, environ):
     # well as as parsed, so a URL Python's parser rejects (a malformed IPv6
     # literal, a character NFKC maps to a delimiter) is still refused. Tabs and
     # line breaks are dropped and the ends trimmed first, as every parser does.
-    written = re.sub(r"[\t\n\r]", "", value).strip("".join(map(chr, range(0x21))))
+    written = as_parsed(value)
     authority = AUTHORITY.match(written)
     hosts = [authority[1].rpartition("@")[2]] if authority else []
     try:
@@ -164,7 +170,7 @@ def origin(value, environ):
         url = None
     else:
         hosts.append(url.netloc.rpartition("@")[2])
-    if any(host and not METACHARACTER_FREE_HOST.fullmatch(host) for host in hosts):
+    if any(not METACHARACTER_FREE_HOST.fullmatch(host) for host in hosts):
         raise SecurityViolation("server URL host contains shell or configuration metacharacters")
     if url is None:
         raise Bypass("unsupported server URL")
@@ -182,12 +188,13 @@ def origin(value, environ):
         or url.fragment
     ):
         raise Bypass("unsupported server URL")
-    if not HOST.fullmatch(url.netloc):
+    host = HOST.fullmatch(url.netloc)
+    if not host:
         raise Bypass("unsupported server URL")
     # The origin as actions/checkout reads it (URL.origin): the host in lower case
     # and no default port, so `https://GitHub.com:443` is the same server, and a
     # trusted cache spelled that way is still the trusted cache.
-    name, port = re.fullmatch(r"(.*?)(?::([0-9]+))?", url.netloc.lower()).groups()
+    name, port = host["name"].lower(), host["port"]
     if port is not None:
         if int(port) > 65535:
             raise Bypass("unsupported server URL")
@@ -197,19 +204,27 @@ def origin(value, environ):
 
 
 # The whitespace JavaScript's String.prototype.trim strips, as core.getInput does.
-# Python's str.strip differs: it keeps U+FEFF and strips U+001C-U+001F and U+0085.
-JS_WHITESPACE = "\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
-JS_TRIM = re.compile(f"^[{JS_WHITESPACE}]+|[{JS_WHITESPACE}]+$")
+# Python's str.strip() with no argument differs: it keeps U+FEFF and strips
+# U+001C-U+001F and U+0085.
+JS_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
 # actions/checkout classifies a SHA `ref` after trimming only ASCII whitespace, so a
 # branch named U+FEFF followed by 40 hex digits stays a branch.
-ASCII_TRIM = re.compile(r"^[\t\n\v\f\r ]+|[\t\n\v\f\r ]+$")
+ASCII_WHITESPACE = "\t\n\v\f\r "
 ANY_SHA = re.compile(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}")
 PULL_REQUEST_REF = re.compile(r"refs/pull/[0-9]+/(?:head|merge)")
 
 
+def sha_ref(value):
+    """The commit a ref input names as actions/checkout reads it, or None."""
+    exact = value.strip(ASCII_WHITESPACE)
+    return exact if ANY_SHA.fullmatch(exact) else None
+
+
 def checkout_input(environ, name, default=""):
     """An input as actions/checkout reads it (core.getInput): trimmed, the default when empty."""
-    return JS_TRIM.sub("", environ.get(name, "")) or default
+    return environ.get(name, "").strip(JS_WHITESPACE) or default
 
 
 def submodules_input(environ):
@@ -348,8 +363,8 @@ def cache_candidates(value, upstream, environ):
 def untrusted_https(value):
     """Whether a URL cachew cannot read is an HTTPS URL whose host, read loosely
     (any case, without userinfo, port or a trailing dot), is no trusted cache's."""
-    written = re.sub(r"[\t\n\r]", "", value).strip("".join(map(chr, range(0x21))))
-    scheme = re.match(r"(?i)https:[/\\]*([^/?#\\]*)", written)
+    written = as_parsed(value)
+    scheme = re.match(r"(?i)https:[/\\]*([^/?#\\]+)", written)
     if not scheme:
         return False
     host = scheme[1].rpartition("@")[2]
@@ -492,8 +507,65 @@ def git_version_at_least(executable, minimum):
         ).stdout.decode()
     except (OSError, subprocess.SubprocessError):
         return False
+    version = git_version(output)
+    return version is not None and version >= minimum
+
+
+def git_version(output):
+    """(major, minor) from `git version` output, or None."""
     match = re.search(r"(\d+)\.(\d+)", output)
-    return bool(match) and (int(match[1]), int(match[2])) >= minimum
+    return (int(match[1]), int(match[2])) if match else None
+
+
+def partial_clone_filter(value):
+    """A filter spec as Git and a cache URL can carry it unquoted."""
+    if not re.fullmatch(r"[\w:=+.%-]*", value, re.ASCII):
+        raise Bypass("unsupported partial-clone filter")
+    return value
+
+
+def fetch_depth(value):
+    """Only the spellings int() and JavaScript's Number read alike: Number takes
+    1e1 and 0x10 and rejects 1_0 and non-ASCII digits, which int() accepts."""
+    if not re.fullmatch(r"\+?[0-9]+", value):
+        raise Bypass("unsupported fetch depth")
+    return int(value)
+
+
+def ref_listing(output):
+    """({name: sha}, {name: symref target}) from `git ls-remote` output.
+
+    LF only: str.splitlines also splits on U+2028 and others a ref name may contain."""
+    refs, symrefs = {}, {}
+    for line in output.split("\n"):
+        value, _, name = line.partition("\t")
+        if value.startswith("ref: "):
+            symrefs[name] = value[len("ref: ") :]
+        elif SHA.fullmatch(value):
+            refs[name] = value
+    return refs, symrefs
+
+
+def submodule_repository(child_url, url, upstream):
+    """The owner/name a submodule URL from .gitmodules names on upstream, read
+    relative to its superproject's url."""
+    if child_url.startswith(("./", "../")):
+        child_url = urllib.parse.urljoin(url + "/", child_url)
+    if child_url.startswith("git@github.com:") and upstream == "https://github.com":
+        child_url = "https://github.com/" + child_url[len("git@github.com:") :]
+    if not child_url.startswith(upstream + "/"):
+        raise Bypass("submodule uses another upstream")
+    # Exactly owner/name: no query, fragment or encoded segments in the cache request path.
+    child_path = child_url[len(upstream) + 1 :]
+    if not re.fullmatch(r"[\w./-]*", child_path, re.ASCII):
+        raise SecurityViolation("submodule URL carries a query, encoded segment or other request smuggling")
+    return repository_name(child_path)
+
+
+def submodule_config_files(listing):
+    """Config files named by `git submodule foreach` running
+    `git config --local --show-origin --name-only --get-regexp remote.origin.url`."""
+    return re.findall(r"^file:([^\t]+)\tremote\.origin\.url", listing, re.M)
 
 
 # tempfile.TemporaryDirectory's names: the prefix and eight random characters.
@@ -564,14 +636,13 @@ class Checkout:
             raise Bypass("no token")
         # actions/checkout's getMultilineInput: trim the input, drop empty lines, trim each.
         sparse = checkout_input(environ, "CACHEW_SPARSE_CHECKOUT")
-        self.sparse = [JS_TRIM.sub("", line) for line in sparse.split("\n") if line] if sparse else []
+        self.sparse = [line.strip(JS_WHITESPACE) for line in sparse.split("\n") if line] if sparse else []
         self.sparse_cone = checkout_flag(environ, "CACHEW_SPARSE_CHECKOUT_CONE_MODE", "true")
         self.filter = checkout_input(environ, "CACHEW_FILTER")
         if not self.filter and self.sparse:
             # Standard checkout's implied filter for sparse checkouts.
             self.filter = "blob:none"
-        if self.filter and not re.fullmatch(r"[\w:=+.%-]+", self.filter, re.ASCII):
-            raise Bypass("unsupported partial-clone filter")
+        partial_clone_filter(self.filter)
         # GIT_CONFIG_COUNT (2.31) carries the transport settings below and
         # GIT_CONFIG_GLOBAL (2.32) isolates them; older Git would silently ignore
         # them and use inherited helpers and rewrites.
@@ -593,14 +664,14 @@ class Checkout:
         self.ref = checkout_input(environ, "CACHEW_REF")
         self.commit = ""
         workflow_repository = repository.lower() == environ["GITHUB_REPOSITORY"].lower()
-        exact = ASCII_TRIM.sub("", environ.get("CACHEW_REF", ""))
+        exact = sha_ref(environ.get("CACHEW_REF", ""))
         if not self.ref:
             if workflow_repository:
                 self.ref = environ.get("GITHUB_REF", "")
                 self.commit = environ.get("GITHUB_SHA", "")
                 if self.commit and self.ref and not self.ref.startswith("refs/"):
                     self.ref = f"refs/heads/{self.ref}"
-        elif ANY_SHA.fullmatch(exact):
+        elif exact:
             self.commit, self.ref = exact, ""
         # The default self-checkout always resolves to the event's trusted ref.
         defaulted = workflow_repository and not checkout_input(environ, "CACHEW_REF")
@@ -614,12 +685,7 @@ class Checkout:
             raise SecurityViolation("ref starts with '-' and would be read as a Git option")
         if self.ref.startswith("+") or any(c.isspace() or c in ":*?[^~\\" for c in self.ref):
             raise Bypass("unsupported checkout ref")
-        # Only the spellings int() and JavaScript's Number read alike: Number takes
-        # 1e1 and 0x10 and rejects 1_0 and non-ASCII digits, which int() accepts.
-        depth = checkout_input(environ, "CACHEW_FETCH_DEPTH", "1")
-        if not re.fullmatch(r"\+?[0-9]+", depth):
-            raise Bypass("unsupported fetch depth")
-        self.depth = int(depth)
+        self.depth = fetch_depth(checkout_input(environ, "CACHEW_FETCH_DEPTH", "1"))
         self.tags = checkout_flag(environ, "CACHEW_FETCH_TAGS", "false")
         self.submodules = submodules_input(environ)
         if self.sparse and self.submodules in ("true", "recursive"):
@@ -801,15 +867,7 @@ class Checkout:
             output = self.run_git(
                 [self.git_executable, "ls-remote", *arguments], env, "upstream ref lookup", upstream=True, cwd=empty
             )
-        refs, symrefs = {}, {}
-        # LF only: str.splitlines also splits on U+2028 and others a ref name may contain.
-        for line in output.decode().split("\n"):
-            value, _, name = line.partition("\t")
-            if value.startswith("ref: "):
-                symrefs[name] = value[len("ref: ") :]
-            elif SHA.fullmatch(value):
-                refs[name] = value
-        return refs, symrefs
+        return ref_listing(output.decode())
 
     def lookup(self, ref, *options):
         if self.listed is not None and ref.startswith(("refs/heads/", "refs/tags/")):
@@ -986,17 +1044,7 @@ class Checkout:
             if mode != b"160000" or kind != b"commit" or tree_path.decode() != path:
                 raise Bypass("unsupported submodule gitlink")
             child_url = self.git(gitdir, "config", f"--blob={blob}", "--get", f"submodule.{name}.url").decode().strip()
-            if child_url.startswith(("./", "../")):
-                child_url = urllib.parse.urljoin(url + "/", child_url)
-            if child_url.startswith("git@github.com:") and self.upstream == "https://github.com":
-                child_url = "https://github.com/" + child_url[len("git@github.com:") :]
-            if not child_url.startswith(self.upstream + "/"):
-                raise Bypass("submodule uses another upstream")
-            # Exactly owner/name: no query, fragment or encoded segments in the cache request path.
-            child_path = child_url[len(self.upstream) + 1 :]
-            if not re.fullmatch(r"[\w./-]*", child_path, re.ASCII):
-                raise SecurityViolation("submodule URL carries a query, encoded segment or other request smuggling")
-            repository_name(child_path)
+            child_url = f"{self.upstream}/{submodule_repository(child_url, url, self.upstream)}"
             self.modules += 1
             if level >= MAX_SUBMODULE_DEPTH:
                 raise Bypass(f"submodule nesting deeper than {MAX_SUBMODULE_DEPTH}")
@@ -1060,7 +1108,7 @@ class Checkout:
             *recursive,
             "git config --local --show-origin --name-only --get-regexp remote.origin.url",
         ).decode()
-        for config in re.findall(r"^file:([^\t]+)\tremote\.origin\.url", listed, re.M):
+        for config in submodule_config_files(listed):
             gitdir = os.path.dirname(config)
             container = container_path(os.path.relpath(gitdir, self.workspace_path))
             self.local("config", "--file", config, f"includeIf.gitdir:{gitdir}.path", self.credentials)

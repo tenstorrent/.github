@@ -330,8 +330,12 @@ remotes (other hosts, token-in-URL or SSH URLs) run unchanged and never affect
 the cache. Only failures of the cache endpoint itself (connection, TLS, 3xx/5xx,
 a stall longer than `cachew-fetch-timeout`, or the one-hour hard deadline) remove
 the job's cache rewrite; answers about one repository or ref (401/403/404, a
-missing ref, `ls-remote --exit-code` finding nothing) keep caching on. A failed
-cache clone's partial destination is removed before the upstream retry. Git runs a
+missing ref, `ls-remote --exit-code` finding nothing) keep caching on, and so
+does a cache attempt whose Git is killed by a signal (the OOM killer, say),
+which is retried upstream like any other failure. A failed
+cache clone's partial destination is removed before the upstream retry, and a
+fetch's `FETCH_HEAD` is put back as it was, so a `fetch --append` retry does not
+record the remotes the attempt already fetched a second time. Git runs a
 partial clone's lazy fetches itself, past the wrapper, so whether or not the
 command succeeded, each promisor remote the cache rewrite reaches is pinned: the
 repository's after a clone, fetch, pull or `remote` command, and its submodules'
@@ -437,7 +441,15 @@ python3 migrate.py --verify-pins               # exit 1 unless every reference p
 `--check` and `--write` also fail, naming the line, on a reference to this
 action that `--write` cannot change but `--verify-pins` would reject: a
 flow-style step (`- {uses: ...}`), a branch or tag instead of a commit, or a
-`uses:` value it cannot read exactly. Fix those by hand.
+`uses:` value it cannot read exactly. They also fail on an `actions/checkout`
+v7.0.1 step whose `uses:` value `--write` cannot rewrite in place: tagged
+(`!!str`), anchored, an alias, escaped, a block scalar or on a later line, or a
+step of a flow sequence (`steps: [{uses: ...}]`). Fix those by hand, or add
+`# cachew: keep`.
+
+`--write` replaces the version tag comment after a rewritten reference
+(`# v7.0.1`, `# cachew checkout`) and keeps the rest of the step's comment:
+`# v7.0.1 needs tags` becomes `# cachew checkout; needs tags`.
 
 `--write` replaces `actions/checkout` v7.0.1 steps (the version this action
 forwards to), pins to any other commit of this action, and pins to its old
@@ -463,7 +475,8 @@ plain `actions/checkout` where cachew can never serve the checkout:
   lock file, so `--verify-pins` still holds its pins to this action to
   `action_sha`: set the pin in the `.md` source and recompile with
   `gh aw compile`;
-- paths under an `exclude` prefix.
+- paths under an `exclude` entry, a directory (`tools` excludes `tools/`, not
+  `tools-extra/`) or a single file.
 - files under a `.github` directory other than the repository root's (a
   test fixture or vendored repository): GitHub does not run them.
 

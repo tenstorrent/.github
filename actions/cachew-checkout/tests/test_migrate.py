@@ -21,6 +21,8 @@ spec.loader.exec_module(migrate)
 
 SHA = "a" * 40
 PLAIN = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+# A job's steps: key, with its steps at six spaces.
+JOB = "jobs:\n  j:\n    runs-on: self-hosted\n    steps:\n"
 PINNED = f"tenstorrent/.github/actions/cachew-checkout@{SHA} # cachew checkout"
 STALE = "tenstorrent/.github/actions/cachew-checkout@" + "0" * 40 + " # cachew checkout"
 LEGACY = "tenstorrent/tt-metal/.github/actions/cachew-checkout@" + "1" * 40 + " # cachew checkout"
@@ -60,10 +62,105 @@ class RewriteTests(unittest.TestCase):
             self.assertEqual(migrate.rewrite(before, SHA), before, repr(character))
 
     def test_a_hash_without_a_space_before_it_is_part_of_the_ref(self):
-        before = "steps:\n  - uses: actions/checkout@v7.0.1#x\n  - uses: actions/checkout@v7.0.1 #x\n"
+        before = JOB + "      - uses: actions/checkout@v7.0.1#x\n      - uses: actions/checkout@v7.0.1 #x\n"
         after = migrate.rewrite(before, SHA)
         self.assertIn("uses: actions/checkout@v7.0.1#x\n", after)
         self.assertEqual(after.count(PINNED), 1)
+
+    def test_uses_without_a_space_after_its_colon_is_text_not_a_key(self):
+        # YAML reads `- uses:x` as the string "uses:x", which runs nothing.
+        for value in (PLAIN, STALE, "./.github/actions/cachew-checkout", f"'{STALE}'"):
+            before = f"{JOB}      - uses:{value}\n"
+            with self.subTest(value=value):
+                self.assertEqual(migrate.rewrite(before, SHA), before)
+
+    def test_a_flow_step_is_reported_once_by_the_reader_that_can_read_it(self):
+        # flow_steps names a flow step whose value uses_value reads exactly;
+        # hidden_checkouts names one it cannot, so no step is reported twice.
+        checkout = "actions/checkout@v7.0.1"
+        expected = {
+            f"{{uses: {checkout}}}": ([5], []),
+            f"{{name: a,\n       uses: {checkout}}}": ([6], []),
+            f'{{"uses"  :"{checkout}" # c\n      }}': ([5], []),
+            f"{{uses: # c\n        {checkout}}}": ([], [5]),
+            f"{{uses:\n        {checkout}}}": ([], [5]),
+            f'{{uses: "actions/checkou\\x74@v7.0.1"}}': ([], [5]),
+            f"{{uses:{checkout}}}": ([], []),
+            f"{{uses: {checkout}x}}": ([], []),
+        }
+        for step, (flow, hidden) in expected.items():
+            text = f"jobs:\n  j:\n    runs-on: self-hosted\n    steps:\n    - {step}\n"
+            with self.subTest(step=step):
+                self.assertEqual((migrate.flow_steps(text), sorted(migrate.hidden_checkouts(text))), (flow, hidden))
+
+    def test_steps_are_found_where_github_runs_them_and_nowhere_else(self):
+        # (--write changes the file, lines --write leaves for the report). From
+        # review of PR 22: an escaped JSON-style value, a tagged value next to a
+        # nested input, steps: under a matrix, and an alias in a flow sequence.
+        checkout = "actions/checkout@v7.0.1"
+        hosted = f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps:\n      - &co {{uses: {checkout}}}\n"
+        expected = {
+            f'{JOB}      - {{"uses":"actions/checkout@v7.\\x30.1"}}\n': (False, [5]),
+            f'{JOB}      - {{"uses":"{checkout}"}}\n': (False, [5]),
+            f"{JOB}      - {{uses: !!str ./local, with: {{uses: {checkout}}}}}\n": (False, []),
+            f"{JOB}      - {{uses: ./local, with: {{uses: {checkout}}}}}\n": (False, []),
+            f"{JOB}      - {{uses: !!str {checkout}, with: {{a: b}}}}\n": (False, [5]),
+            # steps: in data: a matrix entry or an input.
+            "jobs:\n  j:\n    runs-on: self-hosted\n    strategy:\n      matrix:\n        include:\n"
+            f"          - steps: [{{uses: {checkout}}}]\n    steps:\n      - run: echo\n": (False, []),
+            "jobs:\n  j:\n    runs-on: self-hosted\n    strategy:\n      matrix:\n        include:\n"
+            f"          - steps:\n              - uses: {checkout}\n    steps:\n      - run: echo\n": (False, []),
+            f"jobs:\n  j:\n    runs-on: self-hosted\n    with:\n      steps:\n        - uses: {checkout}\n": (False, []),
+            f"steps:\n  - uses: {checkout}\n": (False, []),
+            # A composite action's steps run.
+            f"runs:\n  using: composite\n  steps:\n    - uses: {checkout}\n": (True, []),
+            # A hosted job's checkout step, aliased into a self-hosted job.
+            f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [*co]\n": (False, [8]),
+            f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [{{run: x}}, *co]\n": (False, [8]),
+            f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [*co] # cachew: keep\n": (False, []),
+            f"{hosted}  s:\n    runs-on: ubuntu-latest\n    steps: [*co]\n": (False, []),
+            # An anchor is its node only, not the checkout beside it on its line.
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [&script {{run: echo}}, {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps: [*script]\n": (False, []),
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [&script {{run: echo}}, {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps:\n      - *script\n": (False, []),
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [{{run: echo}}, &co {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps:\n      - *co\n": (False, [8]),
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [{{run: echo}}, &co {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps: [*co]\n": (False, [7]),
+        }
+        for text, (changed, left) in expected.items():
+            with self.subTest(text=text):
+                after = migrate.rewrite(text, SHA)
+                self.assertEqual((after != text, sorted(set(migrate.flow_steps(text)) | set(migrate.hidden_checkouts(after)))), (changed, left))
+
+    def test_each_verify_pins_check_reports_what_only_it_sees(self):
+        # --verify-pins layers several readers; each input here reaches one of
+        # them only, so a reader that stops seeing it changes the messages.
+        action, other = "tenstorrent/.github/actions/cachew-checkout", "0" * 40
+        expected = {
+            # A mention outside any uses: value, in any case or with \ separators.
+            f"# Tenstorrent/.GitHub/Actions/Cachew-Checkout@{SHA}": [
+                f"w.yml:5 mentions Tenstorrent/.GitHub/Actions/Cachew-Checkout@{SHA} outside a uses: value it can verify"
+            ],
+            f"- run: echo tenstorrent\\.github\\actions\\cachew-checkout@{SHA}": [
+                f"w.yml:5 mentions tenstorrent\\.github\\actions\\cachew-checkout@{SHA} outside a uses: value it can verify"
+            ],
+            # A quoted uses: key, or one after a comma, is still a uses: value.
+            f"- 'uses': {action}@{other}": [f"w.yml:5 pins {other}, expected action_sha {SHA}; run --write"],
+            f'- "uses": {action}@{other}': [f"w.yml:5 pins {other}, expected action_sha {SHA}; run --write"],
+            f"- {{name: x,uses: {action}@{other}}}": [f"w.yml:5 pins {other}, expected action_sha {SHA}; run --write"],
+            # \ separates path segments; it is no escape in a plain scalar.
+            "- uses: tenstorrent\\.github\\actions\\cachew-checkout@main": [
+                f"w.yml:5 pins main, expected action_sha {SHA}; run --write"
+            ],
+            # An @ inside the path is not the action.
+            "- run: echo tenstorrent/.github/x@y/cachew-checkout@v1": [],
+        }
+        for step, messages in expected.items():
+            text = f"jobs:\n  j:\n    runs-on: self-hosted\n    steps:\n      {step}\n"
+            with self.subTest(step=step):
+                self.assertEqual(migrate.file_problems("w.yml", text, SHA), messages)
 
     def test_a_quoted_or_anchored_job_key_still_ends_the_job_before_it(self):
         # Unseen, the hosted job's runs-on counted for the self-hosted job too,
@@ -97,6 +194,12 @@ class RewriteTests(unittest.TestCase):
             "four-space indentation": workflow("runs-on: ubuntu-latest", indent="    "),
             "another case": workflow("runs-on: Ubuntu-Latest"),
             "quoted keys": workflow('"runs-on": windows-2022', jobs='"jobs"'),
+            "an anchored label": workflow("runs-on: &os ubuntu-latest"),
+            "a tagged label": workflow("runs-on: !!str ubuntu-latest"),
+            "an anchored flow sequence": workflow("runs-on: &os [ubuntu-latest]"),
+            "an anchored block sequence": workflow("runs-on: &os\n    - ubuntu-latest"),
+            "a label on the next line": workflow("runs-on:\n    ubuntu-latest  # hosted"),
+            "a flow sequence on the next line": workflow("runs-on:\n    [ubuntu-latest]"),
         }
         for name, before in hosted.items():
             with self.subTest(hosted=name):
@@ -107,6 +210,7 @@ class RewriteTests(unittest.TestCase):
             "a block sequence with another label": workflow("runs-on:\n    - ubuntu-22.04\n    - gpu"),
             "an expression": workflow("runs-on: ${{ matrix.os }}"),
             "an empty sequence": workflow("runs-on: []"),
+            "a label over two lines": workflow("runs-on:\n    ubuntu-latest\n    gpu"),
             "a runner group": workflow("runs-on:\n    group: large\n    labels: ubuntu-latest"),
             "a deeper runs-on key": workflow("runs-on: tt-large\n  env:\n    runs-on: ubuntu-latest"),
         }
@@ -333,7 +437,7 @@ jobs:
 
     def test_other_checkout_versions_are_left_alone(self):
         # Floating tags too: v7 may point past the v7.0.1 the action forwards to.
-        text = "steps:\n  - uses: actions/checkout@v4\n  - uses: actions/checkout@main\n  - uses: actions/checkout@v7\n"
+        text = JOB + "      - uses: actions/checkout@v4\n      - uses: actions/checkout@main\n      - uses: actions/checkout@v7\n"
         self.assertEqual(migrate.rewrite(text, SHA), text)
 
     def test_rewrite_refuses_a_short_sha(self):
@@ -523,6 +627,183 @@ class RepositoryTests(unittest.TestCase):
                 for mode in ("--write", "--check"):
                     code, out = self.run_main(mode)
                     self.assertNotIn("ci.yml:", out)
+
+    def test_checkouts_in_forms_write_cannot_read_are_reported_not_skipped(self):
+        # GitHub runs these steps' checkout, but --write cannot rewrite their
+        # value in place: --check and --write must name each one and fail.
+        workflow = self.root / ".github/workflows/ci.yml"
+        checkout = PLAIN.split(" #")[0]
+        escaped = checkout.replace("/", "\\x2f", 1)
+        head = "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+        cases = (
+            (head + f"      - uses: !!str {checkout}\n", 5),
+            (head + f"      - uses: &c {checkout}\n", 5),
+            (head + f"      - name: &c {checkout}\n        run: echo\n      - uses: *c\n", 7),
+            (head + f"      - uses:\n          {checkout}\n", 5),
+            (head + f"      - uses: >-\n          {checkout}\n", 5),
+            (head + f'      - uses: "{escaped}"\n', 5),
+            (head + f"      - {{uses: !!str {checkout}}}\n", 5),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: [{{uses: {checkout}}}]\n", 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      [{{run: echo}},\n       {{uses: {checkout}}}]\n", 6),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: &s [{{uses: {checkout}}}]\n", 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: !!seq [{{uses: {checkout}}}]\n", 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: "Checkout [source", uses: {checkout}}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: !!str "Checkout [source", uses: {checkout}}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{name: &n "Checkout [source", uses: {checkout}}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{"uses":"{checkout}"}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f'    "steps": [{{"name":"x","uses":"{checkout}"}}]\n', 4),
+            ("jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps:\n      !!seq\n      [{{uses: {checkout}}}]\n", 6),
+            (head + f'      - {{"uses":"{checkout}"}}\n', 5),
+            (head + f"      - &a {{uses: {checkout}}}\n", 5),
+            (head + f"      - !!map {{uses: !!str {checkout}}}\n", 5),
+            # An explicit key.
+            (head + f"      - ? uses\n        : {checkout}\n", 5),
+            (head + f"      - name: x\n        ? uses\n        : {checkout}\n", 6),
+            # A step a hosted job anchors, run again through an alias here.
+            (
+                "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - &co\n        uses: {checkout}\n"
+                "  build:\n    runs-on: self-hosted\n    steps:\n      - *co\n",
+                10,
+            ),
+            (
+                "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps: &st\n"
+                f"      - uses: {checkout}\n"
+                "  build:\n    runs-on: self-hosted\n    steps: *st\n",
+                8,
+            ),
+            # A job written as a flow mapping.
+            (f"jobs:\n  build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}\n", 2),
+            (f"jobs:\n  build: {{runs-on: [self-hosted, gpu],\n    steps: [{{uses: {checkout}}}]}}\n", 3),
+            (f"jobs: {{build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}}}\n", 1),
+            # A hosted job beside it on the same line covers only itself.
+            (
+                "jobs: {hosted: {runs-on: ubuntu-latest, steps: [{run: echo}]},"
+                f" build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}}}}\n",
+                1,
+            ),
+            (
+                f"jobs: {{build: {{runs-on: self-hosted, steps: [{{uses: {checkout}}}]}},"
+                " hosted: {runs-on: ubuntu-latest, steps: [{run: echo}]}}\n",
+                1,
+            ),
+        )
+        for text, line in cases:
+            with self.subTest(text=text):
+                workflow.write_text(text)
+                for mode in ("--check", "--write"):
+                    code, out = self.run_main(mode)
+                    self.assertEqual(code, 1, out)
+                    self.assertIn(f".github/workflows/ci.yml:{line}", out)
+                self.assertEqual(workflow.read_text(), text)
+        # Kept, hosted, script text and data are still left alone.
+        for text in (
+            head + f"      - uses: !!str {checkout} # cachew: keep\n",
+            head.replace("self-hosted", "ubuntu-latest") + f"      - uses: !!str {checkout}\n",
+            "jobs:\n  build:\n    runs-on: ubuntu-latest\n" f"    steps: [{{uses: {checkout}}}]\n",
+            f"jobs:\n  build: {{runs-on: ubuntu-latest, steps: [{{uses: {checkout}}}]}}\n",
+            f"jobs: {{\n  build: {{\n    runs-on: ubuntu-latest,\n    steps: [\n      {{uses: {checkout}}}\n    ]\n  }}\n}}\n",
+            # A comment after a flow job's runs-on is not part of its label.
+            "jobs:\n  build: {\n    runs-on: ubuntu-latest, # hosted runner\n"
+            f"    steps: [{{uses: {checkout}}}]\n  }}\n",
+            "jobs:\n  build: {\n    runs-on: [ubuntu-latest], # hosted runner\n"
+            f"    steps: [{{uses: {checkout}}}]\n  }}\n",
+            # An aliased step whose anchor runs only a script, or whose checkout
+            # is data under another key, and aliases kept by their own comment.
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - &script\n        run: echo {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps:\n      - *script\n",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - &step\n        uses: ./local\n        with:\n          uses: {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps:\n      - *step\n",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps:\n"
+            f"      - &co\n        uses: {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps:\n      - *co # cachew: keep\n",
+            "jobs:\n  hosted:\n    runs-on: ubuntu-latest\n    steps: &st\n"
+            f"      - uses: {checkout}\n"
+            "  build:\n    runs-on: self-hosted\n    steps: *st # cachew: keep\n",
+            # Aliased steps whose anchor --write migrates, or a hosted job's.
+            "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+            f"      - &co\n        uses: {checkout} # cachew: keep\n"
+            "  hosted:\n    runs-on: ubuntu-latest\n    steps:\n      - *co\n",
+            head + f"      - ? uses\n        : {checkout} # cachew: keep\n",
+            head + f"      - run: |\n          uses: !!str {checkout}\n",
+            head + f"      - uses: ./local\n        with:\n          uses: !!str {checkout}\n",
+            head + f"      - {{run: echo, with: {{uses: !!str {checkout}}}}}\n",
+            "jobs:\n  build:\n    runs-on: self-hosted\n" f"    env: [{{uses: {checkout}}}]\n    steps:\n      - run: echo\n",
+            # Another version, a ref that only starts like this one, or the
+            # checkout named only in a comment.
+            head + f"      - uses: !!str {checkout.replace('3d3c42e5', '00000000')}\n",
+            head + "      - uses: !!str actions/checkout@v7.0.10\n",
+            head + f"      - uses: !!str {checkout}0\n",
+            head + "      - uses: !!str myactions/checkout@v7.0.1\n",
+            head + f"      - uses: !!str ./local # was {checkout}\n",
+            head + f"      - uses: # was {checkout}\n          ./local\n",
+            # Script text that only looks like a steps sequence, and a uses:
+            # inside a quoted scalar of a step.
+            head + f"      - run: 'echo steps: [{{uses: {checkout}}}]'\n",
+            head + f'      - run: "echo steps: [{{uses: {checkout}}}]"\n',
+            "jobs:\n  build:\n    runs-on: self-hosted\n" f'    steps: [{{run: "echo uses: {checkout}"}}]\n',
+            "jobs:\n  build:\n    runs-on: self-hosted\n" f"    steps: [{{uses: {checkout}}}] # cachew: keep\n",
+            # An item of a multi-line sequence kept by its own trailing comment.
+            "jobs:\n  build:\n    runs-on: self-hosted\n"
+            f"    steps: [\n      {{uses: {checkout}}}, # cachew: keep\n      {{run: echo}}\n    ]\n",
+            "jobs:\n  build:\n    runs-on: self-hosted\n"
+            f"    steps: [\n      {{run: echo}},\n      {{uses: {checkout}}} # cachew: keep\n    ]\n",
+        ):
+            with self.subTest(text=text):
+                workflow.write_text(text)
+                for mode in ("--write", "--check"):
+                    code, out = self.run_main(mode)
+                    self.assertNotIn("ci.yml:", out)
+
+    def test_a_step_item_whose_keys_start_on_a_later_line_or_after_properties_migrates(self):
+        head = "jobs:\n  build:\n    runs-on: self-hosted\n    steps:\n"
+        for item in (
+            "      -\n        uses: {}\n",
+            "      - # checkout\n        uses: {}\n",
+            "      - &s\n        uses: {}\n",
+            "      - !!map\n        name: x\n        uses: {}\n",
+            "      - &s uses: {}\n",
+            "      - !!str uses: {}\n",
+            "      - name: &n x\n        uses: {}\n",
+        ):
+            before = head + item.format(PLAIN)
+            with self.subTest(item=item):
+                self.assertEqual(migrate.rewrite(before, SHA), head + item.format(PINNED))
+        # Under another key of the item, it is data.
+        data = head + f"      -\n        with:\n          uses: {PLAIN}\n"
+        self.assertEqual(migrate.rewrite(data, SHA), data)
+
+    def test_a_steps_own_comment_survives_migration(self):
+        # The version tag comment is replaced; anything else the author wrote
+        # after it stays on the line.
+        checkout = PLAIN.split(" #")[0]
+        pin = PINNED.split(" #")[0]
+        head = "jobs:\n  build:\n    runs-on: {}\n    steps:\n"
+        for runner, before, after in (
+            ("self-hosted", f"{checkout} # v7.0.1 needs full history", f"{pin} # cachew checkout; needs full history"),
+            ("self-hosted", f"{checkout} # needs full history", f"{pin} # cachew checkout; needs full history"),
+            ("self-hosted", f"{checkout} # v7.0.1", f"{pin} # cachew checkout"),
+            ("ubuntu-latest", f"{pin} # cachew checkout; needs tags", f"{PLAIN}; needs tags"),
+            ("ubuntu-latest", f"{pin} # cachew checkout", PLAIN),
+        ):
+            with self.subTest(before=before):
+                text = head.format(runner) + f"      - uses: {before}\n"
+                self.assertEqual(migrate.rewrite(text, SHA), head.format(runner) + f"      - uses: {after}\n")
+
+    def test_an_exclude_prefix_is_a_whole_directory(self):
+        # "tools" excludes tools/, not a sibling tools-extra/ whose action GitHub runs.
+        self.write_config({"action_sha": SHA, "exclude": ["tools"]})
+        for name in ("tools/x/action.yml", "tools-extra/x/action.yml"):
+            (self.root / name).parent.mkdir(parents=True)
+            (self.root / name).write_text(f"runs:\n  using: composite\n  steps:\n    - uses: {STALE}\n")
+        self.assertEqual(self.run_main("--write")[0], 0)
+        subprocess.run(["git", "-C", str(self.root), "add", "-A"], check=True)
+        code, out = self.run_main("--verify-pins")
+        self.assertEqual(code, 1, out)
+        self.assertIn("tools-extra/x/action.yml", out)
+        self.assertNotIn("tools/x/action.yml", out)
 
     def test_a_config_that_is_not_an_object_is_reported_in_every_mode(self):
         for text in ("[]", "5", "null", '"x"', "\udcff"):
@@ -748,8 +1029,8 @@ class RepositoryTests(unittest.TestCase):
     def test_a_path_argument_is_read_from_the_current_directory(self):
         nested = self.root / "sub"
         nested.mkdir()
-        (nested / "wf.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
-        (self.root / "wf.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        (nested / "wf.yml").write_text(f"{JOB}      - uses: {PLAIN}\n")
+        (self.root / "wf.yml").write_text(f"{JOB}      - uses: {PLAIN}\n")
         with contextlib.chdir(nested):
             code, out = self.run_main("--write", "wf.yml")
         self.assertEqual(code, 0, out)
@@ -759,7 +1040,7 @@ class RepositoryTests(unittest.TestCase):
     def test_a_file_that_cannot_be_read_is_reported_and_the_rest_are_migrated(self):
         workflows = self.root / ".github/workflows"
         (workflows / "aaa-binary.yml").write_bytes(b"\xff\xfe uses\n")
-        (workflows / "zzz.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        (workflows / "zzz.yml").write_text(f"{JOB}      - uses: {PLAIN}\n")
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
         code, out = self.run_main("--write")
         self.assertEqual(code, 1, out)
@@ -771,7 +1052,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn("aaa-binary.yml", out)
 
     def test_bad_config_is_reported(self):
-        for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of path prefixes")):
+        for data, message in (({"action_sha": "main"}, "full 40-character"), ({"action_sha": SHA, "exclude": "x"}, "list of directories or files")):
             self.write_config(data)
             code, out = self.run_main("--check")
             self.assertEqual(code, 2)
