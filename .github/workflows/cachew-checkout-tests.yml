@@ -26,7 +26,7 @@ on:
       runner:
         description: Self-hosted runner label for the live smoke test
         type: string
-        default: tt-ubuntu-2204-large-stable
+        default: tt-ubuntu-light
       cachew-url:
         description: Cachew HTTPS origin for the live smoke test
         type: choice
