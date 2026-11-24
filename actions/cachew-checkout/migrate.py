@@ -73,7 +73,7 @@ SHA = re.compile(r"[0-9a-f]{40}")
 # it lived before it moved to tenstorrent/.github: never the pinned action.
 LOCAL_COPY = re.compile(r"(?i:\./+\.github/+actions/+cachew-checkout/*)")
 CHECKOUT = re.compile(
-    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?:[!&][^\s,\[\]{}]*[ \t]+)*(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]*)(?P<quote>['\"]?)"
+    r"(?m)^(?P<prefix>[ \t]*(?:-[ \t]+)?(?:[!&][^\s,\[\]{}]*[ \t]+)*(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t]+)(?P<quote>['\"]?)"
     r"(?P<value>(?i:actions/checkout)@(?:"
     + "|".join(map(re.escape, MIGRATABLE_REFS))
     + r")|(?i:"
@@ -244,6 +244,13 @@ def hosted_jobs(text):
                 key_indent = indent
             if listing and indent >= key_indent and (content == "-" or content.startswith("- ")):
                 labels.append(scalar(content[1:]))
+            elif listing and indent > key_indent:
+                # The value on the lines after an empty runs-on:, a scalar or a
+                # flow sequence; a second line makes it a multi-line scalar.
+                if labels == []:
+                    labels = runner_labels(LEADING_PROPERTIES.sub("", TRAILING_COMMENT.sub("", content).strip()))
+                else:
+                    labels, listing = None, False
             elif indent == key_indent:
                 listing = False
                 runs_on = RUNS_ON.fullmatch(content)
@@ -473,7 +480,7 @@ def step_lines(text, embedded):
         entries = ENTRIES.match(line)[0]
         # Tags and anchors may come before the key: `- &s uses: ...`.
         node = NODE_START.match(line, len(entries)).end()
-        if re.match(r"""(['"]?)uses\1[ \t]*:""", line[node:]) and step_item(rows, index):
+        if re.match(r"""(['"]?)uses\1[ \t]*:(?=[ \t]|$)""", line[node:]) and step_item(rows, index):
             steps.add(offset)
     return steps
 

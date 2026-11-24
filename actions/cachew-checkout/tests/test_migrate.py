@@ -65,6 +65,41 @@ class RewriteTests(unittest.TestCase):
         self.assertIn("uses: actions/checkout@v7.0.1#x\n", after)
         self.assertEqual(after.count(PINNED), 1)
 
+    def test_uses_without_a_space_after_its_colon_is_text_not_a_key(self):
+        # YAML reads `- uses:x` as the string "uses:x", which runs nothing.
+        for value in (PLAIN, STALE, "./.github/actions/cachew-checkout", f"'{STALE}'"):
+            before = f"steps:\n  - uses:{value}\n"
+            with self.subTest(value=value):
+                self.assertEqual(migrate.rewrite(before, SHA), before)
+
+    def test_each_verify_pins_check_reports_what_only_it_sees(self):
+        # --verify-pins layers several readers; each input here reaches one of
+        # them only, so a reader that stops seeing it changes the messages.
+        action, other = "tenstorrent/.github/actions/cachew-checkout", "0" * 40
+        expected = {
+            # A mention outside any uses: value, in any case or with \ separators.
+            f"# Tenstorrent/.GitHub/Actions/Cachew-Checkout@{SHA}": [
+                f"w.yml:5 mentions Tenstorrent/.GitHub/Actions/Cachew-Checkout@{SHA} outside a uses: value it can verify"
+            ],
+            f"- run: echo tenstorrent\\.github\\actions\\cachew-checkout@{SHA}": [
+                f"w.yml:5 mentions tenstorrent\\.github\\actions\\cachew-checkout@{SHA} outside a uses: value it can verify"
+            ],
+            # A quoted uses: key, or one after a comma, is still a uses: value.
+            f"- 'uses': {action}@{other}": [f"w.yml:5 pins {other}, expected action_sha {SHA}; run --write"],
+            f'- "uses": {action}@{other}': [f"w.yml:5 pins {other}, expected action_sha {SHA}; run --write"],
+            f"- {{name: x,uses: {action}@{other}}}": [f"w.yml:5 pins {other}, expected action_sha {SHA}; run --write"],
+            # \ separates path segments; it is no escape in a plain scalar.
+            "- uses: tenstorrent\\.github\\actions\\cachew-checkout@main": [
+                f"w.yml:5 pins main, expected action_sha {SHA}; run --write"
+            ],
+            # An @ inside the path is not the action.
+            "- run: echo tenstorrent/.github/x@y/cachew-checkout@v1": [],
+        }
+        for step, messages in expected.items():
+            text = f"jobs:\n  j:\n    runs-on: self-hosted\n    steps:\n      {step}\n"
+            with self.subTest(step=step):
+                self.assertEqual(migrate.file_problems("w.yml", text, SHA), messages)
+
     def test_a_quoted_or_anchored_job_key_still_ends_the_job_before_it(self):
         # Unseen, the hosted job's runs-on counted for the self-hosted job too,
         # and --write turned that job's pin back into plain checkout.
@@ -101,6 +136,8 @@ class RewriteTests(unittest.TestCase):
             "a tagged label": workflow("runs-on: !!str ubuntu-latest"),
             "an anchored flow sequence": workflow("runs-on: &os [ubuntu-latest]"),
             "an anchored block sequence": workflow("runs-on: &os\n    - ubuntu-latest"),
+            "a label on the next line": workflow("runs-on:\n    ubuntu-latest  # hosted"),
+            "a flow sequence on the next line": workflow("runs-on:\n    [ubuntu-latest]"),
         }
         for name, before in hosted.items():
             with self.subTest(hosted=name):
@@ -111,6 +148,7 @@ class RewriteTests(unittest.TestCase):
             "a block sequence with another label": workflow("runs-on:\n    - ubuntu-22.04\n    - gpu"),
             "an expression": workflow("runs-on: ${{ matrix.os }}"),
             "an empty sequence": workflow("runs-on: []"),
+            "a label over two lines": workflow("runs-on:\n    ubuntu-latest\n    gpu"),
             "a runner group": workflow("runs-on:\n    group: large\n    labels: ubuntu-latest"),
             "a deeper runs-on key": workflow("runs-on: tt-large\n  env:\n    runs-on: ubuntu-latest"),
         }

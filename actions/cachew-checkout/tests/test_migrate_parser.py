@@ -39,6 +39,7 @@ spec.loader.exec_module(migrate)
 SHA = "a" * 40
 PIN = f"{migrate.ACTION_REPO}@{SHA}"
 CHECKOUT = "actions/checkout@v7.0.1"
+PLAIN = f"actions/checkout@{migrate.FORWARDED_CHECKOUT}"
 # CACHEW_FUZZ_SEED and CACHEW_FUZZ_CASES run another sample of random workflows.
 FUZZ_SEED = int(os.environ.get("CACHEW_FUZZ_SEED", "1"))
 FUZZ_CASES = int(os.environ.get("CACHEW_FUZZ_CASES", "1500"))
@@ -227,29 +228,50 @@ def problems(text, kept):
         # blank line, or a `# ...` line that is its text, not a comment) is not
         # one, but migrate.py reads no block scalar exactly, so it may report it.
         unreadable = [lines for lines, value in steps if migrate.MIGRATABLE.search(value)]
+        # --write also moves any pin of this action (stale, legacy, any case) to the pin.
+        repinned = {key.start_mark.line + 1: job_hosted for job_hosted, key, value, _ in checkout_steps(text) if repins(value.value) and not kept}
+        # --write rewrites a value written on its key's line in block style, and
+        # leaves the rest (and anchored or tagged values) for --verify-pins.
+        rows = text.split("\n")
+        rewritable = {
+            key.start_mark.line + 1
+            for _, key, value, _ in checkout_steps(text)
+            if value.start_mark.line == key.start_mark.line
+            and value.style not in ("|", ">")
+            and not re.search(r"[{,]", rows[key.start_mark.line][: key.start_mark.column])
+            and not re.match(r"[ \t]*:[ \t]*[&!]", rows[key.start_mark.line][key.end_mark.column :])
+        }
     except yaml.YAMLError as error:
         return [f"the test made invalid YAML: {error}"]
     written = migrate.rewrite(text, SHA)
     reported = set(migrate.flow_steps(text)) | set(migrate.hidden_checkouts(written))
     try:
         after = yaml.safe_load(written)
-        migrated = {key.start_mark.line + 1 for _, key, value, _ in checkout_steps(written) if value.value == PIN}
+        uses_after = {key.start_mark.line + 1: value.value for _, key, value, _ in checkout_steps(written)}
+        migrated = {line for line, value in uses_after.items() if value == PIN}
     except yaml.YAMLError as error:
         return [f"--write made invalid YAML: {error}"]
     found = []
     allowed = set().union(*unreadable) if unreadable else set()
+    if not (isinstance(before, dict) and isinstance(before.get("jobs"), dict)):
+        # GitHub rejects a workflow without a jobs mapping, so a report there is harmless.
+        allowed |= reported
     for lines in expected:
         if not lines & (migrated | reported):
             found.append(f"a checkout step at line {min(lines)} is neither migrated nor reported")
     found += [f"line {line} is reported but holds no checkout step" for line in sorted(reported - allowed)]
-    found += [f"line {line} is migrated but holds no checkout step" for line in sorted(migrated - allowed)]
+    found += [f"line {line} is migrated but holds no checkout step" for line in sorted(migrated - allowed - set(repinned))]
+    for line, job_hosted in sorted(repinned.items()):
+        want = PLAIN if job_hosted else PIN
+        if line in rewritable and line not in reported and uses_after.get(line) != want:
+            found.append(f"line {line} runs the action and --write left {uses_after.get(line)!r}, not {want}")
 
     # Data: what --write wrote, with only migrated steps' uses: values changed.
     def migrate_uses(old, new):
         if isinstance(old, dict) and isinstance(new, dict):
             for key in old:
-                if key == "uses" and isinstance(old[key], str) and MIGRATABLE.fullmatch(old[key]) and new.get(key) == PIN:
-                    old[key] = PIN
+                if key == "uses" and isinstance(old[key], str) and (MIGRATABLE.fullmatch(old[key]) or repins(old[key])) and new.get(key) in (PIN, PLAIN):
+                    old[key] = new[key]
                 elif key in new:
                     migrate_uses(old[key], new[key])
         elif isinstance(old, list) and isinstance(new, list):
@@ -267,12 +289,51 @@ FILLER = ("", "   ", "\t", "# c", "  # c", "      # - uses: " + CHECKOUT)
 EXTRA_KEYS = ("name: x", "if: true", "env: {A: 1}", "timeout-minutes: 5", "needs: [b]", "name: 'a: b'", "name: x # c")
 
 
+# Steps that reference this action, as --verify-pins reads them.
+STALE_SHA = "0" * 40
+PIN_VALUES = (
+    PIN,
+    f"{migrate.ACTION_REPO}@{STALE_SHA}",
+    f"{migrate.LEGACY_REPO}@{SHA}",
+    f"{migrate.ACTION_REPO}/sub@{SHA}",
+    f"{migrate.ACTION_REPO}@v1",
+    f"{migrate.ACTION_REPO}@{SHA}x",
+    f"Tenstorrent/.GitHub/Actions/Cachew-Checkout@{SHA}",
+    f"tenstorrent//.github/actions//cachew-checkout@{STALE_SHA}",
+    f"tenstorrent/.github/actions/./cachew-checkout@{SHA}",
+    "./.github/actions/cachew-checkout",
+    ".//.github//actions//cachew-checkout/",
+    "./.GitHub/Actions/Cachew-Checkout",
+)
+PIN_FORMS = (
+    "- uses: {v}\n", "- uses: {v} # cachew checkout\n", "- uses: '{v}'\n", '- uses: "{v}"\n', "- uses:\n    {v}\n",
+    "- uses: >-\n    {v}\n", "- {{uses: {v}}}\n", "- name: x\n  uses: {v}\n", "- run: echo {v}\n", "- uses: &p {v}\n",
+)
+# Characters that change how YAML reads a line, for the edits below.
+EDITS = " \t\n-:#'\"!&*{}[],/.\\@?|>%"
+
+
+def perturbed(rng, text):
+    """text with one to three characters inserted, removed or doubled."""
+    for _ in range(rng.randint(1, 3)):
+        at = rng.randrange(len(text))
+        kind = rng.random()
+        if kind < 0.5:
+            text = text[:at] + rng.choice(EDITS) + text[at:]
+        elif kind < 0.75:
+            text = text[:at] + text[at + 1 :]
+        else:
+            text = text[:at] + text[at] + text[at:]
+    return text
+
+
 def fuzzed_workflows(seed, count):
     """(name, text) for count random workflows built from the pieces above:
     several jobs and steps, keys in any order, any indentation, with blank,
-    whitespace-only and comment lines in between and inside."""
+    whitespace-only and comment lines in between and inside, and every
+    fourth one with a few characters edited."""
     rng = random.Random(seed)
-    steps = list(STEPS.values())
+    steps = list(STEPS.values()) + [form.format(v=value) for form in PIN_FORMS for value in PIN_VALUES]
     runners = list(RUNS_ON.values())
     for n in range(count):
         width = rng.choice((2, 4))
@@ -290,7 +351,91 @@ def fuzzed_workflows(seed, count):
         for _ in range(rng.randint(0, 4)):
             at = rng.randint(2, len(lines))
             lines.insert(at, " " * rng.choice((0, 2, 4, 6)) + rng.choice(FILLER) if rng.random() < 0.5 else rng.choice(FILLER))
-        yield f"fuzz {seed}/{n}", "\n".join(lines) + "\n"
+        text = "\n".join(lines) + "\n"
+        yield f"fuzz {seed}/{n}", perturbed(rng, text) if n % 4 == 3 else text
+
+
+def flow_outdented(text):
+    """Whether a line inside a flow collection starts at or left of the line that
+    opened it. YAML forbids it, PyYAML accepts it, and migrate.py reads jobs and
+    steps by their indentation."""
+    rows = text.split("\n")
+    opened = []
+    for token in yaml.scan(text, Loader=yaml.SafeLoader):
+        if isinstance(token, (yaml.FlowMappingStartToken, yaml.FlowSequenceStartToken)):
+            opened.append(token.start_mark.line)
+        elif isinstance(token, (yaml.FlowMappingEndToken, yaml.FlowSequenceEndToken)):
+            first = opened.pop()
+            if opened:
+                continue
+            indent = len(rows[first]) - len(rows[first].lstrip(" "))
+            for row in rows[first + 1 : token.start_mark.line + 1]:
+                if row.strip() and not row.lstrip().startswith("#") and len(row) - len(row.lstrip(" ")) <= indent:
+                    return True
+    return False
+
+
+def repins(value):
+    """Whether --write rewrites this uses: value that runs the action: a pin at
+    either location and any commit, or a local copy. It becomes the pin, or
+    plain actions/checkout in a GitHub-hosted job."""
+    pin = r"(?i:" + re.escape(migrate.ACTION_REPO) + "|" + re.escape(migrate.LEGACY_REPO) + r")@[0-9a-f]{40}"
+    return re.fullmatch(pin, value) is not None or names_action(value) == (False, "a local copy")
+
+
+def names_action(value):
+    """(current, why) for a uses: value that names this action as the runner
+    reads it, or None: current when it is the pin --verify-pins expects."""
+    if value.startswith("./"):
+        local = [segment.lower() for segment in value.split("/") if segment]
+        return (False, "a local copy") if local == [".", ".github", "actions", "cachew-checkout"] else None
+    path, at, ref = value.partition("@")
+    written = [segment.lower() for segment in re.split(r"[/\\]", path) if segment]
+    if not at:
+        return None
+    # . and .. resolve on the runner's disk, so only where they lead matters.
+    segments = []
+    for segment in written:
+        if segment == "..":
+            segments = segments[:-1]
+        elif segment != ".":
+            segments.append(segment)
+    dotted = segments != written
+    if segments[:4] == ["tenstorrent", ".github", "actions", "cachew-checkout"]:
+        rest = segments[4:]
+    elif segments[:5] == ["tenstorrent", "tt-metal", ".github", "actions", "cachew-checkout"]:
+        return False, "the legacy repository"
+    else:
+        return None
+    if dotted:
+        return False, "a . or .. segment"
+    if rest:
+        return False, "a subdirectory"
+    return (True, None) if ref == SHA else (False, f"ref {ref}")
+
+
+def pin_problems(text):
+    """What --verify-pins gets wrong about one workflow: each step that runs
+    this action other than at the pin must be reported on its uses: line, and
+    no line without the action's name is reported."""
+    found = []
+    reported = {}
+    for message in migrate.file_problems("w.yml", text, SHA):
+        line = re.match(r"w\.yml:(\d+)", message)
+        if line:
+            reported.setdefault(int(line[1]), []).append(message)
+    for _, key, value, _ in checkout_steps(text):
+        named = names_action(value.value)
+        if named and not named[0]:
+            lines = {key.start_mark.line + 1, value.start_mark.line + 1}
+            if not lines & set(reported):
+                found.append(f"line {key.start_mark.line + 1} runs {named[1]} and is not reported")
+    rows = text.split("\n")
+    for line in sorted(reported):
+        row = rows[line - 1] if line <= len(rows) else ""
+        if "cachew-checkout" not in row.lower() and "\\" not in row and "uses" not in row:
+            found.append(f"line {line} is reported but names no action: {reported[line]}")
+    return found
 
 
 @unittest.skipUnless(yaml or os.environ.get("CACHEW_REQUIRE_PYYAML"), "needs PyYAML (pip install pyyaml)")
@@ -300,13 +445,16 @@ class ParserAgreementTests(unittest.TestCase):
         checked = 0
         for name, text in fuzzed_workflows(FUZZ_SEED, FUZZ_CASES):
             try:
-                yaml.compose(text, Loader=yaml.SafeLoader)
+                yaml.safe_load(text)
+                if flow_outdented(text):
+                    continue
             except yaml.YAMLError:
-                # Filler can land inside a scalar or break indentation; PyYAML is the judge.
+                # Filler and edits can land inside a scalar, break indentation or
+                # make a key or tag PyYAML cannot build; PyYAML is the judge.
                 continue
             checked += 1
             with self.subTest(name, text=text):
-                self.assertEqual(problems(text, False), [])
+                self.assertEqual(problems(text, False) + pin_problems(text), [])
         self.assertGreater(checked, FUZZ_CASES // 2)
 
     def test_migrate_finds_the_checkout_steps_a_yaml_parser_finds(self):
