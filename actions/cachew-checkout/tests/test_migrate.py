@@ -21,6 +21,8 @@ spec.loader.exec_module(migrate)
 
 SHA = "a" * 40
 PLAIN = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+# A job's steps: key, with its steps at six spaces.
+JOB = "jobs:\n  j:\n    runs-on: self-hosted\n    steps:\n"
 PINNED = f"tenstorrent/.github/actions/cachew-checkout@{SHA} # cachew checkout"
 STALE = "tenstorrent/.github/actions/cachew-checkout@" + "0" * 40 + " # cachew checkout"
 LEGACY = "tenstorrent/tt-metal/.github/actions/cachew-checkout@" + "1" * 40 + " # cachew checkout"
@@ -60,7 +62,7 @@ class RewriteTests(unittest.TestCase):
             self.assertEqual(migrate.rewrite(before, SHA), before, repr(character))
 
     def test_a_hash_without_a_space_before_it_is_part_of_the_ref(self):
-        before = "steps:\n  - uses: actions/checkout@v7.0.1#x\n  - uses: actions/checkout@v7.0.1 #x\n"
+        before = JOB + "      - uses: actions/checkout@v7.0.1#x\n      - uses: actions/checkout@v7.0.1 #x\n"
         after = migrate.rewrite(before, SHA)
         self.assertIn("uses: actions/checkout@v7.0.1#x\n", after)
         self.assertEqual(after.count(PINNED), 1)
@@ -68,9 +70,60 @@ class RewriteTests(unittest.TestCase):
     def test_uses_without_a_space_after_its_colon_is_text_not_a_key(self):
         # YAML reads `- uses:x` as the string "uses:x", which runs nothing.
         for value in (PLAIN, STALE, "./.github/actions/cachew-checkout", f"'{STALE}'"):
-            before = f"steps:\n  - uses:{value}\n"
+            before = f"{JOB}      - uses:{value}\n"
             with self.subTest(value=value):
                 self.assertEqual(migrate.rewrite(before, SHA), before)
+
+    def test_a_flow_step_is_reported_once_by_the_reader_that_can_read_it(self):
+        # flow_steps names a flow step whose value uses_value reads exactly;
+        # hidden_checkouts names one it cannot, so no step is reported twice.
+        checkout = "actions/checkout@v7.0.1"
+        expected = {
+            f"{{uses: {checkout}}}": ([5], []),
+            f"{{name: a,\n       uses: {checkout}}}": ([6], []),
+            f'{{"uses"  :"{checkout}" # c\n      }}': ([5], []),
+            f"{{uses: # c\n        {checkout}}}": ([], [5]),
+            f"{{uses:\n        {checkout}}}": ([], [5]),
+            f'{{uses: "actions/checkou\\x74@v7.0.1"}}': ([], [5]),
+            f"{{uses:{checkout}}}": ([], []),
+            f"{{uses: {checkout}x}}": ([], []),
+        }
+        for step, (flow, hidden) in expected.items():
+            text = f"jobs:\n  j:\n    runs-on: self-hosted\n    steps:\n    - {step}\n"
+            with self.subTest(step=step):
+                self.assertEqual((migrate.flow_steps(text), sorted(migrate.hidden_checkouts(text))), (flow, hidden))
+
+    def test_steps_are_found_where_github_runs_them_and_nowhere_else(self):
+        # (--write changes the file, lines --write leaves for the report). From
+        # review of PR 22: an escaped JSON-style value, a tagged value next to a
+        # nested input, steps: under a matrix, and an alias in a flow sequence.
+        checkout = "actions/checkout@v7.0.1"
+        hosted = f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps:\n      - &co {{uses: {checkout}}}\n"
+        expected = {
+            f'{JOB}      - {{"uses":"actions/checkout@v7.\\x30.1"}}\n': (False, [5]),
+            f'{JOB}      - {{"uses":"{checkout}"}}\n': (False, [5]),
+            f"{JOB}      - {{uses: !!str ./local, with: {{uses: {checkout}}}}}\n": (False, []),
+            f"{JOB}      - {{uses: ./local, with: {{uses: {checkout}}}}}\n": (False, []),
+            f"{JOB}      - {{uses: !!str {checkout}, with: {{a: b}}}}\n": (False, [5]),
+            # steps: in data: a matrix entry or an input.
+            "jobs:\n  j:\n    runs-on: self-hosted\n    strategy:\n      matrix:\n        include:\n"
+            f"          - steps: [{{uses: {checkout}}}]\n    steps:\n      - run: echo\n": (False, []),
+            "jobs:\n  j:\n    runs-on: self-hosted\n    strategy:\n      matrix:\n        include:\n"
+            f"          - steps:\n              - uses: {checkout}\n    steps:\n      - run: echo\n": (False, []),
+            f"jobs:\n  j:\n    runs-on: self-hosted\n    with:\n      steps:\n        - uses: {checkout}\n": (False, []),
+            f"steps:\n  - uses: {checkout}\n": (False, []),
+            # A composite action's steps run.
+            f"runs:\n  using: composite\n  steps:\n    - uses: {checkout}\n": (True, []),
+            # A hosted job's checkout step, aliased into a self-hosted job.
+            f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [*co]\n": (False, [8]),
+            f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [{{run: x}}, *co]\n": (False, [8]),
+            f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [*co] # cachew: keep\n": (False, []),
+            f"{hosted}  s:\n    runs-on: ubuntu-latest\n    steps: [*co]\n": (False, []),
+        }
+        for text, (changed, left) in expected.items():
+            with self.subTest(text=text):
+                after = migrate.rewrite(text, SHA)
+                self.assertEqual((after != text, sorted(set(migrate.flow_steps(text)) | set(migrate.hidden_checkouts(after)))), (changed, left))
 
     def test_each_verify_pins_check_reports_what_only_it_sees(self):
         # --verify-pins layers several readers; each input here reaches one of
@@ -375,7 +428,7 @@ jobs:
 
     def test_other_checkout_versions_are_left_alone(self):
         # Floating tags too: v7 may point past the v7.0.1 the action forwards to.
-        text = "steps:\n  - uses: actions/checkout@v4\n  - uses: actions/checkout@main\n  - uses: actions/checkout@v7\n"
+        text = JOB + "      - uses: actions/checkout@v4\n      - uses: actions/checkout@main\n      - uses: actions/checkout@v7\n"
         self.assertEqual(migrate.rewrite(text, SHA), text)
 
     def test_rewrite_refuses_a_short_sha(self):
@@ -967,8 +1020,8 @@ class RepositoryTests(unittest.TestCase):
     def test_a_path_argument_is_read_from_the_current_directory(self):
         nested = self.root / "sub"
         nested.mkdir()
-        (nested / "wf.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
-        (self.root / "wf.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        (nested / "wf.yml").write_text(f"{JOB}      - uses: {PLAIN}\n")
+        (self.root / "wf.yml").write_text(f"{JOB}      - uses: {PLAIN}\n")
         with contextlib.chdir(nested):
             code, out = self.run_main("--write", "wf.yml")
         self.assertEqual(code, 0, out)
@@ -978,7 +1031,7 @@ class RepositoryTests(unittest.TestCase):
     def test_a_file_that_cannot_be_read_is_reported_and_the_rest_are_migrated(self):
         workflows = self.root / ".github/workflows"
         (workflows / "aaa-binary.yml").write_bytes(b"\xff\xfe uses\n")
-        (workflows / "zzz.yml").write_text(f"steps:\n  - uses: {PLAIN}\n")
+        (workflows / "zzz.yml").write_text(f"{JOB}      - uses: {PLAIN}\n")
         subprocess.run(["git", "add", "-A"], cwd=self.root, check=True)
         code, out = self.run_main("--write")
         self.assertEqual(code, 1, out)

@@ -92,16 +92,10 @@ CHECKOUT = re.compile(
 TAG_COMMENT = re.compile(r"(?i:[ \t]*(?:(?:v\d+(?:\.\d+)*|cachew checkout)(?![\w.])[ \t;,:-]*)*)")
 # The pin itself in a CHECKOUT match: the action, at either location, and its commit.
 PIN = re.compile(r"(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")@[0-9a-f]{40}")
-# White space in flow YAML, with any comments in it: a # after white space, to
-# the end of its line. Each comment needs the white space before it, so a run of
-# white space is read one way only.
-FLOW_GAP = r"(?:[ \t\r\n]+#[^\n]*)*[ \t\r\n]*"
-# A flow mapping's uses: key whose value is a checkout --write would migrate,
-# matched where the key starts.
-FLOW_CHECKOUT = re.compile(
-    r"(?P<key>['\"]?)uses(?P=key)[ \t]*:" + FLOW_GAP + r"(?P<quote>['\"]?)"
-    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=" + FLOW_GAP + r"[,}])"
-)
+# A flow mapping's uses: key, matched where flow_mapping says the key starts. A
+# quoted key's value may follow its colon at once (`{"uses":"..."}`); after a
+# plain key, `uses:x` is one scalar.
+FLOW_USES_KEY = re.compile(r"""(?P<q>['"]?)uses(?P=q)[ \t]*:""")
 # Any mention of the action with a ref, wherever it appears in a file and however
 # its path is spelled: one word that starts at the owner, names the action and
 # ends in @<ref>. GitHub resolves owner and repository names in any case, so a
@@ -116,8 +110,13 @@ ACTION_PATHS = {
 # (which joins two lines) and an escaped / or \.
 ESCAPE = re.compile(r"\\(?:x([0-9A-Fa-f]{2})|u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|(\r?\n[ \t]*)|([/\\]))")
 # A uses: key in block style (`uses:` or `- uses:`) or inside a flow mapping
-# (`{uses: ...}`), its key optionally quoted.
-USES_KEY = re.compile(r"""(?m)(?:^[ \t]*(?:-[ \t]+)?(?:[!&][^\s,\[\]{}]*[ \t]+)*|(?P<flow>[{,])[ \t]*)(?P<q>['"]?)uses(?P=q)[ \t]*:(?=[ \t\r\n]|$)""")
+# (`{uses: ...}`), its key optionally quoted. White space follows the colon,
+# except after a quoted key in a flow mapping, where the value may follow at
+# once, as in JSON (`{"uses":"..."}`).
+USES_KEY = re.compile(
+    r"""(?m)(?:^[ \t]*(?:-[ \t]+)?(?:[!&][^\s,\[\]{}]*[ \t]+)*|(?P<flow>[{,])[ \t]*)(?P<q>(?P<quoted>['"])?)uses(?P=q)[ \t]*:"""
+    r"""(?(quoted)(?(flow)|(?=[ \t\r\n]|$))|(?=[ \t\r\n]|$))"""
+)
 PLAIN_CHECKOUT = f"actions/checkout@{FORWARDED_CHECKOUT} # v7.0.1"
 # GitHub matches runner labels in any case.
 HOSTED_LABEL = re.compile(r"(?i:ubuntu|windows|macos)-[\w.-]+")
@@ -528,16 +527,39 @@ def content_rows(text, embedded):
     return rows
 
 
+def steps_key(rows, index):
+    """Whether rows[index] is a `steps:` key whose steps GitHub runs: a key of a
+    job under the top-level jobs: key, or of a composite action's top-level runs:
+    key. A steps: key anywhere else (a matrix entry, an input) is data."""
+    line, indent = rows[index][1], rows[index][2]
+    if not STEPS_LINE.match(line) or ENTRIES.match(line)[0].count("-"):
+        return False
+
+    def owner(at):
+        column = rows[at][2]
+        return next((i for i in range(at - 1, -1, -1) if rows[i][2] < column), None)
+
+    parent = owner(index)
+    if parent is None or ENTRIES.match(rows[parent][1])[0].count("-"):
+        return False
+    top = TOP_LEVEL.match(rows[parent][1])
+    if rows[parent][2] == 0:
+        return bool(top) and top["key"] == "runs"
+    grandparent = owner(parent)
+    top = grandparent is not None and rows[grandparent][2] == 0 and TOP_LEVEL.match(rows[grandparent][1])
+    return bool(top) and top["key"] == "jobs"
+
+
 def steps_item(rows, at):
     """Whether the `- ` entry on rows[at] is an item of a sequence under a
-    `steps:` key."""
+    `steps:` key GitHub runs (steps_key)."""
     dash = rows[at][2]
     # The sequence's key: the nearest earlier line that is not an item of it.
     parent = next(
         (i for i in range(at - 1, -1, -1) if rows[i][2] < dash or (rows[i][2] == dash and not rows[i][1].lstrip().startswith("-"))),
         None,
     )
-    return parent is not None and bool(STEPS_KEY.fullmatch(rows[parent][1]))
+    return parent is not None and bool(STEPS_KEY.fullmatch(rows[parent][1])) and steps_key(rows, parent)
 
 
 def flow_mapping(text, at, children=None):
@@ -545,7 +567,7 @@ def flow_mapping(text, at, children=None):
     its `}` and where each of its own keys starts, leaving out the keys of nested
     collections and anything in quoted or plain scalars. None if it does not end.
     Also reads a flow sequence at text[at]; children, when given, collects where
-    each collection directly inside it starts."""
+    each collection or alias directly inside it starts."""
     depth, keys, node, key, quoted, i = 0, [], True, False, False, at
     while i < len(text):
         c = text[i]
@@ -591,6 +613,8 @@ def flow_mapping(text, at, children=None):
             # A plain scalar: its quotes, braces and colons up to an indicator are text.
             if key and depth == 1:
                 keys.append(i)
+            if c == "*" and depth == 1 and children is not None:
+                children.append(i)
             node = key = False
         i += 1
     return None
@@ -628,8 +652,9 @@ def flow_steps(text, hosted=None):
     """Line numbers of checkout steps written as flow mappings, which --write
     leaves alone: a uses: key of a flow mapping that is an item of a steps:
     sequence, in a job that is not GitHub-hosted, without `# cachew: keep` on
-    the mapping's last line. hosted, when given, replaces the hosted jobs'
-    ranges."""
+    the mapping's last line. Only a value uses_value reads exactly: one it
+    cannot read is hidden_checkouts' to report. hosted, when given, replaces
+    the hosted jobs' ranges."""
     hosted = hosted_jobs(text) if hosted is None else hosted
     rows = content_rows(text, block_scalars(text))
     found = []
@@ -647,7 +672,12 @@ def flow_steps(text, hosted=None):
         line_end = text.find("\n", end)
         if "cachew: keep" in text[end : len(text) if line_end < 0 else line_end]:
             continue
-        found += [text.count("\n", 0, key) + 1 for key in keys if FLOW_CHECKOUT.match(text, key)]
+        for key in keys:
+            name = FLOW_USES_KEY.match(text, key)
+            if not name or not (name["q"] or re.match(r"[ \t\r\n]|$", text[name.end() : name.end() + 1])):
+                continue
+            if any(not problem and MIGRATABLE.fullmatch(value) for _, _, value, problem in uses_value(text, name, flow=True)):
+                found.append(text.count("\n", 0, key) + 1)
     return found
 
 
@@ -732,7 +762,7 @@ def hidden_checkouts(text, hosted=None, aliases=True):
             fragment = text[offset + len(line) : following]
             if migratable(fragment + anchored(text, fragment.strip().lstrip(":").strip())) and "cachew: keep" not in fragment:
                 found.append(text.count("\n", 0, offset) + 1)
-        elif aliases and alias and "cachew: keep" not in line and (STEPS_LINE.match(line) or steps_item(rows, index)):
+        elif aliases and alias and "cachew: keep" not in line and (steps_key(rows, index) or steps_item(rows, index)):
             # A step, or all of a job's steps, another job anchors: an alias
             # --write cannot rewrite here, whose anchor it left (a hosted job's).
             # Reported when the anchor holds a checkout step that would be
@@ -744,7 +774,14 @@ def hidden_checkouts(text, hosted=None, aliases=True):
                 if any(first <= number <= last for number in checkouts):
                     found.append(text.count("\n", 0, offset) + 1)
                     break
-    return sorted(set(found + sequence_steps(text, rows, hosted)))
+
+    def resolved():
+        nonlocal checkouts
+        if checkouts is None:
+            checkouts = step_checkouts(text, steps)
+        return checkouts
+
+    return sorted(set(found + sequence_steps(text, rows, hosted, resolved if aliases else None)))
 
 
 def step_checkouts(text, steps):
@@ -772,17 +809,19 @@ STEPS_LINE = re.compile(r"""[ \t]*(?:-[ \t]+)?(['"]?)steps\1[ \t]*:(?=[ \t]|$)""
 SEQUENCE_START = re.compile(VALUE_GAP + r"\[")
 
 
-def sequence_steps(text, rows, hosted):
+def sequence_steps(text, rows, hosted, checkouts=None):
     """Line numbers of the uses: keys that name a migratable checkout in steps
     written as a flow sequence: `steps: [{uses: ...}]`, with or without a tag
     or anchor, the sequence on the key's line or a later one. Read forward from
     real `steps:` keys, quote-aware, so brackets in quoted scalars and script
-    text that only looks like a steps sequence are not taken for one."""
+    text that only looks like a steps sequence are not taken for one. With
+    checkouts (a function returning step_checkouts' lines), an alias item is
+    reported when its anchor holds one of them, as for a block alias item."""
     found = []
     sequences = set()
-    for offset, line, _ in rows:
+    for index, (offset, line, _) in enumerate(rows):
         match = STEPS_LINE.match(line)
-        if not match or any(start <= offset < end for start, end in hosted):
+        if not match or not steps_key(rows, index) or any(start <= offset < end for start, end in hosted):
             continue
         start = SEQUENCE_START.match(text, offset + match.end())
         if start:
@@ -804,6 +843,18 @@ def sequence_steps(text, rows, hosted):
         if "cachew: keep" in text[sequence[0] : len(text) if line_end < 0 else line_end]:
             continue
         for child in children:
+            if text[child] == "*":
+                alias = re.compile(r"\*[^\s,\[\]{}]+").match(text, child)
+                line_end = text.find("\n", child)
+                if checkouts is None or "cachew: keep" in text[child : len(text) if line_end < 0 else line_end]:
+                    continue
+                lines = checkouts()
+                for start, end in anchor_spans(text, alias[0]):
+                    first, last = text.count("\n", 0, start) + 1, text.count("\n", 0, end) + 1
+                    if any(first <= number <= last for number in lines):
+                        found.append(text.count("\n", 0, child) + 1)
+                        break
+                continue
             mapping = text[child] == "{" and flow_mapping(text, child)
             if not mapping:
                 continue
@@ -895,7 +946,16 @@ def value_extent(text, key):
     following line indented more deeply than the key (in a flow mapping, than
     the line where its flow collection starts), as YAML requires of a block or
     flow scalar's continuation, blank and comment lines included: a comment line
-    ends no value, at any indentation."""
+    ends no value, at any indentation. In a flow mapping, the value also ends
+    where the mapping's next key starts, or at its end: the keys of a nested
+    mapping (`with: {uses: ...}`) are not this value's."""
+    limit = len(text)
+    if key["flow"]:
+        mapping = key.start("flow") if key["flow"] == "{" else open_bracket(text, key.start("flow"))
+        read = flow_mapping(text, mapping) if mapping >= 0 else None
+        if read:
+            later = [at for at in read[1] if at > key.start("q")]
+            limit = later[0] if later else read[0] - 1
     holder = key.start("q")
     if key["flow"]:
         # The line where the innermost open flow collection starts.
@@ -913,9 +973,9 @@ def value_extent(text, key):
         line = text[end + 1 : len(text) if following < 0 else following]
         content = line.strip(" \t\r")
         if content and not content.startswith("#") and len(line) - len(line.lstrip(" ")) <= column:
-            return end
+            return min(end, limit)
         end = following
-    return len(text)
+    return limit
 
 
 def could_name_action(text):
@@ -952,8 +1012,10 @@ def anchor_spans(text, value):
     return found
 
 
-def uses_value(text, key):
-    """uses_values for one uses: key."""
+def uses_value(text, key, flow=None):
+    """uses_values for one uses: key. flow, when given, says whether the key is
+    in a flow mapping; otherwise the key's flow group does."""
+    flow = bool(key["flow"]) if flow is None else flow
     start = key.end()
     while start < len(text) and text[start] in " \t":
         start += 1
@@ -982,15 +1044,15 @@ def uses_value(text, key):
         # A plain scalar ends at a comment (` #`) and, in a flow mapping, at , or }.
         # Only spaces and tabs around it are not part of it: str.rstrip() would also
         # drop Unicode spaces (U+00A0, U+2028, ...), which Git allows in branch names.
-        end = re.search(r"[ \t]#" + (r"|[,}]" if key["flow"] else ""), line)
+        end = re.search(r"[ \t]#" + (r"|[,}]" if flow else ""), line)
         value = line[: end.start() if end else len(line)].rstrip(" \t")
-        if not end and plain_continues(text, line_end, key):
+        if not end and plain_continues(text, line_end, key, flow):
             yield start, start, None, "its plain value goes on past the uses: line"
         else:
             yield start, start + len(value), value, None
 
 
-def plain_continues(text, line_end, key):
+def plain_continues(text, line_end, key, flow):
     """Whether a plain scalar that runs to the end of its uses: line goes on over
     the next line that is not blank, as YAML reads it: a more deeply indented line
     in a block mapping, any line in a flow mapping, unless that line is a comment
@@ -1003,7 +1065,7 @@ def plain_continues(text, line_end, key):
             continue
         if content.startswith("#"):
             return False
-        if key["flow"]:
+        if flow:
             return content[0] not in ",}]"
         return len(line) - len(line.lstrip(" ")) > key_column
     return False
