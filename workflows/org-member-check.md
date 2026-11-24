@@ -47,11 +47,16 @@ jobs:
 
   label:
     needs: member
-    if: needs.member.outputs.member == 'false'
+    if: needs.member.outputs.member != 'true'
     runs-on: ubuntu-latest
     permissions:
       issues: write
     steps:
+      # An empty output is an error, never "not a member".
+      - name: Check the answer
+        env:
+          MEMBER: ${{ needs.member.outputs.member }}
+        run: '[ "$MEMBER" = false ] || { echo "::error::No answer from org-member-check."; exit 1; }'
       - run: gh issue edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --add-label community
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,18 +72,23 @@ Rules:
 - The calling job needs `permissions: id-token: write`. It needs no other
   permission.
 - Give the account in `secrets:`, not in `with:`. Use `user-id` (the numeric
-  id), `login`, or both. The numeric id is better: a login can change, the id
-  cannot. If you give both, they must name the same account, else the job
-  fails.
+  id). A login can change, the id cannot.
+- `login` also works, with limits: a login that is part of the word `true` or
+  `false` (for example `e` or `true`) fails the job; pass that account as
+  `user-id`. The log masks the login everywhere in the job, so a login that is
+  a common word can show by the pattern of `***`.
+- If you give both, they must be valid and name the same user account, else
+  the job fails.
 - The values are secrets only so that the log masks them. They are not
   secret data.
+- Call it once per calling job. Do not use a `matrix` on the calling job.
 
 ### Secrets (inputs)
 
 | Name | Required | Meaning |
 |---|---|---|
-| `user-id` | one of the two | Numeric GitHub user id, for example `${{ github.event.issue.user.id }}`. |
-| `login` | one of the two | GitHub login, for example `${{ github.event.issue.user.login }}`. |
+| `user-id` | one of the two (preferred) | Numeric GitHub user id, for example `${{ github.event.issue.user.id }}`. |
+| `login` | one of the two | GitHub login, for example `${{ github.event.issue.user.login }}`. See the limits above. |
 
 ### Output
 
@@ -86,13 +96,17 @@ Rules:
 |---|---|
 | `member` | `true` or `false`, read with `needs.<job>.outputs.member`. |
 
-`true` only for a member of `tenstorrent`. `false` for an outside
-collaborator, a pending invitation, a bot, an organization, an unknown login or
-id, and a value that is not a valid login or id.
+`true` only for a member of `tenstorrent`. With one value given, `false` for
+an outside collaborator, a pending invitation, a bot, an organization, an
+unknown login or id, and a value that is not a valid login or id. With both
+values given, each of these fails the job.
 
 If the check cannot get an answer (sign-in, network or GitHub error), the job
 fails. It never answers `false` on an error. Jobs that need it do not run.
 Do not use `if: always()` on those jobs, else they run without an answer.
+
+An empty output is an error, never "not a member". Test for `true` and for
+`false` explicitly, as in the example above.
 
 ## Events
 
@@ -102,7 +116,7 @@ Do not use `if: always()` on those jobs, else they run without an answer.
 | `schedule`, `workflow_dispatch`, `push`, `workflow_run` | Yes | Only on the branch of your setup. |
 | `pull_request` from the same repository | No | The token setup cannot be bound to a pull request ref. |
 | `pull_request` from a fork | No | GitHub gives a fork pull request no identity token. |
-| `pull_request_target` | Not yet | Planned for this workflow only. The job fails with a clear message until then. |
+| `pull_request_target` | No | Not supported. The token service refuses this event. |
 | `merge_group` | No | Same reason as `pull_request`. |
 
 ## Privacy and limits
@@ -111,8 +125,12 @@ Do not use `if: always()` on those jobs, else they run without an answer.
   are public.
 - Your own jobs decide what they print. Do not print the answer, and do not
   print an account in the same log line.
-- Anyone who can change your caller file can ask about any account, one per
-  call. Ask only about the account of the event.
+- A job that runs or skips on the answer shows the answer in the run graph of
+  a public repository.
+- A person with write access can re-run a job with debug logging. Debug lines
+  can show the answer.
+- Anyone who can change your caller file can ask about any account, one
+  account per calling job. Ask only about the account of the event.
 - No team, role, name or other data comes back. Only `true` or `false`.
 - Only repositories of `tenstorrent` can call this workflow.
 
@@ -122,10 +140,12 @@ Do not use `if: always()` on those jobs, else they run without an answer.
 |---|---|---|
 | `Only repositories of the organization tenstorrent can call this workflow.` | The caller is in another organization. | None. |
 | `Give the secret login, the secret user-id, or both.` | Both are empty. | Pass one of them in `secrets:`. |
-| `This run has no GitHub identity token.` | `id-token: write` is missing, or a fork pull request. | Add the permission. Do not call it from a fork pull request. |
-| `pull_request_target is not supported yet.` | See [Events](#events). | Use another event. |
+| The run fails at start with a permissions error about `id-token: write` | The calling job does not give `permissions: id-token: write`. | Add the permission to the calling job. |
+| `This run has no GitHub identity token.` | A pull request from a fork. | Do not call it from a fork pull request. |
+| `pull_request_target is not supported.` | See [Events](#events). | Use another event. |
+| `This login cannot be checked by login.` | The login is part of the word `true` or `false`. | Pass the account as `user-id`. |
 | A sign-in error from the step "Get token" | The setup for your repository is not ready, or the run does not match it (branch, event, caller file, pinned commit). | Ask on your OSPO ticket. |
-| `The secrets login and user-id name different accounts.` | The two values do not match. | Pass values of the same account. |
+| `The secrets login and user-id do not name the same user account.` | Both are given, and they do not match, or one is invalid, unknown or not a user. | Pass `user-id` only, or values of the same account. |
 | `GitHub answered HTTP <code> ...` | GitHub error or network error. | Run the job again. If it fails again, ask on your OSPO ticket. |
 
 ## Releases

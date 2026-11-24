@@ -12,13 +12,17 @@ name: Org member check
 #   with a ticket in the OSPO Jira project.
 # - Callers pin this file to the full commit SHA of a release
 #   (org-member-check-vX.Y.Z) and put the tag in a comment.
-# - The caller gives the account in the secrets `login` or `user-id` (or
-#   both). They are secrets only so that the log of this job masks them.
-# - Only a member of tenstorrent is `true`. An outside collaborator, a pending
-#   invitation, a bot, an organization, an unknown login or id, or a value that
-#   is not a valid login or id is `false`.
+# - The caller gives the account in the secret `user-id` (preferred), the
+#   secret `login`, or both. They are secrets only so that the log of this
+#   job masks them.
+# - Only a member of tenstorrent is `true`. When ONE value is given: an
+#   outside collaborator, a pending invitation, a bot, an organization, an
+#   unknown login or id, or a value that is not a valid login or id is
+#   `false`. When BOTH are given, they must be valid and name the same user
+#   account, else the job fails.
 # - On any error (sign-in, network, an unexpected HTTP status) the job fails.
-#   It never answers `false` on an error.
+#   It never answers `false` on an error. An empty output is an error.
+# - pull_request_target is not supported.
 # - The job prints no login, no id and no answer. Repository logs can be public.
 # - No checkout. The job runs no code of the caller.
 
@@ -26,10 +30,10 @@ on:
   workflow_call:
     secrets:
       login:
-        description: GitHub login of the account to check. Give login, user-id or both.
+        description: GitHub login of the account to check. Prefer user-id. A login that is part of the word true or false fails the job.
         required: false
       user-id:
-        description: Numeric GitHub user id of the account to check. Give login, user-id or both. If both are given, they must name the same account.
+        description: Numeric GitHub user id of the account to check (preferred). If login is also given, both must name the same account.
         required: false
     outputs:
       member:
@@ -49,6 +53,9 @@ jobs:
     # its env: values). Only the guard step (invalid value: false) and the ask
     # step write it, and each writes only true or false. If the job fails,
     # the caller gets no answer.
+    # The runner drops a job output that contains a masked value. The login
+    # is masked (secret), so a login that is part of "true" or "false" would
+    # drop the answer. The guard step refuses such a login.
     outputs:
       member: ${{ steps.guard.outputs.member || steps.ask.outputs.member }}
     steps:
@@ -73,9 +80,18 @@ jobs:
             echo "::error title=org-member-check::Give the secret login, the secret user-id, or both."
             exit 1
           fi
+          if [ -n "$LOGIN" ]; then
+            lower_login="$(printf '%s' "$LOGIN" | tr '[:upper:]' '[:lower:]')"
+            if [[ true == *"$lower_login"* ]] || [[ false == *"$lower_login"* ]]; then
+              echo "::error title=org-member-check::This login cannot be checked by login. Pass this account as the secret user-id only."
+              exit 1
+            fi
+          fi
           valid=true
           # GitHub login: letters, digits and '-', 1 to 39 characters, not
           # starting with '-'. A bot login such as name[bot] does not match.
+          # No '_': tenstorrent is not an Enterprise Managed Users org, so a
+          # login with '_' is not one of its members (assumption).
           if [ -n "$LOGIN" ] && ! [[ "$LOGIN" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then
             valid=false
           fi
@@ -83,11 +99,17 @@ jobs:
           if [ -n "$USER_ID" ] && ! [[ "$USER_ID" =~ ^[1-9][0-9]{0,18}$ ]]; then
             valid=false
           fi
+          # Both values given: they must name the same account, so an
+          # invalid value is a caller error.
+          if [ "$valid" = false ] && [ -n "$LOGIN" ] && [ -n "$USER_ID" ]; then
+            echo "::error title=org-member-check::The secrets login and user-id do not name the same user account."
+            exit 1
+          fi
           if [ "$valid" = true ]; then
-            # Remove this check when the job pins a release of vault-secrets
-            # that accepts pull_request_target for this workflow.
+            # Remove only after both the shared action and the OSPO setup
+            # accept pull_request_target.
             if [ "$EVENT_NAME" = pull_request_target ]; then
-              echo "::error title=org-member-check::pull_request_target is not supported yet."
+              echo "::error title=org-member-check::pull_request_target is not supported."
               exit 1
             fi
             if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
@@ -101,8 +123,8 @@ jobs:
           fi
           echo "Caller and values checked."
 
-      # Role and token names are short names. The action adds the prefix of
-      # the CALLING repository (tenstorrent--<repo>--org-member-check).
+      # Short names. The shared action makes the full names from the calling
+      # repository.
       - name: Get token
         id: vault
         if: steps.guard.outputs.valid == 'true'
@@ -133,7 +155,7 @@ jobs:
           # One GET request. Prints only the HTTP status (000 when no answer).
           # The token goes in a header read from a pipe, never in argv.
           # No -L: a redirect is an error here, not an answer.
-          # curl retries a timeout, 408, 429 and 5xx two times.
+          # curl retries a timeout and HTTP 408, 429, 500, 502, 503, 504 two times.
           get() {
             local code rc=0
             code="$(curl -sS --connect-timeout 5 --max-time 15 --retry 2 --retry-max-time 40 \
@@ -151,22 +173,29 @@ jobs:
             exit 0
           }
 
+          # With both values, an unknown id or a non-user account cannot name
+          # the same account as the login: a caller error, not false.
+          mismatch="The secrets login and user-id do not name the same user account."
           login="$LOGIN"
           if [ -n "$USER_ID" ]; then
             code="$(get "/user/$USER_ID")"
             case "$code" in
               200) ;;
-              404) answer false ;;
+              404) [ -z "$login" ] || fail "$mismatch"; answer false ;;
               *) fail "GitHub answered HTTP $code to the user id lookup." ;;
             esac
+            # id_login is not masked. Never print it.
             id_login="$(jq -r '.login // empty' "$body")"
             id_type="$(jq -r '.type // empty' "$body")"
             [ -n "$id_login" ] || fail "The user id lookup gave no login."
-            [ "$id_type" = User ] || answer false
+            if [ "$id_type" != User ]; then
+              [ -z "$login" ] || fail "$mismatch"
+              answer false
+            fi
             if [ -n "$login" ]; then
               lower_a="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
               lower_b="$(printf '%s' "$id_login" | tr '[:upper:]' '[:lower:]')"
-              [ "$lower_a" = "$lower_b" ] || fail "The secrets login and user-id name different accounts."
+              [ "$lower_a" = "$lower_b" ] || fail "$mismatch"
             fi
             login="$id_login"
           fi
@@ -181,7 +210,9 @@ jobs:
           esac
 
       # Revokes the token also when a step failed. A failed revoke is a
-      # warning only: the token expires on its own.
+      # warning only: the token expires on its own (GitHub App installation
+      # tokens last at most one hour). If the shared action fails after it got
+      # a token, its output is empty and this step cannot revoke it.
       - name: Revoke token
         if: always() && steps.vault.outputs.token != ''
         shell: bash
