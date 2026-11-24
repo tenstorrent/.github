@@ -265,7 +265,20 @@ later in the job.
 
 Each request of the Vault login (OIDC token, login) stops after 15 seconds.
 The OIDC token request is tried up to 3 times (about 50 seconds in the worst
-case). The Vault login is one request with no retry.
+case). Vault gets the login one time only, with no retry: a login that curl
+sent is not sent again, also when Vault did not answer in time.
+
+Since release 1.2, the action tries a Vault request again only when it is
+certain that curl did not send it: the name lookup or the connection failed or
+timed out, or the proxy could not open a connection to Vault (`userspace`
+mode). curl reports that it did not start the transfer (`time_pretransfer` is
+0), so Vault did not get the request. This applies to the login and to the
+GitHub token read. Up to 3 tries, 2 seconds apart. The log shows one line for
+each new try, for example `Could not reach Vault (name lookup timed out). Try
+2 of 3.` A failed try that was not sent stops after 5 seconds or less, so the
+tries add at most 14 seconds to the login, and at most 14 seconds to each of
+the 3 token engines. Any answer of Vault (also an HTTP error) and a request
+that was sent get no new try.
 The Vault read stops after `vault-timeout-seconds` (default 120).
 Without this limit, one stalled network connection can hold the step for
 about 16 minutes. A composite action step cannot have `timeout-minutes`, so
@@ -318,7 +331,8 @@ one job.
 | `Vault has no role ...` | Wrong `role`, or the grant is not applied yet. | Check the name of the workflow entry in your grant file. |
 | `This run does not match role ...: Vault refused claim ...` | The run does not match the role: wrong branch, wrong `environment:`, wrong workflow file, or an event the role does not allow. The message shows the facts of the run. | Run from the bound ref, environment or workflow file, or ask OSPO to change the grant. |
 | `Vault refused the login: too many logins (rate limit)` | Too many logins in a short time. | Run the job again in a minute. |
-| `Vault did not answer the login within 15 seconds` | A stalled network connection. | Run the job again. |
+| `Vault did not answer the login within 15 seconds` | The action sent the login, and Vault did not answer in time. A stalled network connection. The action does not send the login again. | Run the job again. |
+| `the action could not reach Vault ... in 3 tries (<cause>, curl exit N). Vault did not get the login.` / `... for the read of GitHub token set ...` | Since release 1.2. The name lookup or the connection to Vault failed or timed out 3 times, or the Tailscale proxy could not connect to Vault. The cause is in the message. Vault did not get the request. | Run the job again. If it occurs again, read the "Join tailnet" and "Wait for Vault" step logs. |
 | `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the key of the token only, for example `lib-read`. |
 | `input github-token '...' is not a token of <repo>` | `github-token` is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
 | `Role ... has no grant for GitHub token set ...` | Vault refused the token set in every place where a token can be. The role has no grant for it, the key is wrong, or the grant is not applied yet. | Check the key in `github_tokens` of your workflow entry in your grant. |
