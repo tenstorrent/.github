@@ -129,7 +129,9 @@ The role in the grant decides. The claims of the run must match it.
    the token last at most 15 minutes.
 8. A job can call the action two times. Give each call its own `id`. The second
    call does not join the tailnet again.
-9. Do not set `join-tailnet` or the Tailscale inputs unless OSPO asks.
+9. Do not set `join-tailnet`, `network-mode`, `proxy-port` or the Tailscale
+   inputs unless OSPO or the runner owner asks. `network-mode: userspace`
+   (release 1.2) is only for Linux runner pods without TUN or NET_ADMIN.
 10. The action stops a Vault step that does not answer within 120 seconds
     (`vault-timeout-seconds`) and fails. Run the job again. The limit needs
     `pgrep` on the runner. GitHub-hosted Linux runners have it. Without `pgrep`,

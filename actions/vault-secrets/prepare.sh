@@ -5,7 +5,9 @@
 # Reads:  IN_ROLE IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
 #         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
 #         REPOSITORY (github.repository) ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
-# Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix, token-set
+# Optional: IN_NETWORK_MODE IN_PROXY_PORT RUNNER_OS NODE_OPTIONS
+# Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix,
+#         token-set, tailscaled-args, proxy-url, proxy-env
 set -euo pipefail
 
 DEFAULT_URL='https://vault-ospo.eng-svc.aws.tenstorrent.com'
@@ -191,6 +193,56 @@ if [ "$join" = true ]; then
   [ -n "${IN_TS_TAGS:-}" ] || fail "input tailscale-tags is empty. It is needed to join the tailnet."
 fi
 
+# Network mode (release 1.2). kernel: the runner reaches Vault through its own
+# routes (default, as in 1.1). userspace: tailscaled runs without TUN and
+# NET_ADMIN, and Vault traffic goes through its loopback HTTP proxy. The
+# action starts no SOCKS5 proxy: no client of the action uses one.
+# The GitHub OIDC request keeps the runner's own proxy environment.
+network_mode="${IN_NETWORK_MODE:-kernel}"
+proxy_port="${IN_PROXY_PORT:-1055}"
+proxy_url=""
+tailscaled_args=""
+proxy_env='{}'
+case "$network_mode" in
+  kernel) ;;
+  userspace)
+    [ "${RUNNER_OS:-}" = Linux ] || fail "input network-mode userspace needs a Linux runner (this runner: ${RUNNER_OS:-unknown})."
+    if ! [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$proxy_port" -gt 65535 ]; then
+      fail "input proxy-port must be a whole number from 1 to 65535."
+    fi
+    proxy_url="http://127.0.0.1:$proxy_port"
+    tailscaled_args="--tun=userspace-networking --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
+    # hashicorp/vault-action has no proxy input. A step-local Node preload
+    # gives its HTTP client (got, Node global agents) the Tailscale proxy.
+    preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"
+    # NODE_OPTIONS accepts double-quoted paths; escape quotes and backslashes.
+    preload="${preload//\\/\\\\}"
+    preload="${preload//\"/\\\"}"
+    proxy_env="$(jq -cn --arg proxy "$proxy_url" \
+      --arg options "${NODE_OPTIONS:+$NODE_OPTIONS }--require=\"$preload\"" \
+      '{VAULT_SECRETS_PROXY_URL:$proxy, NODE_OPTIONS:$options}')"
+    ;;
+  *) fail "input network-mode must be kernel or userspace." ;;
+esac
+
+# Userspace without a join (join-tailnet false, or auto on a runner that is
+# already on the tailnet): the action uses a Tailscale HTTP proxy that already
+# runs. Something must answer on that port now, else the later steps fail. The
+# action never starts a second tailscaled next to a running one. curl exit 7
+# (refused) and 28 (no answer in 2 seconds) mean that nothing listens; any
+# other result means a listener. The wait step then checks the route to Vault.
+if [ "$network_mode" = userspace ] && [ "$join" = false ]; then
+  probe_rc=0
+  curl -s --noproxy '*' --connect-timeout 2 --max-time 2 -o /dev/null "$proxy_url/" || probe_rc=$?
+  if [ "$probe_rc" -eq 7 ] || [ "$probe_rc" -eq 28 ]; then
+    if [ "${IN_JOIN_TAILNET:-auto}" = auto ]; then
+      fail "network-mode userspace: this runner is already on the tailnet, but no Tailscale HTTP proxy answers on 127.0.0.1:$proxy_port. The action does not start a second Tailscale. Use join-tailnet: true on a runner without Tailscale, or set proxy-port to the port of the running Tailscale HTTP proxy (with join-tailnet: false), or use network-mode: kernel for a runner with a route to Vault."
+    else
+      fail "network-mode userspace with join-tailnet false: no Tailscale HTTP proxy answers on 127.0.0.1:$proxy_port. Set proxy-port to the port of the running Tailscale HTTP proxy, or use join-tailnet: true on a runner without Tailscale."
+    fi
+  fi
+fi
+
 delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 {
   printf 'url=%s\n' "$url"
@@ -200,5 +252,8 @@ delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   printf 'role-source=%s\n' "$role_source"
   printf 'prefix=%s\n' "$prefix"
   printf 'token-set=%s\n' "$token_set"
+  printf 'tailscaled-args=%s\n' "$tailscaled_args"
+  printf 'proxy-url=%s\n' "$proxy_url"
+  printf 'proxy-env=%s\n' "$proxy_env"
   printf 'spec<<%s\n%s\n%s\n' "$delimiter" "$spec" "$delimiter"
 } >>"$GITHUB_OUTPUT"

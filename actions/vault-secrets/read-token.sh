@@ -24,7 +24,12 @@
 # token; the action outputs token and secrets take it from there.
 # Do not use 'set -x' here.
 #
+# Proxy (release 1.2): when VAULT_PROXY is set (network-mode userspace), every
+# read goes through that Tailscale loopback proxy, also when NO_PROXY says
+# otherwise.
+#
 # Reads:  VAULT_URL VAULT_TOKEN TOKEN_SET TOKEN_INPUT ROLE REPOSITORY GITHUB_OUTPUT
+#         VAULT_PROXY (empty in network-mode kernel)
 # Writes: output token
 set -euo pipefail
 
@@ -59,6 +64,13 @@ esac
 [[ "$token_set" =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
   || fail "internal error: no valid token set name (output token-set of the prepare step is '$token_set')."
 [ -n "${VAULT_TOKEN:-}" ] || fail "internal error: no Vault token from the login step."
+# Vault requests go through the Tailscale proxy only, and only on loopback.
+vault_proxy=()
+if [ -n "${VAULT_PROXY:-}" ]; then
+  [[ "$VAULT_PROXY" =~ ^http://127\.0\.0\.1:([1-9][0-9]{0,4})$ ]] && [ "${BASH_REMATCH[1]}" -le 65535 ] \
+    || fail "proxy URL '$VAULT_PROXY' is not a loopback Tailscale proxy. The action does not send the Vault token through it."
+  vault_proxy=(--proxy "$VAULT_PROXY" --noproxy '')
+fi
 
 # Splits "<body>\n<http code>" (curl -w '\n%{http_code}') into body and code.
 split_response() {
@@ -85,6 +97,7 @@ for engine in "${ENGINES[@]}"; do
   # The Vault token goes in a header read from a pipe, never in argv.
   rc=0
   response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+    "${vault_proxy[@]+"${vault_proxy[@]}"}" \
     -w '\n%{http_code}' \
     -H @<(printf 'X-Vault-Token: %s\n' "$VAULT_TOKEN") \
     "$url/v1/$engine/token/$token_set")" || rc=$?

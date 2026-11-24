@@ -230,7 +230,17 @@ Stop. Do not change the workflow. Tell the human why, and ask OSPO.
 - The workflow runs on fork pull requests. Fork pull requests get no OIDC
   token.
 - The job runs on a self-hosted runner. The runner may already have its own
-  network path to Vault.
+  network path to Vault. Ask the runner owner which connection to use: the
+  default `network-mode: kernel` for a runner with a route, or
+  `network-mode: userspace` (release 1.2 and later) for a Linux pod without
+  TUN or NET_ADMIN. `join-tailnet: false` uses a route or proxy that the runner
+  already has; `auto` uses an active connection or joins. For userspace, the
+  runner must run actions with Node 24.5 or newer. When the action does not
+  join (`join-tailnet: false`, or `auto` on a runner already on the tailnet),
+  `proxy-port` must match a Tailscale HTTP proxy that already runs, else the
+  action stops at once; when the action joins, it starts the proxy on
+  `proxy-port` itself. Read the README section "Linux runner pods without TUN" before you
+  replace inline userspace or curl blocks.
 - The job sets its own tailnet tags (for example, it joins with a different
   tag for other access). A second join can break the first.
 - The old `hashicorp/vault-action` step uses an input that the action does not

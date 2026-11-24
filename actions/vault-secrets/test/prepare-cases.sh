@@ -12,7 +12,13 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 prepare="$here/../prepare.sh"
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+listener_pid=""
+# shellcheck disable=SC2329 # Called by the EXIT trap.
+cleanup() {
+  [ -z "$listener_pid" ] || kill "$listener_pid" 2>/dev/null || true
+  rm -rf "$work"
+}
+trap cleanup EXIT
 
 status=0
 nl=$'\n'
@@ -305,5 +311,145 @@ refuses 'output name in the second entry' \
   "kv/data/app a | A ;${nl}kv/data/app b | VAULT_SECRETS_GITHUB_TOKEN"
 refuses 'default name from the selector' 'kv/data/app VAULT_SECRETS_GITHUB_TOKEN'
 refuses 'default name from a quoted selector' 'kv/data/app "vault_secrets_github_token"'
+
+# Network mode (release 1.2).
+refuses_with 'bad network mode' 'input network-mode must be kernel or userspace' IN_NETWORK_MODE=auto
+refuses_with 'network mode in upper case' 'input network-mode must be kernel or userspace' IN_NETWORK_MODE=USERSPACE
+refuses_with 'userspace on macOS' 'input network-mode userspace needs a Linux runner' \
+  IN_NETWORK_MODE=userspace RUNNER_OS=macOS
+refuses_with 'userspace without RUNNER_OS' 'input network-mode userspace needs a Linux runner' \
+  IN_NETWORK_MODE=userspace
+for port in 0 65536 99999 -1 12.5 01055 ' 1055' '1055;echo bad' x; do
+  refuses_with "proxy-port '$port'" 'input proxy-port must be a whole number from 1 to 65535' \
+    IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$port"
+done
+
+# Fails unless the kernel outputs are the same as in release 1.1: no
+# tailscaled arguments, no proxy, no environment change for vault-action.
+kernel_is_plain() {
+  local title="$1"
+  shift
+  run_env "$@"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::$title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x 'proxy-env={}' "$work/out" || ! grep -q -x 'proxy-url=' "$work/out" \
+    || ! grep -q -x 'tailscaled-args=' "$work/out"; then
+    echo "::error::$title: kernel mode has proxy or tailscaled outputs"
+    status=1
+  elif [ -s "$work/log" ]; then
+    echo "::error::$title: kernel mode printed a message"
+    cat "$work/log"
+    status=1
+  else
+    echo "OK: $title: no proxy, no tailscaled arguments"
+  fi
+}
+kernel_is_plain 'network-mode not set'
+kernel_is_plain 'network-mode kernel' IN_NETWORK_MODE=kernel
+kernel_is_plain 'kernel ignores proxy-port' IN_NETWORK_MODE=kernel IN_PROXY_PORT=x
+kernel_is_plain 'kernel on macOS' IN_NETWORK_MODE=kernel RUNNER_OS=macOS
+
+# Fails unless userspace mode with proxy-port $1 gives the proxy on loopback
+# port $2, only an HTTP proxy (no SOCKS5), and an environment for vault-action
+# that holds only the preload. The runner's own proxy variables stay out of it.
+userspace_is() {
+  local port="$1" want="$2" proxy_env
+  run_env IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$port" IN_JOIN_TAILNET=true \
+    NODE_OPTIONS=--trace-warnings NO_PROXY='*' no_proxy='*' HTTPS_PROXY=http://egress.invalid:3128
+  proxy_env="$(sed -n 's/^proxy-env=//p' "$work/out")"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::userspace proxy-port '$port': prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x "proxy-url=http://127.0.0.1:$want" "$work/out"; then
+    echo "::error::userspace proxy-port '$port': output proxy-url is not http://127.0.0.1:$want"
+    status=1
+  elif ! grep -q -x -- "tailscaled-args=--tun=userspace-networking --outbound-http-proxy-listen=127.0.0.1:$want" "$work/out"; then
+    echo "::error::userspace proxy-port '$port': output tailscaled-args is not as expected"
+    status=1
+  elif ! printf '%s' "$proxy_env" | jq -e --arg url "http://127.0.0.1:$want" '
+    (keys == ["NODE_OPTIONS", "VAULT_SECRETS_PROXY_URL"]) and
+    .VAULT_SECRETS_PROXY_URL == $url and
+    (.NODE_OPTIONS | startswith("--trace-warnings --require=\"")) and
+    (.NODE_OPTIONS | endswith("/proxy-agent.cjs\""))' >/dev/null; then
+    echo "::error::userspace proxy-port '$port': output proxy-env is not as expected: $proxy_env"
+    status=1
+  else
+    echo "OK: userspace proxy-port '$port' gives 127.0.0.1:$want"
+  fi
+}
+userspace_is '' 1055
+userspace_is 1 1
+userspace_is 21055 21055
+userspace_is 65535 65535
+
+# Userspace without a join uses a Tailscale HTTP proxy that already runs.
+# prepare.sh refuses when nothing answers on proxy-port, and never joins a
+# second time. A local listener stands in for the proxy; a fake tailscale
+# whose status succeeds stands in for a runner already on the tailnet.
+python3 -c '
+import socket, sys
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+print(s.getsockname()[1], flush=True)
+while True:
+    c, _ = s.accept()
+    c.recv(4096)
+    c.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    c.close()
+' >"$work/listener.port" &
+listener_pid=$!
+disown "$listener_pid" 2>/dev/null || true
+for _ in $(seq 50); do [ -s "$work/listener.port" ] && break; sleep 0.1; done
+live_port="$(cat "$work/listener.port")"
+free_port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+mkdir -p "$work/ts-on" "$work/ts-off"
+printf '#!/bin/sh\nexit 0\n' >"$work/ts-on/tailscale"
+printf '#!/bin/sh\nexit 1\n' >"$work/ts-off/tailscale"
+chmod +x "$work/ts-on/tailscale" "$work/ts-off/tailscale"
+on_tailnet="$work/ts-on:$PATH"
+off_tailnet="$work/ts-off:$PATH"
+
+# Fails unless prepare.sh, with the replaced inputs $3..., succeeds with
+# output join=$2 and proxy-url on port $4.
+userspace_join_is() {
+  local title="$1" want_join="$2" port="$3"
+  shift 3
+  run_env IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$port" "$@"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::$title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x "join=$want_join" "$work/out" \
+    || ! grep -q -x "proxy-url=http://127.0.0.1:$port" "$work/out"; then
+    echo "::error::$title: outputs join and proxy-url are not join=$want_join, port $port"
+    status=1
+  else
+    echo "OK: $title: join=$want_join"
+  fi
+}
+refuses_with 'userspace, join false, no proxy' \
+  "join-tailnet false: no Tailscale HTTP proxy answers on 127.0.0.1:$free_port" \
+  IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$free_port" IN_JOIN_TAILNET=false
+userspace_join_is 'userspace, join false, proxy runs' false "$live_port" IN_JOIN_TAILNET=false
+refuses_with 'userspace, auto, on the tailnet, no proxy' \
+  "already on the tailnet, but no Tailscale HTTP proxy answers on 127.0.0.1:$free_port" \
+  IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$free_port" IN_JOIN_TAILNET=auto PATH="$on_tailnet"
+refuses_with 'userspace, auto, refusal names the ways out' 'Use join-tailnet: true on a runner without Tailscale' \
+  IN_NETWORK_MODE=userspace RUNNER_OS=Linux IN_PROXY_PORT="$free_port" IN_JOIN_TAILNET=auto PATH="$on_tailnet"
+userspace_join_is 'userspace, auto, on the tailnet, proxy runs' false "$live_port" \
+  IN_JOIN_TAILNET=auto PATH="$on_tailnet"
+userspace_join_is 'userspace, auto, not on the tailnet' true "$free_port" \
+  IN_JOIN_TAILNET=auto PATH="$off_tailnet"
+userspace_join_is 'userspace, join true, no probe' true "$free_port" IN_JOIN_TAILNET=true
+run_env IN_NETWORK_MODE=kernel IN_PROXY_PORT="$free_port" IN_JOIN_TAILNET=auto PATH="$on_tailnet"
+if [ "$rc" -ne 0 ] || ! grep -q -x 'join=false' "$work/out" || grep -q 'proxy' "$work/log"; then
+  echo "::error::kernel, auto, on the tailnet: expected join=false and no proxy check"
+  cat "$work/log"
+  status=1
+else
+  echo "OK: kernel, auto, on the tailnet: join=false, no proxy check"
+fi
 
 exit "$status"

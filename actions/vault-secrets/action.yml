@@ -40,6 +40,21 @@ inputs:
       `true`: always join. `false`: never join.
     required: false
     default: auto
+  network-mode:
+    description: >-
+      Since release 1.2. `kernel` (default): the runner reaches Vault through its
+      own routes, as in 1.1. `userspace`: for Linux runner pods without /dev/net/tun
+      or NET_ADMIN. Tailscale runs in userspace mode, and all Vault requests go
+      through its loopback proxy on `proxy-port`. The GitHub OIDC request keeps the
+      runner's own proxy settings. Needs a Linux runner with Node 24.5 or newer.
+    required: false
+    default: kernel
+  proxy-port:
+    description: >-
+      Since release 1.2. Port of the Tailscale HTTP proxy on 127.0.0.1 in
+      `userspace` mode (1 to 65535). Not used in `kernel` mode.
+    required: false
+    default: "1055"
   tailscale-client-id:
     description: >-
       Tailscale OAuth client ID for workload identity federation. Not a secret.
@@ -106,6 +121,8 @@ runs:
         IN_SECRETS: ${{ inputs.secrets }}
         IN_VAULT_URL: ${{ inputs.vault-url }}
         IN_JOIN_TAILNET: ${{ inputs.join-tailnet }}
+        IN_NETWORK_MODE: ${{ inputs.network-mode }}
+        IN_PROXY_PORT: ${{ inputs.proxy-port }}
         IN_TS_CLIENT_ID: ${{ inputs.tailscale-client-id }}
         IN_TS_AUDIENCE: ${{ inputs.tailscale-audience }}
         IN_TS_TAGS: ${{ inputs.tailscale-tags }}
@@ -123,12 +140,14 @@ runs:
         oauth-client-id: ${{ inputs.tailscale-client-id }}
         audience: ${{ inputs.tailscale-audience }}
         tags: ${{ inputs.tailscale-tags }}
+        tailscaled-args: ${{ steps.prepare.outputs.tailscaled-args }}
 
     - name: Wait for Vault
       id: wait
       shell: bash
       env:
         VAULT_URL: ${{ steps.prepare.outputs.url }}
+        VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
       run: bash "$GITHUB_ACTION_PATH/wait-for-vault.sh"
 
     # login.sh masks the OIDC JWT and the Vault token at once. The Vault token
@@ -145,6 +164,7 @@ runs:
         ROLE_INPUT: ${{ inputs.role }}
         PREFIX: ${{ steps.prepare.outputs.prefix }}
         REPOSITORY: ${{ github.repository }}
+        VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
       run: bash "$GITHUB_ACTION_PATH/login.sh"
 
     # Only for github-token without '/': finds the engine of the token set and
@@ -162,6 +182,7 @@ runs:
         TOKEN_INPUT: ${{ inputs.github-token }}
         ROLE: ${{ steps.prepare.outputs.role }}
         REPOSITORY: ${{ github.repository }}
+        VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
       run: bash "$GITHUB_ACTION_PATH/read-token.sh"
 
     # Composite steps cannot have timeout-minutes, and vault-action has no
@@ -183,6 +204,10 @@ runs:
       id: vault
       if: steps.prepare.outputs.spec != ''
       uses: hashicorp/vault-action@892a26828f195e65540a40b4768ae4571f51ebfc # v4.0.0
+      # Empty in kernel mode: the runner's environment is not changed.
+      # In userspace mode: a Node preload (proxy-agent.cjs) sends the Vault
+      # requests of this step through the Tailscale loopback proxy.
+      env: ${{ fromJSON(steps.prepare.outputs.proxy-env) }}
       with:
         url: ${{ steps.prepare.outputs.url }}
         method: token

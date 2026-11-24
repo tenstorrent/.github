@@ -13,7 +13,13 @@
 # One login, no retry: each refused login is an audit entry and counts against
 # the rate-limit quota on auth/jwt-github/.
 #
+# Proxy (release 1.2): when VAULT_PROXY is set (network-mode userspace), the
+# Vault login goes through that Tailscale loopback proxy, also when NO_PROXY
+# says otherwise. The OIDC request to GitHub keeps the runner's own proxy
+# environment (HTTPS_PROXY, NO_PROXY) in both modes.
+#
 # Reads:  VAULT_URL ROLE ROLE_SOURCE ROLE_INPUT PREFIX REPOSITORY
+#         VAULT_PROXY (empty in network-mode kernel)
 #         ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN GITHUB_OUTPUT
 #         GITHUB_REF GITHUB_EVENT_NAME GITHUB_WORKFLOW_REF (only for messages,
 #         when the OIDC token cannot be decoded)
@@ -45,6 +51,13 @@ case "$url" in
   https://vault-ospo.eng-svc.aws.tenstorrent.com | https://vault-ospo-staging.eng-svc.aws.tenstorrent.com) ;;
   *) fail "Vault URL '$url' is not an OSPO Vault URL. The action does not send the OIDC token to it." ;;
 esac
+# Vault requests go through the Tailscale proxy only, and only on loopback.
+vault_proxy=()
+if [ -n "${VAULT_PROXY:-}" ]; then
+  [[ "$VAULT_PROXY" =~ ^http://127\.0\.0\.1:([1-9][0-9]{0,4})$ ]] && [ "${BASH_REMATCH[1]}" -le 65535 ] \
+    || fail "proxy URL '$VAULT_PROXY' is not a loopback Tailscale proxy. The action does not send the OIDC token through it."
+  vault_proxy=(--proxy "$VAULT_PROXY" --noproxy '')
+fi
 [ -n "$role" ] || fail "no Vault role to log in with (output role of the prepare step is empty)."
 [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] \
   || fail "job needs permissions: id-token: write (not available on fork pull requests)"
@@ -109,6 +122,7 @@ rc=0
 response="$(printf '%s' "$jwt" \
   | jq -Rc --arg role "$role" '{role: $role, jwt: .}' \
   | curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+    "${vault_proxy[@]+"${vault_proxy[@]}"}" \
     -w '\n%{http_code}' \
     -H 'Content-Type: application/json' \
     -X POST --data-binary @- \

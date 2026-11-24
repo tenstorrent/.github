@@ -11,7 +11,10 @@
 #   - every '::add-mask::' comes before the first write to GITHUB_OUTPUT;
 #   - the JWT, the Vault token and the request token never appear in the log
 #     except in '::add-mask::' lines, and never in argv;
-#   - one login request, no retry, no revoke-self.
+#   - one login request, no retry, no revoke-self;
+#   - network-mode userspace (VAULT_PROXY): the Vault login goes through the
+#     loopback proxy and ignores NO_PROXY, the OIDC request keeps the runner's
+#     proxy environment, and a proxy that is not on loopback gets no request.
 # Checks of read-token.sh (github-token without '/'):
 #   - the engines in the order github, github-members, github-admin; 403 and
 #     404 go on to the next engine; the first token stops the search, so each
@@ -19,7 +22,10 @@
 #   - other errors and timeouts stop at once with their own message;
 #   - 403 in every engine gives the message that the role has no grant;
 #   - the GitHub token is masked before the write to GITHUB_OUTPUT, and no
-#     secret value is in the log or in argv.
+#     secret value is in the log or in argv;
+#   - network-mode userspace (VAULT_PROXY): every token read goes through the
+#     loopback proxy and ignores NO_PROXY; a proxy that is not on loopback gets
+#     no request.
 # Checks of check-values.sh: output secrets holds the vault-action outputs and
 # the token of the token step; an empty value fails.
 # Uses only dummy values: no token and no secret.
@@ -61,6 +67,7 @@ for a in "$@"; do
   prev="$a"
 done
 if [ "$data" = true ]; then cat >>"$FAKE_BODY"; printf '\n' >>"$FAKE_BODY"; fi
+printf '%s https_proxy=%s\n' "$target" "${HTTPS_PROXY:-}" >>"$FAKE_ENV"
 answer() { printf '%s\n%s' "$2" "$1"; }
 case "$target" in
   *'audience='*)
@@ -119,6 +126,7 @@ run_login() {
   : >"$work/argv"
   : >"$work/headers"
   : >"$work/body"
+  : >"$work/env"
   rc=0
   env -i PATH="$work/bin:$PATH" \
     VAULT_URL="$url" \
@@ -130,7 +138,7 @@ run_login() {
     ACTIONS_ID_TOKEN_REQUEST_URL='https://token.invalid/oidc?api-version=2.0' \
     ACTIONS_ID_TOKEN_REQUEST_TOKEN="$request_token" \
     GITHUB_OUTPUT="$all" \
-    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" \
+    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" FAKE_ENV="$work/env" \
     FAKE_JWT="$jwt" FAKE_VAULT_TOKEN="$vault_token" FAKE_OIDC=ok FAKE_LOGIN=ok \
     "$@" \
     bash "$login" >>"$all" 2>&1 || rc=$?
@@ -305,6 +313,52 @@ else
   echo "OK: staging URL is allowed"
 fi
 
+# ── Network mode userspace (release 1.2) ────────────────────────────────────
+# Kernel mode (VAULT_PROXY not set): curl gets no proxy option, as in 1.1.
+run_login
+if [ "$rc" -ne 0 ]; then
+  bad "kernel: login.sh failed (exit $rc), expected exit 0"
+elif grep -q -E -- '--(no)?proxy' "$work/argv"; then
+  bad "kernel: curl got a proxy option"
+else
+  echo "OK: kernel: no proxy option on any request"
+fi
+
+# Userspace: the login goes through the loopback proxy, also with NO_PROXY=*.
+# The OIDC request has no proxy option, so curl uses the runner's HTTPS_PROXY.
+proxy='http://127.0.0.1:1055'
+run_login VAULT_PROXY="$proxy" HTTPS_PROXY=http://egress.invalid:3128 NO_PROXY='*' no_proxy='*'
+oidc_argv="$(grep -F -- 'audience=' "$work/argv" || true)"
+login_argv="$(grep -F -- '/v1/auth/jwt-github/login' "$work/argv" || true)"
+if [ "$rc" -ne 0 ]; then
+  bad "userspace: login.sh failed (exit $rc), expected exit 0"
+elif [[ "$login_argv" != *"--proxy $proxy --noproxy "* ]]; then
+  bad "userspace: the Vault login does not go through $proxy with --noproxy"
+elif [[ "$oidc_argv" == *--proxy* || "$oidc_argv" == *--noproxy* ]]; then
+  bad "userspace: the OIDC request got a proxy option"
+elif ! grep -q -F -- 'audience=' "$work/env" \
+  || grep -F -- 'audience=' "$work/env" | grep -v -q -F -- 'https_proxy=http://egress.invalid:3128'; then
+  bad "userspace: the OIDC request did not keep the runner's HTTPS_PROXY"
+elif [ "$(login_calls)" -ne 1 ]; then
+  bad "userspace: expected one login request, got $(login_calls)"
+else
+  echo "OK: userspace: Vault login through $proxy, OIDC with the runner's proxy"
+fi
+no_leaks userspace
+refused 'userspace: claim mismatch' 'Vault refused claim environment.' \
+  VAULT_PROXY="$proxy" FAKE_LOGIN=claim-env
+refused 'userspace: login timeout' 'Vault did not answer the login within 15 seconds.' \
+  VAULT_PROXY="$proxy" FAKE_LOGIN=timeout
+
+# Only a proxy on 127.0.0.1 gets the OIDC token: no request at all otherwise.
+for other in http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 \
+  http://127.0.0.1:1055/x http://127.0.0.1: http://127.0.0.1:65536 'http://127.0.0.1:1055 -k'; do
+  refused "proxy '$other'" 'is not a loopback Tailscale proxy' VAULT_PROXY="$other"
+  if [ -s "$work/argv" ]; then
+    bad "proxy '$other': login.sh sent a request"
+  fi
+done
+
 # ── read-token.sh ───────────────────────────────────────────────────────────
 read_token="$here/../read-token.sh"
 set_name='tenstorrent--.github--contents-read'
@@ -316,6 +370,7 @@ run_read() {
   : >"$work/argv"
   : >"$work/headers"
   : >"$work/body"
+  : >"$work/env"
   rc=0
   env -i PATH="$work/bin:$PATH" \
     VAULT_URL="$url" \
@@ -325,7 +380,7 @@ run_read() {
     ROLE=tenstorrent--.github--vault-action-test \
     REPOSITORY=tenstorrent/.github \
     GITHUB_OUTPUT="$all" \
-    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" \
+    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" FAKE_ENV="$work/env" \
     FAKE_JWT="$jwt" FAKE_VAULT_TOKEN="$vault_token" FAKE_OIDC=ok FAKE_LOGIN=ok \
     FAKE_GH_TOKEN="$gh_token" FAKE_ENGINES='github=ok' \
     "$@" \
@@ -532,6 +587,38 @@ if printf '%s\n' "$log" | awk '/^secrets<</ { d = substr($0, 10); on = 1; next }
 else
   echo "OK: check: no value in the log"
 fi
+
+# ── read-token.sh in network-mode userspace (release 1.2) ──────────────────
+# Kernel mode (VAULT_PROXY not set): no proxy option, as in 1.1.
+run_read FAKE_ENGINES='github=denied github-members=ok'
+if [ "$rc" -ne 0 ]; then
+  bad "token read, kernel: read-token.sh failed (exit $rc), expected exit 0"
+elif grep -q -E -- '--(no)?proxy' "$work/argv"; then
+  bad "token read, kernel: curl got a proxy option"
+else
+  echo "OK: token read, kernel: no proxy option on any request"
+fi
+
+# Userspace: every token read goes through the loopback proxy, also with NO_PROXY=*.
+found 'userspace, 2nd engine' 'github github-members' \
+  VAULT_PROXY="$proxy" NO_PROXY='*' no_proxy='*' FAKE_ENGINES='github=denied github-members=ok'
+if [ "$(wc -l <"$work/argv" | tr -d ' ')" -ne 2 ] \
+  || [ "$(grep -c -F -- "--proxy $proxy --noproxy " "$work/argv")" -ne 2 ]; then
+  bad "token read, userspace: a token read did not go through $proxy with --noproxy"
+else
+  echo "OK: token read, userspace: both reads through $proxy"
+fi
+read_refused 'userspace, timeout' 'github' 'within 15 seconds' \
+  VAULT_PROXY="$proxy" FAKE_ENGINES='github=timeout'
+
+# Only a proxy on 127.0.0.1 gets the Vault token: no request at all otherwise.
+for other in http://10.0.0.1:1055 http://localhost:1055 socks5://127.0.0.1:1055 \
+  http://127.0.0.1:1055/x http://127.0.0.1:65536 'http://127.0.0.1:1055 -k'; do
+  read_refused "proxy '$other'" '' 'is not a loopback Tailscale proxy' VAULT_PROXY="$other"
+  if [ -s "$work/argv" ]; then
+    bad "token read, proxy '$other': read-token.sh sent a request"
+  fi
+done
 
 # No 'set -x' and no echo of a secret variable in the scripts.
 for script in "$login" "$read_token" "$check"; do
