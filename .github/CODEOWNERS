@@ -7,5 +7,9 @@
 /.github/workflows/vault-secrets-test.yml    @jbakerTT
 /skills/vault-secrets-workflow/              @jbakerTT
 
+# Reusable org member check and its documentation.
+/.github/workflows/org-member-check.yml      @jbakerTT
+/workflows/org-member-check.md               @jbakerTT
+
 # This file.
 /.github/CODEOWNERS                          @jbakerTT
