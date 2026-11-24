@@ -54,9 +54,8 @@ jobs:
     steps:
       # An empty output is an error, never "not a member".
       - name: Check the answer
-        env:
-          MEMBER: ${{ needs.member.outputs.member }}
-        run: '[ "$MEMBER" = false ] || { echo "::error::No answer from org-member-check."; exit 1; }'
+        if: needs.member.outputs.member != 'false'
+        run: '{ echo "::error::No answer from org-member-check."; exit 1; }'
       - run: gh issue edit "$NUMBER" --repo "$GITHUB_REPOSITORY" --add-label community
         env:
           GH_TOKEN: ${{ github.token }}
@@ -99,7 +98,8 @@ Rules:
 `true` only for a member of `tenstorrent`. With one value given, `false` for
 an outside collaborator, a pending invitation, a bot, an organization, an
 unknown login or id, and a value that is not a valid login or id. With both
-values given, each of these fails the job.
+values given, an invalid value, an unknown id, a bot or an organization fails
+the job; an outside collaborator or a pending invitation is `false`.
 
 If the check cannot get an answer (sign-in, network or GitHub error), the job
 fails. It never answers `false` on an error. Jobs that need it do not run.
