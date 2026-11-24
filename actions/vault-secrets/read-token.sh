@@ -14,6 +14,10 @@
 #                   new GitHub App token, so the script never reads it again.
 #   HTTP 403, 404   the role cannot read the set in this engine. Try the next.
 #   other           stop with an error (no retry: a read can make a token).
+# The one exception (release 1.2): curl did not send the read, because the
+# name lookup or the connection failed or timed out, or the proxy could not
+# open a tunnel to Vault. Then the script sends the same read again: up to 3
+# tries, 2 seconds apart. The same rule as login.sh (not_sent_cause).
 # 403 in every engine: the role has no grant for this token set.
 # A denied read is an entry in the Vault audit log (path and 'permission
 # denied'). It needs no access that the role does not already have.
@@ -33,8 +37,15 @@
 # Writes: output token
 set -euo pipefail
 
-# Seconds per HTTP request. At most one request per engine.
+# Seconds per HTTP request. At most one request per engine that Vault gets.
 REQUEST_TIMEOUT=15
+# Tries of one read when curl did not send it, and seconds between them.
+TRIES=3
+RETRY_DELAY=2
+# curl -w: the HTTP code, the CONNECT code of a proxy, and the times of the
+# name lookup and of the start of the transfer. curl writes this line also
+# when it fails.
+WRITE_OUT='\n%{http_code} %{http_connect} %{time_namelookup} %{time_pretransfer}'
 ENGINES=(github github-members github-admin)
 
 # Prints one error annotation and exits. Escapes the characters that end or
@@ -72,11 +83,50 @@ if [ -n "${VAULT_PROXY:-}" ]; then
   vault_proxy=(--proxy "$VAULT_PROXY" --noproxy '')
 fi
 
-# Splits "<body>\n<http code>" (curl -w '\n%{http_code}') into body and code.
-split_response() {
-  code="${1##*$'\n'}"
+# Splits "<body>\n<WRITE_OUT line>" into body, code, proxy_code, t_lookup and
+# t_start. All are empty when curl wrote no such line.
+split_vault_response() {
+  local line="${1##*$'\n'}"
   body="${1%$'\n'*}"
   [ "$body" != "$1" ] || body=""
+  code="" proxy_code="" t_lookup="" t_start=""
+  read -r code proxy_code t_lookup t_start _ <<<"$line" || true
+}
+
+# Prints why the request did not reach Vault, but only when it is certain that
+# curl did not send it. Else prints nothing. Certain means all of:
+#   - time_pretransfer is 0: curl did not get to the start of the transfer, so
+#     no byte of the request went out. curl sets this time only after the
+#     connection (with TLS, and with the CONNECT tunnel of a proxy) is ready.
+#   - no HTTP answer (http_code 000).
+#   - the curl error is one of: 5, 6 (name lookup failed), 7 (connection
+#     failed), 28 (timeout; with time_pretransfer 0 this is a timeout of the
+#     name lookup or of the connection), 56 with a 5xx answer of the proxy to
+#     CONNECT (the proxy could not open a tunnel to Vault).
+# Not retried: a request that curl started to send, any HTTP answer of Vault,
+# TLS errors, a 4xx answer of the proxy, and a missing -w line.
+not_sent_cause() {
+  local zero='^0(\.0+)?$' proxy="the proxy"
+  [ -z "${VAULT_PROXY:-}" ] || proxy="the Tailscale proxy"
+  if ! [[ "$t_start" =~ $zero ]] || [ "$code" != 000 ]; then
+    return 0
+  fi
+  case "$rc" in
+    5) echo "name lookup of $proxy failed" ;;
+    6) echo "name lookup failed" ;;
+    7) if [ -n "${VAULT_PROXY:-}" ]; then echo "connection to $proxy failed"; else echo "connection failed"; fi ;;
+    28)
+      if [[ "$t_lookup" =~ $zero ]]; then
+        echo "name lookup timed out"
+      elif [ -n "${VAULT_PROXY:-}" ]; then
+        echo "connection through $proxy timed out"
+      else
+        echo "connection timed out"
+      fi
+      ;;
+    56) if [[ "$proxy_code" =~ ^5[0-9][0-9]$ ]]; then echo "$proxy could not connect to Vault, HTTP $proxy_code"; fi ;;
+  esac
+  return 0
 }
 
 # The first Vault error text of the body, on one line, without '::'.
@@ -95,15 +145,24 @@ from=""
 github_token=""
 for engine in "${ENGINES[@]}"; do
   # The Vault token goes in a header read from a pipe, never in argv.
-  rc=0
-  response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
-    "${vault_proxy[@]+"${vault_proxy[@]}"}" \
-    -w '\n%{http_code}' \
-    -H @<(printf 'X-Vault-Token: %s\n' "$VAULT_TOKEN") \
-    "$url/v1/$engine/token/$token_set")" || rc=$?
-  code="" body=""
-  [ "$rc" -ne 0 ] || split_response "$response"
-  response=""
+  # A new try only when curl did not send the read (not_sent_cause).
+  try=1
+  while :; do
+    rc=0
+    response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+      "${vault_proxy[@]+"${vault_proxy[@]}"}" \
+      -w "$WRITE_OUT" \
+      -H @<(printf 'X-Vault-Token: %s\n' "$VAULT_TOKEN") \
+      "$url/v1/$engine/token/$token_set")" || rc=$?
+    split_vault_response "$response"
+    response=""
+    cause=""
+    [ "$rc" -eq 0 ] || cause="$(not_sent_cause)"
+    { [ -n "$cause" ] && [ "$try" -lt "$TRIES" ]; } || break
+    try=$((try + 1))
+    echo "Could not reach Vault ($cause). Try $try of $TRIES."
+    sleep "$RETRY_DELAY"
+  done
   if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
     github_token="$(printf '%s' "$body" | jq -r '.data.token // empty' 2>/dev/null || true)"
     if [ -n "$github_token" ]; then
@@ -114,7 +173,9 @@ for engine in "${ENGINES[@]}"; do
       || fail "Vault answered the read of GitHub token set $token_set$from without a token. Report this to OSPO."
     break
   fi
-  if [ "$rc" -eq 28 ]; then
+  if [ -n "$cause" ]; then
+    fail "the action could not reach Vault $url for the read of GitHub token set $token_set$from in $TRIES tries ($cause, curl exit $rc). Vault did not get the read. The likely cause is a short network problem on the tailnet. Run the job again."
+  elif [ "$rc" -eq 28 ]; then
     fail "Vault did not answer the read of GitHub token set $token_set$from within $REQUEST_TIMEOUT seconds. The likely cause is a stalled network connection on the tailnet. Run the job again."
   elif [ "$rc" -ne 0 ]; then
     fail "the action could not send the read of GitHub token set $token_set$from to Vault $url (curl exit $rc). Run the job again."
