@@ -588,6 +588,11 @@ def include_target(value, source, environ):
     return os.path.join(os.path.dirname(os.path.abspath(source)), value)
 
 
+def conditional_include(key):
+    """Whether a config key is an includeIf.<condition>.path directive."""
+    return re.fullmatch(r"includeif\..*\.path", key.lower()) is not None
+
+
 def anchored_condition(key, source, environ):
     """An includeIf key whose `gitdir:./` or `gitdir:~/` pattern no longer depends
     on which file holds it: `./` means the directory of that file."""
@@ -633,7 +638,7 @@ def copy_globals(session, real_git, environ, caches):
             header = subsection(key, "http.", ".extraheader")
             if header is not None and cache_host(header, caches):
                 continue
-            if value is not None and (key.lower() == "include.path" or re.fullmatch(r"includeif\..*\.path", key.lower())):
+            if value is not None and (key.lower() == "include.path" or conditional_include(key)):
                 # A file that does not exist yet is read once a later step writes it,
                 # as Git does: the directive keeps its absolute path.
                 target = include_target(value, source, environ)
@@ -660,7 +665,7 @@ def flatten(real_git, environ, file, skip, depth=0):
         elif key.lower() == "include.path":
             included = include_target(value, file, environ)
             entries += flatten(real_git, environ, included, skip, depth + 1) if os.path.exists(included) else []
-        elif re.fullmatch(r"includeif\..*\.path", key.lower()):
+        elif conditional_include(key):
             entries.append((anchored_condition(key, file, environ), include_target(value, file, environ)))
         elif (key.lower(), value) not in skip:
             entries.append((key, value))
