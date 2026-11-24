@@ -169,8 +169,9 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/login.sh"
 
     # Only for github-token without '/': finds the engine of the token set and
-    # reads the token, one request per engine, 15 seconds each, no retry (a new
-    # try, up to 3 tries, only when curl did not send the request). The
+    # reads the token, 15 seconds for each request. A request that curl sent is
+    # not sent again. A request that curl did not send gets a new try, up to
+    # 3 tries for each engine. The
     # first success is the token: vault-action does not read it again. Masks the
     # token at once. See read-token.sh.
     - name: Get GitHub token from Vault
