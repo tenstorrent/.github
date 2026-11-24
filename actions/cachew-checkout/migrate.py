@@ -87,14 +87,20 @@ CHECKOUT = re.compile(
 )
 # The tag comment --write writes after a reference it rewrites, which is
 # replaced; the rest of a step's comment is the author's and stays.
-TAG_COMMENT = re.compile(r"(?i:[ \t]*(?:v\d+(?:\.\d+)*|cachew checkout)(?![\w.])[ \t;,:-]*)*")
+# White space before the first tag; separators, white space among them, after
+# each, so no space can be read two ways.
+TAG_COMMENT = re.compile(r"(?i:[ \t]*(?:(?:v\d+(?:\.\d+)*|cachew checkout)(?![\w.])[ \t;,:-]*)*)")
 # The pin itself in a CHECKOUT match: the action, at either location, and its commit.
 PIN = re.compile(r"(?i:" + re.escape(ACTION_REPO) + "|" + re.escape(LEGACY_REPO) + r")@[0-9a-f]{40}")
+# White space in flow YAML, with any comments in it: a # after white space, to
+# the end of its line. Each comment needs the white space before it, so a run of
+# white space is read one way only.
+FLOW_GAP = r"(?:[ \t\r\n]+#[^\n]*)*[ \t\r\n]*"
 # A flow mapping's uses: key whose value is a checkout --write would migrate,
 # matched where the key starts.
 FLOW_CHECKOUT = re.compile(
-    r"(?P<key>['\"]?)uses(?P=key)[ \t]*:[ \t\r\n]*(?P<quote>['\"]?)"
-    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=[ \t\r\n]*[,}])"
+    r"(?P<key>['\"]?)uses(?P=key)[ \t]*:" + FLOW_GAP + r"(?P<quote>['\"]?)"
+    r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, MIGRATABLE_REFS)) + r")(?P=quote)(?=" + FLOW_GAP + r"[,}])"
 )
 # Any mention of the action with a ref, wherever it appears in a file and however
 # its path is spelled: one word that starts at the owner, names the action and
@@ -266,8 +272,14 @@ def runner_labels(value):
     return [scalar(value)]
 
 
-# From a key's colon to the `{` of a flow mapping value, as SEQUENCE_START.
-MAPPING_START = re.compile(r"(?:[ \t\r\n]+|(?<=[ \t\n])#[^\n]*|[!&][^\s,\[\]{}]*)*\{")
+# What may come between a key's colon and its value: white space, comments,
+# tags and anchors, over any number of lines. Each character can be read only
+# one way (one white space character at a time, a comment to its line's end, a
+# property to its last character), so a near miss cannot backtrack
+# exponentially, as `(?:[ \t]+)*` does.
+VALUE_GAP = r"(?:[ \t\r\n]|(?<=[ \t\n])#[^\n]*(?![^\n])|[!&][^\s,\[\]{}]*(?![^\s,\[\]{}]))*"
+# From a key's colon to the `{` of a flow mapping value.
+MAPPING_START = re.compile(VALUE_GAP + r"\{")
 
 
 def flow_jobs(text):
@@ -750,7 +762,7 @@ STEPS_ALIAS = re.compile(r"""[ \t]*(?:-[ \t]+)?(['"]?)steps\1[ \t]*:[ \t]+(?P<al
 STEPS_LINE = re.compile(r"""[ \t]*(?:-[ \t]+)?(['"]?)steps\1[ \t]*:(?=[ \t]|$)""")
 # From a key's colon to the `[` of a flow sequence value: white space, comments,
 # tags and anchors, over any number of lines.
-SEQUENCE_START = re.compile(r"(?:[ \t\r\n]+|(?<=[ \t\n])#[^\n]*|[!&][^\s,\[\]{}]*)*\[")
+SEQUENCE_START = re.compile(VALUE_GAP + r"\[")
 
 
 def sequence_steps(text, rows, hosted):
@@ -875,7 +887,8 @@ def value_extent(text, key):
     """The end of the text a uses: value could take in: its own line and every
     following line indented more deeply than the key (in a flow mapping, than
     the line where its flow collection starts), as YAML requires of a block or
-    flow scalar's continuation, blank lines included."""
+    flow scalar's continuation, blank and comment lines included: a comment line
+    ends no value, at any indentation."""
     holder = key.start("q")
     if key["flow"]:
         # The line where the innermost open flow collection starts.
@@ -891,7 +904,8 @@ def value_extent(text, key):
     while end >= 0:
         following = text.find("\n", end + 1)
         line = text[end + 1 : len(text) if following < 0 else following]
-        if line.strip() and len(line) - len(line.lstrip(" ")) <= column:
+        content = line.strip(" \t\r")
+        if content and not content.startswith("#") and len(line) - len(line.lstrip(" ")) <= column:
             return end
         end = following
     return len(text)

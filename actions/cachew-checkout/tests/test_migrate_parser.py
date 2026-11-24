@@ -21,6 +21,7 @@ import importlib.util
 import itertools
 import os
 from pathlib import Path
+import random
 import re
 import unittest
 
@@ -38,6 +39,9 @@ spec.loader.exec_module(migrate)
 SHA = "a" * 40
 PIN = f"{migrate.ACTION_REPO}@{SHA}"
 CHECKOUT = "actions/checkout@v7.0.1"
+# CACHEW_FUZZ_SEED and CACHEW_FUZZ_CASES run another sample of random workflows.
+FUZZ_SEED = int(os.environ.get("CACHEW_FUZZ_SEED", "1"))
+FUZZ_CASES = int(os.environ.get("CACHEW_FUZZ_CASES", "1500"))
 MIGRATABLE = re.compile(r"(?i:actions/checkout)@(?:" + "|".join(map(re.escape, migrate.MIGRATABLE_REFS)) + ")")
 
 # One step, or a few lines of a steps sequence, in many YAML forms.
@@ -57,6 +61,12 @@ STEPS = {
     "flow mapping, quoted comma": f'- {{name: "a, b}}", uses: {CHECKOUT}}}\n',
     "flow mapping over lines": f"- {{name: a,\n   uses: {CHECKOUT}}}\n",
     "flow mapping, key on its own line": f"- {{\n    uses: {CHECKOUT}\n  }}\n",
+    "flow mapping, comment before the value": f"- {{uses: # c\n    {CHECKOUT}}}\n",
+    "flow mapping, comment before the end": f"- {{uses: {CHECKOUT} # c\n  }}\n",
+    "flow mapping, comment at column 0": f"- {{\n    uses: {CHECKOUT}\n# c\n  }}\n",
+    "comment before the value": f"- uses: # c\n    {CHECKOUT}\n",
+    "comment line before the value": f"- uses:\n  # c\n    {CHECKOUT}\n",
+    "comment line at column 0 before the value": f"- uses:\n# c\n    {CHECKOUT}\n",
     "explicit key": f"- ? uses\n  : {CHECKOUT}\n",
     "space before colon": f"- uses : {CHECKOUT}\n",
     "wide entry": f"-   uses: {CHECKOUT}\n",
@@ -211,11 +221,12 @@ def problems(text, kept):
     """What migrate.py gets wrong about one workflow, as migrate_file reads it."""
     try:
         before = yaml.safe_load(text)
-        expected = [
-            lines
-            for job_hosted, _, value, lines in checkout_steps(text)
-            if MIGRATABLE.fullmatch(value.value) and not job_hosted and not kept
-        ]
+        steps = [(lines, value.value) for job_hosted, _, value, lines in checkout_steps(text) if not job_hosted and not kept]
+        expected = [lines for lines, value in steps if MIGRATABLE.fullmatch(value)]
+        # A value that only contains a checkout (a block scalar with a leading
+        # blank line, or a `# ...` line that is its text, not a comment) is not
+        # one, but migrate.py reads no block scalar exactly, so it may report it.
+        unreadable = [lines for lines, value in steps if migrate.MIGRATABLE.search(value)]
     except yaml.YAMLError as error:
         return [f"the test made invalid YAML: {error}"]
     written = migrate.rewrite(text, SHA)
@@ -226,7 +237,7 @@ def problems(text, kept):
     except yaml.YAMLError as error:
         return [f"--write made invalid YAML: {error}"]
     found = []
-    allowed = set().union(*expected) if expected else set()
+    allowed = set().union(*unreadable) if unreadable else set()
     for lines in expected:
         if not lines & (migrated | reported):
             found.append(f"a checkout step at line {min(lines)} is neither migrated nor reported")
@@ -252,8 +263,52 @@ def problems(text, kept):
     return found
 
 
+FILLER = ("", "   ", "\t", "# c", "  # c", "      # - uses: " + CHECKOUT)
+EXTRA_KEYS = ("name: x", "if: true", "env: {A: 1}", "timeout-minutes: 5", "needs: [b]", "name: 'a: b'", "name: x # c")
+
+
+def fuzzed_workflows(seed, count):
+    """(name, text) for count random workflows built from the pieces above:
+    several jobs and steps, keys in any order, any indentation, with blank,
+    whitespace-only and comment lines in between and inside."""
+    rng = random.Random(seed)
+    steps = list(STEPS.values())
+    runners = list(RUNS_ON.values())
+    for n in range(count):
+        width = rng.choice((2, 4))
+        lines = ["on: push", "jobs:"]
+        for job in range(rng.randint(1, 3)):
+            pad = " " * width
+            body = [f"runs-on: {rng.choice(runners)}"] + rng.sample(EXTRA_KEYS, rng.randint(0, 2))
+            seq_pad = " " * rng.choice((0, width))
+            items = "".join(rng.choice(steps) for _ in range(rng.randint(1, 4)))
+            body.insert(rng.randint(0, len(body)), "steps:\n" + indent(items, len(seq_pad)).rstrip("\n"))
+            lines.append(f"{pad}j{job}:")
+            for entry in body:
+                lines += [pad * 2 + row if row.strip() else row for row in entry.split("\n")]
+        # Filler between any two lines after the jobs key, at a random indentation.
+        for _ in range(rng.randint(0, 4)):
+            at = rng.randint(2, len(lines))
+            lines.insert(at, " " * rng.choice((0, 2, 4, 6)) + rng.choice(FILLER) if rng.random() < 0.5 else rng.choice(FILLER))
+        yield f"fuzz {seed}/{n}", "\n".join(lines) + "\n"
+
+
 @unittest.skipUnless(yaml or os.environ.get("CACHEW_REQUIRE_PYYAML"), "needs PyYAML (pip install pyyaml)")
 class ParserAgreementTests(unittest.TestCase):
+    def test_migrate_agrees_with_a_yaml_parser_on_random_workflows(self):
+        self.assertIsNotNone(yaml, "CACHEW_REQUIRE_PYYAML is set but PyYAML is not installed")
+        checked = 0
+        for name, text in fuzzed_workflows(FUZZ_SEED, FUZZ_CASES):
+            try:
+                yaml.compose(text, Loader=yaml.SafeLoader)
+            except yaml.YAMLError:
+                # Filler can land inside a scalar or break indentation; PyYAML is the judge.
+                continue
+            checked += 1
+            with self.subTest(name, text=text):
+                self.assertEqual(problems(text, False), [])
+        self.assertGreater(checked, FUZZ_CASES // 2)
+
     def test_migrate_finds_the_checkout_steps_a_yaml_parser_finds(self):
         self.assertIsNotNone(yaml, "CACHEW_REQUIRE_PYYAML is set but PyYAML is not installed")
         cases = list(workflows())
