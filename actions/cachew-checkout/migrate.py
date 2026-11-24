@@ -648,6 +648,10 @@ def rewrite(text, action_sha):
     return CHECKOUT.sub(replace, text)
 
 
+def line_number(text, at):
+    return text.count("\n", 0, at) + 1
+
+
 def flow_steps(text, hosted=None):
     """Line numbers of checkout steps written as flow mappings, which --write
     leaves alone: a uses: key of a flow mapping that is an item of a steps:
@@ -655,6 +659,11 @@ def flow_steps(text, hosted=None):
     the mapping's last line. Only a value uses_value reads exactly: one it
     cannot read is hidden_checkouts' to report. hosted, when given, replaces
     the hosted jobs' ranges."""
+    return [line_number(text, at) for at in flow_step_keys(text, hosted)]
+
+
+def flow_step_keys(text, hosted=None):
+    """Where each uses: key flow_steps reports starts."""
     hosted = hosted_jobs(text) if hosted is None else hosted
     rows = content_rows(text, block_scalars(text))
     found = []
@@ -677,7 +686,7 @@ def flow_steps(text, hosted=None):
             if not name or not (name["q"] or re.match(r"[ \t\r\n]|$", text[name.end() : name.end() + 1])):
                 continue
             if any(not problem and MIGRATABLE.fullmatch(value) for _, _, value, problem in uses_value(text, name, flow=True)):
-                found.append(text.count("\n", 0, key) + 1)
+                found.append(key)
     return found
 
 
@@ -717,6 +726,12 @@ def hidden_checkouts(text, hosted=None, aliases=True):
     unchanged (in a hosted job). Not in GitHub-hosted jobs, scripts or data,
     or with `# cachew: keep`. hosted, when given, replaces the hosted jobs'
     ranges; aliases=False leaves aliases out."""
+    return sorted({line_number(text, at) for at in hidden_checkout_keys(text, hosted, aliases)})
+
+
+def hidden_checkout_keys(text, hosted=None, aliases=True):
+    """Where each step hidden_checkouts reports starts: its uses: key, `?`, or
+    alias."""
     hosted = hosted_jobs(text) if hosted is None else hosted
     embedded = block_scalars(text)
     steps = step_lines(text, embedded)
@@ -747,7 +762,7 @@ def hidden_checkouts(text, hosted=None, aliases=True):
             line_end = text.find("\n", extent)
             if "cachew: keep" in text[line_start : len(text) if line_end < 0 else line_end]:
                 continue
-            found.append(text.count("\n", 0, at) + 1)
+            found.append(at)
     checkouts = None
     for index, (offset, line, indent) in enumerate(rows):
         if any(start <= offset < end for start, end in hosted):
@@ -761,7 +776,7 @@ def hidden_checkouts(text, hosted=None, aliases=True):
             following = next((o for o, l, i in rows[index + 1 :] if i < column or (i == column and not l.lstrip().startswith(":"))), len(text))
             fragment = text[offset + len(line) : following]
             if migratable(fragment + anchored(text, fragment.strip().lstrip(":").strip())) and "cachew: keep" not in fragment:
-                found.append(text.count("\n", 0, offset) + 1)
+                found.append(offset + line.index("?"))
         elif aliases and alias and "cachew: keep" not in line and (steps_key(rows, index) or steps_item(rows, index)):
             # A step, or all of a job's steps, another job anchors: an alias
             # --write cannot rewrite here, whose anchor it left (a hosted job's).
@@ -769,11 +784,8 @@ def hidden_checkouts(text, hosted=None, aliases=True):
             # migrated or reported outside a hosted job.
             if checkouts is None:
                 checkouts = step_checkouts(text, steps)
-            for start, end in anchor_spans(text, alias["alias"]):
-                first, last = text.count("\n", 0, start) + 1, text.count("\n", 0, end) + 1
-                if any(first <= number <= last for number in checkouts):
-                    found.append(text.count("\n", 0, offset) + 1)
-                    break
+            if any(start <= at < end for start, end in anchor_spans(text, alias["alias"]) for at in checkouts):
+                found.append(offset + alias.start("alias"))
 
     def resolved():
         nonlocal checkouts
@@ -781,18 +793,20 @@ def hidden_checkouts(text, hosted=None, aliases=True):
             checkouts = step_checkouts(text, steps)
         return checkouts
 
-    return sorted(set(found + sequence_steps(text, rows, hosted, resolved if aliases else None)))
+    return found + sequence_steps(text, rows, hosted, resolved if aliases else None)
 
 
 def step_checkouts(text, steps):
-    """Line numbers of the checkout steps --write would migrate or report in
-    any job, hosted or not: the steps an alias could run."""
+    """Where each checkout step --write would migrate or report in any job,
+    hosted or not, starts: the steps an alias could run. Offsets, not line
+    numbers, so an anchor holds only the steps inside its own node, not one
+    beside it on its line."""
     found = [
-        text.count("\n", 0, match.start()) + 1
+        match.start("value")
         for match in CHECKOUT.finditer(text)
         if match.start() in steps and match["value"].lower().startswith("actions/checkout@") and "cachew: keep" not in match[0]
     ]
-    return set(found + flow_steps(text, hosted=[]) + hidden_checkouts(text, hosted=[], aliases=False))
+    return set(found + flow_step_keys(text, hosted=[]) + hidden_checkout_keys(text, hosted=[], aliases=False))
 
 
 # An explicit `? uses` key, its value on a later `: ` line.
@@ -810,12 +824,12 @@ SEQUENCE_START = re.compile(VALUE_GAP + r"\[")
 
 
 def sequence_steps(text, rows, hosted, checkouts=None):
-    """Line numbers of the uses: keys that name a migratable checkout in steps
+    """Where the uses: keys that name a migratable checkout start, in steps
     written as a flow sequence: `steps: [{uses: ...}]`, with or without a tag
     or anchor, the sequence on the key's line or a later one. Read forward from
     real `steps:` keys, quote-aware, so brackets in quoted scalars and script
     text that only looks like a steps sequence are not taken for one. With
-    checkouts (a function returning step_checkouts' lines), an alias item is
+    checkouts (a function returning step_checkouts' offsets), an alias item is
     reported when its anchor holds one of them, as for a block alias item."""
     found = []
     sequences = set()
@@ -848,12 +862,9 @@ def sequence_steps(text, rows, hosted, checkouts=None):
                 line_end = text.find("\n", child)
                 if checkouts is None or "cachew: keep" in text[child : len(text) if line_end < 0 else line_end]:
                     continue
-                lines = checkouts()
-                for start, end in anchor_spans(text, alias[0]):
-                    first, last = text.count("\n", 0, start) + 1, text.count("\n", 0, end) + 1
-                    if any(first <= number <= last for number in lines):
-                        found.append(text.count("\n", 0, child) + 1)
-                        break
+                steps = checkouts()
+                if any(start <= at < end for start, end in anchor_spans(text, alias[0]) for at in steps):
+                    found.append(child)
                 continue
             mapping = text[child] == "{" and flow_mapping(text, child)
             if not mapping:
@@ -870,7 +881,7 @@ def sequence_steps(text, rows, hosted, checkouts=None):
                 value_end = keys[number + 1] if number + 1 < len(keys) else end
                 fragment = text[key + name.end() : value_end]
                 if migratable(fragment + anchored(text, fragment.strip())):
-                    found.append(text.count("\n", 0, key) + 1)
+                    found.append(key)
     return found
 
 
@@ -986,9 +997,16 @@ def could_name_action(text):
 
 def anchored(text, value):
     """The text of every anchor an alias value (`*name`, after any tags) could
-    take: each line that defines &name, from the anchor on, and the lines after
-    it indented more deeply than that line."""
+    take: a flow collection's anchor up to its closing bracket; a scalar's in a
+    flow collection up to its , ] or }; any other's from the anchor on, with the
+    lines after it indented more deeply than its line."""
     return "".join(text[start:end] for start, end in anchor_spans(text, value))
+
+
+# From an anchor to the start of the flow collection it names.
+FLOW_NODE = re.compile(VALUE_GAP + r"[\[{]")
+# From an anchor to the end of the scalar it names in a flow collection.
+FLOW_SCALAR = re.compile(r"""[ \t\r\n]*(?:'(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^,\[\]{}]*)""")
 
 
 def anchor_spans(text, value):
@@ -998,6 +1016,14 @@ def anchor_spans(text, value):
         return []
     found = []
     for definition in re.finditer(r"&" + re.escape(alias[1]) + r"(?=[\s,\[\]{}]|$)", text):
+        collection = FLOW_NODE.match(text, definition.end())
+        read = collection and flow_mapping(text, collection.end() - 1)
+        if read:
+            found.append((definition.start(), read[0]))
+            continue
+        if open_bracket(text, definition.start()) >= 0:
+            found.append((definition.start(), FLOW_SCALAR.match(text, definition.end()).end()))
+            continue
         line_start = text.rfind("\n", 0, definition.start()) + 1
         line = text[line_start : definition.start()]
         column = len(line) - len(line.lstrip(" "))

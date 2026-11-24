@@ -119,6 +119,15 @@ class RewriteTests(unittest.TestCase):
             f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [{{run: x}}, *co]\n": (False, [8]),
             f"{hosted}  s:\n    runs-on: self-hosted\n    steps: [*co] # cachew: keep\n": (False, []),
             f"{hosted}  s:\n    runs-on: ubuntu-latest\n    steps: [*co]\n": (False, []),
+            # An anchor is its node only, not the checkout beside it on its line.
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [&script {{run: echo}}, {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps: [*script]\n": (False, []),
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [&script {{run: echo}}, {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps:\n      - *script\n": (False, []),
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [{{run: echo}}, &co {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps:\n      - *co\n": (False, [8]),
+            f"jobs:\n  h:\n    runs-on: ubuntu-latest\n    steps: [{{run: echo}}, &co {{uses: {checkout}}}]\n"
+            "  s:\n    runs-on: self-hosted\n    steps: [*co]\n": (False, [7]),
         }
         for text, (changed, left) in expected.items():
             with self.subTest(text=text):
