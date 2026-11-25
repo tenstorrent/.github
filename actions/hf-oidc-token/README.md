@@ -338,7 +338,8 @@ runner.
    branch; the pull request branch was not protected.
 2. 2026-11-25, run
    [45528703008](https://github.com/tenstorrent/.github/actions/runs/45528703008)
-   on `main` at commit `cb5c934` (the released code). It did a real exchange,
+   on `main` at commit `cb5c934`. The scripts of release 1.0.0 are the same as
+   at that commit; the release commit changes documentation only. It did a real exchange,
    the model check, a read of `config.json` (855 bytes) from
    `meta-llama/Llama-3.1-8B-Instruct`, and the refusal case. No token text was
    in the log. This run also proves that GitHub reports a branch as protected
