@@ -25,6 +25,8 @@
 #         (for messages only, when the OIDC token cannot be decoded)
 # Writes: outputs token, expires-at, stopped (exchange, only in warn mode)
 set -euo pipefail
+# A caller can set SHELLOPTS=xtrace: no trace may print a secret.
+set +x
 
 # Only the exchange may give the token. The action never reads a stored token.
 unset HF_TOKEN HUGGING_FACE_HUB_TOKEN
@@ -78,6 +80,16 @@ split_response() {
   [ "$body" != "$1" ] || body=""
 }
 
+# Masks a value, one '::add-mask::' line per line of the value. A value with a
+# newline cannot then start a workflow command of its own.
+mask() {
+  local l
+  while IFS= read -r l || [ -n "$l" ]; do
+    l="${l%$'\r'}"
+    [ -z "$l" ] || printf '::add-mask::%s\n' "$l"
+  done <<<"$1"
+}
+
 # Removes control characters and workflow command markers from server text.
 clean() {
   local s="$1"
@@ -99,12 +111,10 @@ code="" body=""
 [ "$rc" -ne 0 ] || split_response "$response"
 jwt=""
 if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
-  jwt="$(printf '%s' "$body" | jq -r '.value // empty' 2>/dev/null || true)"
+  jwt="$(printf '%s' "$body" | jq -r '(.value // empty) | select(type == "string")' 2>/dev/null || true)"
 fi
 response="" body=""
-if [ -n "$jwt" ]; then
-  printf '::add-mask::%s\n' "$jwt"
-fi
+[ -z "$jwt" ] || mask "$jwt"
 if [ "$rc" -eq 28 ]; then
   stop "GitHub did not give the OIDC token in 3 tries. Run the job again."
 elif [ "$rc" -ne 0 ]; then
@@ -180,10 +190,8 @@ response=""
 token=""
 expires_in=""
 if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
-  token="$(printf '%s' "$body" | jq -r '.access_token // empty' 2>/dev/null || true)"
-  if [ -n "$token" ]; then
-    printf '::add-mask::%s\n' "$token"
-  fi
+  token="$(printf '%s' "$body" | jq -r '(.access_token // empty) | select(type == "string")' 2>/dev/null || true)"
+  [ -z "$token" ] || mask "$token"
   expires_in="$(printf '%s' "$body" | jq -r '.expires_in // empty' 2>/dev/null || true)"
   body=""
 fi

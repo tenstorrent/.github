@@ -48,6 +48,7 @@ jwt_called="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims_called").d
 mkdir -p "$work/bin"
 cat >"$work/bin/curl" <<'FAKE'
 #!/usr/bin/env bash
+set +x
 set -euo pipefail
 printf '%s\n' "$*" >>"$FAKE_ARGV"
 target="" prev="" data=false dump="" out=""
@@ -82,6 +83,8 @@ case "$target" in
       ok) answer 200 "{\"access_token\":\"$FAKE_HF_TOKEN\",\"token_type\":\"bearer\",\"expires_in\":3600,\"issued_token_type\":\"urn:ietf:params:oauth:token-type:access_token\"}" 'x-request-id: Root=1-ok' ;;
       noexpiry) answer 200 "{\"access_token\":\"$FAKE_HF_TOKEN\"}" ;;
       notoken) answer 200 '{"token_type":"bearer"}' ;;
+      multiline) answer 200 "{\"access_token\":\"$FAKE_HF_TOKEN\\n::set-env name=EVIL::1\"}" ;;
+      objtoken) answer 200 "{\"access_token\":{\"a\":\"$FAKE_HF_TOKEN\"}}" ;;
       badtoken) answer 200 '{"access_token":"has space"}' ;;
       grant) answer 400 '{"error":"invalid_grant","error_description":"No matching ::error:: publisher\nsecond"}' 'X-Request-Id: Root=1-abc-123' ;;
       request) answer 400 '{"error":"invalid_request","error_description":"bad resource"}' 'x-request-id: Root=1-req' ;;
@@ -267,6 +270,31 @@ for c in notoken badtoken; do
   { [ "$rc" -eq 1 ] && [ -z "$(output token)" ]; } && ok || bad "exchange $c: expected exit 1 also in mode warn"
 done
 
+# A multi-line token: every line is masked on its own, and no line can be a
+# workflow command. A non-string token is not a token. Both fail in mode warn too.
+for c in multiline objtoken; do
+  run_script "$exchange" MODE=warn FAKE_EXCHANGE="$c"
+  if [ "$rc" -ne 1 ] || [ -n "$(output token)" ]; then
+    bad "exchange $c: expected exit 1 and no token output"
+  elif printf '%s\n' "$log" | grep -q '^::set-env'; then
+    bad "exchange $c: server text became a workflow command"
+  elif printf '%s\n' "$log" | grep -v '^::add-mask::' | grep -qF -- "$hf_token"; then
+    bad "exchange $c: the token is in the log outside an ::add-mask:: line"
+  else ok; fi
+done
+run_script "$exchange" FAKE_EXCHANGE=multiline
+printf '%s\n' "$log" | grep -qxF -- "::add-mask::$hf_token" && ok || bad "multiline: the first line is not masked on its own"
+
+# A caller with SHELLOPTS=xtrace must not get a trace that holds a secret.
+run_script "$exchange" SHELLOPTS=xtrace
+{ [ "$rc" -eq 0 ] && [ "$(output token)" = "$hf_token" ]; } && ok || bad "xtrace: exchange must still work"
+no_leaks "exchange with SHELLOPTS=xtrace"
+
+# No redirect is followed: a redirect would send the Authorization header or the JWT on.
+if grep -qE -- '(^| )(-L|--location|--location-trusted)( |$)' "$work/argv"; then
+  bad "curl follows redirects"
+else ok; fi
+
 # Resource checks again before it sends the JWT.
 run_script "$exchange" RESOURCE=acme/model
 { [ "$rc" -eq 1 ] && [ ! -s "$work/argv" ]; } && ok || bad "repository resource: no request may be sent"
@@ -285,6 +313,10 @@ elif [ "$(grep -c -xF -- "Authorization: Bearer $hf_token" "$work/headers")" != 
   bad "models ok: the token is not in a header file for each request"
 else ok; fi
 no_leaks "models ok"
+grep -qE -- '(^| )(-L|--location|--location-trusted)( |$)' "$work/argv" && bad "models: curl follows redirects" || ok
+
+run_script "$models_sh" HF_ACCESS_TOKEN="$hf_token" MODELS="acme/gated-a" SHELLOPTS=xtrace
+no_leaks "models with SHELLOPTS=xtrace"
 
 models="acme/gated-a${nl}acme/fine${nl}acme/missing-b${nl}acme/broken-c${nl}acme/offline-d"
 want="acme/gated-a,acme/missing-b,acme/broken-c,acme/offline-d"

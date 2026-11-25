@@ -19,6 +19,7 @@
 # Writes: outputs models-without-access (comma-separated), stopped (models,
 #         only in warn mode)
 set -euo pipefail
+set +x # a caller can set SHELLOPTS=xtrace: no trace may print the token
 
 unset HF_TOKEN HUGGING_FACE_HUB_TOKEN
 
