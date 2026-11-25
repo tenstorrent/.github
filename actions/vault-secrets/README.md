@@ -296,8 +296,10 @@ In `secrets`, end each line except the last with `;`.
 All values are masked in the log. hashicorp/vault-action registers a mask for
 each value (and for each line of a multi-line value). `read-token.sh`
 registers a mask for each GitHub token at once after its read, before the next
-read and before any output. So the JSON text of `tokens` shows `***` for each
-token in the log. The runner masks a value
+read and before any output. For a token with `"` or `\` it also registers a
+mask for the JSON form of the token. So the JSON text of `tokens` shows `***`
+for each token in the log. A token with a control character (for example a
+line break, also at the end) is refused before any mask, and never printed. The runner masks a value
 everywhere in the job log, also when it comes through a composite output, a
 JSON string or `fromJSON`. Do not print values anyway.
 

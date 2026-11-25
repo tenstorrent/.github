@@ -167,6 +167,9 @@ case "$target" in
       inject-lf) answer 200 '{"data":{"token":"ghs_evilA\n::set-output name=token::pwnedA\n::add-mask::x"}}' ;;
       inject-cr) answer 200 '{"data":{"token":"ghs_evilB\r::warning::pwnedB"}}' ;;
       tab) answer 200 '{"data":{"token":"ghs_evilC\tpwnedC"}}' ;;
+      trail-lf) answer 200 '{"data":{"token":"ghs_evilE\n"}}' ;;
+      trail-crlf) answer 200 '{"data":{"token":"ghs_evilF\r\n"}}' ;;
+      backslash) answer 200 '{"data":{"token":"ghs_bs\\H"}}' ;;
       percent) answer 200 '{"data":{"token":"ghs_pct%0Apwned%25D"}}' ;;
       notoken) answer 200 '{"data":{}}' ;;
       denied) answer 403 '{"errors":["1 error occurred:\n\t* permission denied\n\n"]}' ;;
@@ -968,6 +971,9 @@ list_refused 'second key: 5xx stops' 'github github' \
 list_refused 'second key: not reached in 3 tries' 'github github github github' \
   "for the read of GitHub token set $set2 (from github-token: Metadata-Read) in 3 tries (name lookup timed out, curl exit 28)." \
   FAKE_ENGINES="github:$set_name=ok github:$set2=lookup-timeout"
+list_refused 'second key: connection broke after the send' 'github github' \
+  "the connection to Vault $url broke after the action sent the read of GitHub token set $set2 (from github-token: Metadata-Read) (curl exit 56). Vault may have got the read. The action does not send it again." \
+  FAKE_ENGINES="github:$set_name=ok github:$set2=reset,ok2"
 list_refused 'second key: token with a quote' 'github github' \
   "Vault gave a token with characters that the action cannot put in output tokens, for GitHub token set $set2 (from github-token: Metadata-Read). Report this to OSPO." \
   FAKE_ENGINES="github:$set_name=ok github:$set2=quote"
@@ -1095,6 +1101,48 @@ bad_value_refused 'list, LF with commands in the 2nd entry' pwnedA "$set2 (from 
   TOKEN_LIST="$list2" FAKE_ENGINES="github:$set_name=ok github:$set2=inject-lf"
 bad_value_refused 'list, CR in the 1st entry' pwnedB "$set_name (from github-token: contents-read)" \
   TOKEN_LIST="$list2" FAKE_ENGINES="github:$set_name=inject-cr github:$set2=ok2"
+# A line break at the end of the value: command substitution would drop it,
+# so the check runs on the JSON string. Refused, also for CR LF.
+bad_value_refused 'single, trailing LF' ghs_evilE "$set_name (from github-token: contents-read)" \
+  FAKE_ENGINES='github=trail-lf'
+bad_value_refused 'single, trailing CR LF' ghs_evilF "$set_name (from github-token: contents-read)" \
+  FAKE_ENGINES='github=trail-crlf'
+bad_value_refused 'list, trailing LF in the 2nd entry' ghs_evilE "$set2 (from github-token: Metadata-Read)" \
+  TOKEN_LIST="$list2" FAKE_ENGINES="github:$set_name=ok github:$set2=trail-lf"
+bad_value_refused 'list, trailing CR LF in the 1st entry' ghs_evilF "$set_name (from github-token: contents-read)" \
+  TOKEN_LIST="$list2" FAKE_ENGINES="github:$set_name=trail-crlf github:$set2=ok2"
+
+# One entry: a token with '"' or '\' works as in release 1.1 (output token is
+# the value). The JSON text of that value (in outputs tokens and secrets)
+# escapes the character, so the script also masks the escaped form, before
+# any output.
+one_entry_escaped() {
+  local title="$1" mode="$2" raw="$3" esc="$4" first_output mask_line
+  run_read TOKEN_LIST="$one_list" FAKE_ENGINES="github=$mode"
+  first_output="$(printf '%s\n' "$log" | grep -n '^token<<' | head -n 1 | cut -d: -f1 || true)"
+  mask_line="$(printf '%s\n' "$log" | grep -n -x -F -- "::add-mask::$esc" | head -n 1 | cut -d: -f1 || true)"
+  if [ "$rc" -ne 0 ] || [ "$(out_block token)" != "$raw" ]; then
+    bad "one entry, $title: output token is not the value (as in release 1.1)"
+  elif ! printf '%s\n' "$log" | grep -q -x -F -- "::add-mask::$raw"; then
+    bad "one entry, $title: no mask of the value"
+  elif [ -z "$mask_line" ] || [ -z "$first_output" ] || [ "$mask_line" -ge "$first_output" ]; then
+    bad "one entry, $title: no mask of the JSON-escaped form before the output"
+  else
+    run_check2 '{}' "$raw" "$one_list" ''
+    if [ "$rc" -ne 0 ] || [[ "$tokens_out" != *"$esc"* ]] \
+      || ! jq -e --arg v "$raw" '.["contents-read"] == $v' <<<"$tokens_out" >/dev/null; then
+      bad "one entry, $title: output tokens does not hold the escaped form that the mask covers"
+    else
+      echo "OK: one entry, $title: token as in 1.1, escaped form masked"
+    fi
+  fi
+}
+one_entry_escaped 'token with "' quote 'ghs_a"b' 'ghs_a\"b'
+one_entry_escaped 'token with a backslash' backslash 'ghs_bs\H' 'ghs_bs\\H'
+list_refused 'second key: token with a backslash' 'github github' \
+  "Vault gave a token with characters that the action cannot put in output tokens, for GitHub token set $set2 (from github-token: Metadata-Read). Report this to OSPO." \
+  FAKE_ENGINES="github:$set_name=ok github:$set2=backslash"
+
 # The runner decodes %25, %0D and %0A in a command value. A '%' in a token is
 # written as %25, so the mask is the token itself and not a decoded text.
 run_read FAKE_ENGINES='github=percent'

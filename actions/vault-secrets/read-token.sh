@@ -183,12 +183,17 @@ for engine in "${ENGINES[@]}"; do
     sleep "$RETRY_DELAY"
   done
   if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
-    github_token="$(printf '%s' "$body" | jq -r '.data.token // empty' 2>/dev/null || true)"
-    body=""
     # Check the value before any byte of it goes into a workflow command. A
     # value with a line break could start a new workflow command, and a value
     # that cannot be masked must not be printed: refuse it, without the value.
-    # A GitHub token has no control character.
+    # A GitHub token has no control character. jq checks the JSON string, so
+    # no byte is lost (command substitution drops a line break at the end).
+    if printf '%s' "$body" | jq -e '.data.token? | strings | test("[[:cntrl:]]")' >/dev/null 2>&1; then
+      body=""
+      fail "Vault gave a token with a control character (for example a line break) for GitHub token set $token_set$from. The action does not use it. Report this to OSPO."
+    fi
+    github_token="$(printf '%s' "$body" | jq -r '.data.token // empty' 2>/dev/null || true)"
+    body=""
     if [[ "$github_token" == *[[:cntrl:]]* ]]; then
       github_token=""
       fail "Vault gave a token with a control character (for example a line break) for GitHub token set $token_set$from. The action does not use it. Report this to OSPO."
@@ -196,6 +201,13 @@ for engine in "${ENGINES[@]}"; do
     if [ -n "$github_token" ]; then
       # The runner decodes %25, %0D and %0A in a command value: write '%' as %25.
       printf '::add-mask::%s\n' "${github_token//'%'/%25}"
+      # Outputs tokens and secrets are JSON: there '"' and '\' are escaped.
+      # Mask that form too, so the JSON text is masked as well.
+      if [[ "$github_token" == *[\"\\]* ]]; then
+        escaped="$(T_VALUE="$github_token" jq -n -r 'env.T_VALUE | tojson | .[1:-1]')"
+        printf '::add-mask::%s\n' "${escaped//'%'/%25}"
+        escaped=""
+      fi
     fi
     [ -n "$github_token" ] \
       || fail "Vault answered the read of GitHub token set $token_set$from without a token. Report this to OSPO."
