@@ -4,7 +4,7 @@
 # pre-check refuses its case with its own message, and checks the reserved
 # output name rule: prepare.sh accepts a `secrets` value that only contains the
 # reserved name, and refuses a value that uses it as an output name. Checks
-# the role resolution (default, short and full names) and its refusals, and
+# the role resolution (default, short and full names, role-from) and its refusals, and
 # the github-token resolution (key, full name, full path) and its refusals.
 # Uses no token and no secret.
 set -euo pipefail
@@ -229,6 +229,115 @@ role_is 'full name' tenstorrent/.github tenstorrent--.github--vault-action-test 
 role_is 'full default name' tenstorrent/.github tenstorrent--.github tenstorrent--.github full
 role_is 'full name in mixed case' tenstorrent/.github Tenstorrent--.GitHub--X tenstorrent--.github--x full
 role_is 'repository in upper case' tenstorrent/LLM_Perf '' tenstorrent--llm_perf default
+
+# role-from (release 1.2). Fails unless prepare.sh, in repository $2 with
+# IN_ROLE_FROM=workflow-file, IN_ROLE empty and GITHUB_WORKFLOW_REF=$3, writes
+# role=$4 and role-source=workflow-file.
+wf_role_is() {
+  local title="$1" repo="$2" ref="$3" want_role="$4"
+  run_env REPOSITORY="$repo" IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$ref"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::role-from $title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x -F -- "role=$want_role" "$work/out" \
+    || ! grep -q -x -F -- "role-source=workflow-file" "$work/out"; then
+    echo "::error::role-from $title: expected role=$want_role role-source=workflow-file"
+    grep -E '^(role|role-source|prefix)=' "$work/out" || true
+    status=1
+  else
+    echo "OK: role-from $title gives $want_role (workflow-file)"
+  fi
+}
+ir=tenstorrent/internal-requests
+wf_role_is '.yml' $ir 'tenstorrent/internal-requests/.github/workflows/create-repo.yml@refs/heads/main' \
+  tenstorrent--internal-requests--create-repo
+wf_role_is '.yaml' $ir 'tenstorrent/internal-requests/.github/workflows/create-repo.yaml@refs/heads/main' \
+  tenstorrent--internal-requests--create-repo
+wf_role_is 'file name in upper case' $ir 'tenstorrent/internal-requests/.github/workflows/Create-Repo.YML@refs/heads/main' \
+  tenstorrent--internal-requests--create-repo
+wf_role_is 'repository in upper case' tenstorrent/LLM_Perf 'Tenstorrent/LLM_Perf/.github/workflows/nightly.yml@refs/heads/main' \
+  tenstorrent--llm_perf--nightly
+wf_role_is 'file name with . and _' tenstorrent/.github 'tenstorrent/.github/.github/workflows/vault_secrets.v2.yml@refs/pull/7/merge' \
+  tenstorrent--.github--vault_secrets.v2
+wf_role_is 'ref with @ and /' tenstorrent/.github 'tenstorrent/.github/.github/workflows/vault-secrets-test.yml@refs/heads/a@b/c' \
+  tenstorrent--.github--vault-secrets-test
+wf_role_is 'tag ref' tenstorrent/.github 'tenstorrent/.github/.github/workflows/release.yml@refs/tags/v1.0' \
+  tenstorrent--.github--release
+# A job of a called reusable workflow gets the same GITHUB_WORKFLOW_REF as
+# the caller: the file of the caller. The action cannot
+# see the called file, so the role is that of the caller file.
+wf_role_is 'reusable workflow: the caller file' $ir 'tenstorrent/internal-requests/.github/workflows/create-repo.yml@refs/heads/main' \
+  tenstorrent--internal-requests--create-repo
+
+wf_ref='tenstorrent/.github/.github/workflows/vault-secrets-test.yml@refs/heads/main'
+not_short='does not give a valid short role name'
+refuses_with 'role-from with role also set' \
+  "input role-from workflow-file makes the role name from the workflow file name, so input role must be empty (role: 'nightly')" \
+  IN_ROLE_FROM=workflow-file IN_ROLE=nightly GITHUB_WORKFLOW_REF="$wf_ref"
+refuses_with 'role-from with a full role also set' 'so input role must be empty' \
+  IN_ROLE_FROM=workflow-file IN_ROLE=tenstorrent--.github--vault-secrets-test GITHUB_WORKFLOW_REF="$wf_ref"
+for v in Workflow-File workflow_file file auto 'input ' ' workflow-file'; do
+  refuses_with "role-from '$v'" 'input role-from must be input or workflow-file.' \
+    IN_ROLE_FROM="$v" GITHUB_WORKFLOW_REF="$wf_ref"
+done
+refuses_with 'role-from without GITHUB_WORKFLOW_REF' \
+  'input role-from workflow-file needs the runner variable GITHUB_WORKFLOW_REF, but it is empty.' \
+  IN_ROLE= IN_ROLE_FROM=workflow-file
+odd='is not in the form <owner>/<repo>/.github/workflows/<file>@<ref>'
+for r in \
+  'tenstorrent/.github/.github/workflows/vault-secrets-test.yml' \
+  'vault-secrets-test.yml@refs/heads/main' \
+  '.github/workflows/vault-secrets-test.yml@refs/heads/main' \
+  'tenstorrent/.github/.github/workflows/sub/x.yml@refs/heads/main' \
+  'tenstorrent/.github/workflows/x.yml@refs/heads/main' \
+  'tenstorrent/.github/.github/workflows/@refs/heads/main'; do
+  refuses_with "role-from, GITHUB_WORKFLOW_REF '$r'" "$odd" \
+    IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$r"
+done
+refuses_with 'role-from, file of another repository' \
+  'the workflow file tenstorrent/other/.github/workflows/x.yml is not in tenstorrent/.github.' \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF='tenstorrent/other/.github/workflows/x.yml@refs/heads/main'
+refuses_with 'role-from, file of another org' 'is not in tenstorrent/.github.' \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF='other/.github/.github/workflows/x.yml@refs/heads/main'
+refuses_with 'role-from, file without .yml' 'the workflow file x.json does not end with .yml or .yaml.' \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF='tenstorrent/.github/.github/workflows/x.json@refs/heads/main'
+refuses_with 'role-from, stem with --' \
+  "the name of the workflow file create--repo.yml does not give a valid short role name ('create--repo'). A short role name has only letters, digits, '.', '_' and '-', starts and ends with a letter, digit or '_', and has no '--'. Set role explicitly and remove role-from." \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF='tenstorrent/.github/.github/workflows/create--repo.yml@refs/heads/main'
+# shellcheck disable=SC2016 # '$(id)' is a file name, not an expansion.
+for f in 'a b.yml' 'a+b.yml' "a'b.yml" 'a;b.yml' 'a$(id).yml' '-x.yml' '.x.yml' 'x-.yml' 'x..yml' '.yml' 'ä.yml'; do
+  refuses_with "role-from, file name '$f'" "$not_short" \
+    IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="tenstorrent/.github/.github/workflows/$f@refs/heads/main"
+done
+long="$(printf 'x%.0s' $(seq 240))"
+refuses_with 'role-from, role name too long' "$not_short" \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="tenstorrent/.github/.github/workflows/$long.yml@refs/heads/main"
+# role-from input and an empty role-from behave as no role-from (release 1.1).
+role_from_input_is() {
+  local title="$1" in="$2" want_role="$3" want_source="$4"
+  run_env IN_ROLE_FROM=input IN_ROLE="$in" GITHUB_WORKFLOW_REF="$wf_ref"
+  if [ "$rc" -ne 0 ] || ! grep -q -x -F -- "role=$want_role" "$work/out" \
+    || ! grep -q -x -F -- "role-source=$want_source" "$work/out"; then
+    echo "::error::role-from input, $title: expected role=$want_role role-source=$want_source"
+    cat "$work/log"
+    status=1
+  else
+    echo "OK: role-from input, $title gives $want_role ($want_source)"
+  fi
+}
+role_from_input_is 'empty role' '' tenstorrent--.github default
+role_from_input_is 'short role' nightly tenstorrent--.github--nightly short
+role_from_input_is 'full role' tenstorrent--.github--x tenstorrent--.github--x full
+run_env IN_ROLE_FROM= IN_ROLE=nightly GITHUB_WORKFLOW_REF="$wf_ref"
+if [ "$rc" -ne 0 ] || ! grep -q -x -F -- 'role=tenstorrent--.github--nightly' "$work/out"; then
+  echo "::error::empty role-from: expected the role from input role"
+  status=1
+else
+  echo "OK: empty role-from uses input role"
+fi
+refuses_with 'role-from input keeps the role checks' "$chars" \
+  IN_ROLE_FROM=input 'IN_ROLE=test role'
 
 # Fails unless prepare.sh, in repository $2 with IN_GITHUB_TOKEN=$3 and
 # IN_SECRETS=$4, writes token-set=$5 and spec $6.

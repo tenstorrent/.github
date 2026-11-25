@@ -2,7 +2,7 @@
 # Pre-checks for the vault-secrets action. Fails early with a plain message.
 # Every input arrives through env (never through ${{ }} in shell text).
 #
-# Reads:  IN_ROLE IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
+# Reads:  IN_ROLE IN_ROLE_FROM GITHUB_WORKFLOW_REF IN_GITHUB_TOKEN IN_SECRETS IN_VAULT_URL IN_JOIN_TAILNET
 #         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
 #         REPOSITORY (github.repository) ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
 # Optional: IN_NETWORK_MODE IN_PROXY_PORT RUNNER_OS NODE_OPTIONS
@@ -50,7 +50,44 @@ role_in="${IN_ROLE:-}"
 role_in="${role_in#"${role_in%%[![:space:]]*}"}"
 role_in="${role_in%"${role_in##*[![:space:]]}"}"
 role_lower="$(lower "$role_in")"
-if [ -z "$role_in" ]; then
+# role-from (release 1.2). input: the role comes from input role, as in 1.1.
+# workflow-file: the role is <prefix>--<stem>, with the stem of the workflow
+# file that started the run (GITHUB_WORKFLOW_REF, set by the runner). In a job
+# of a called reusable workflow, this is the file of the caller. The action
+# still sends one login, with this one role, and has no fallback.
+role_from="${IN_ROLE_FROM:-input}"
+if [ "$role_from" = workflow-file ]; then
+  [ -z "$role_in" ] \
+    || fail "input role-from workflow-file makes the role name from the workflow file name, so input role must be empty (role: '$role_in'). Remove role, or remove role-from to use role."
+  workflow_ref="${GITHUB_WORKFLOW_REF:-}"
+  workflow_ref="${workflow_ref//[[:cntrl:]]/ }"
+  [ -n "$workflow_ref" ] \
+    || fail "input role-from workflow-file needs the runner variable GITHUB_WORKFLOW_REF, but it is empty. Set role explicitly and remove role-from."
+  workflow_path="${workflow_ref%%@*}"
+  if [ "$workflow_path" = "$workflow_ref" ] \
+    || ! [[ "$workflow_path" =~ ^([^/]+/[^/]+)/\.github/workflows/([^/]+)$ ]]; then
+    fail "input role-from workflow-file: GITHUB_WORKFLOW_REF '$workflow_ref' is not in the form <owner>/<repo>/.github/workflows/<file>@<ref>. Set role explicitly and remove role-from."
+  fi
+  workflow_file="${BASH_REMATCH[2]}"
+  [ "$(lower "${BASH_REMATCH[1]}")" = "$(lower "$repository")" ] \
+    || fail "input role-from workflow-file: the workflow file $workflow_path is not in $repository. Set role explicitly and remove role-from."
+  stem="$(lower "$workflow_file")"
+  case "$stem" in
+    *.yml) stem="${stem%.yml}" ;;
+    *.yaml) stem="${stem%.yaml}" ;;
+    *) fail "input role-from workflow-file: the workflow file $workflow_file does not end with .yml or .yaml. Set role explicitly and remove role-from." ;;
+  esac
+  # The same rule as for a short role name below: allowed characters, no
+  # '--', starts and ends with a letter, digit or '_'.
+  if [[ "$stem" == *--* ]] || ! [[ "$stem" =~ ^[a-z0-9_]([a-z0-9._-]*[a-z0-9_])?$ ]] \
+    || [ "${#prefix}" -gt $((255 - 2 - ${#stem})) ]; then
+    fail "input role-from workflow-file: the name of the workflow file $workflow_file does not give a valid short role name ('$stem'). A short role name has only letters, digits, '.', '_' and '-', starts and ends with a letter, digit or '_', and has no '--'. Set role explicitly and remove role-from."
+  fi
+  role="$prefix--$stem"
+  role_source=workflow-file
+elif [ "$role_from" != input ]; then
+  fail "input role-from must be input or workflow-file."
+elif [ -z "$role_in" ]; then
   role="$prefix"
   role_source=default
 elif ! [[ "$role_in" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$role_in" == [-.]* ]]; then

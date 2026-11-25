@@ -312,6 +312,22 @@ refused 'role not found, full name' \
 refused 'role not found, full default name' \
   "Vault has no role tenstorrent--.github. Check the role name in grants/repos/tenstorrent/.github.yaml. You can also leave role empty." \
   FAKE_LOGIN=notfound ROLE=tenstorrent--.github ROLE_SOURCE=full ROLE_INPUT=tenstorrent--.github
+wf_note='The action made the role name tenstorrent--.github--vault-secrets-test from the name of the workflow file that started the run (role-from: workflow-file). In a called reusable workflow, this is the file of the caller.'
+refused 'role not found, role-from workflow-file' \
+  "Vault has no role tenstorrent--.github--vault-secrets-test. $wf_note Check that grants/repos/tenstorrent/.github.yaml has a workflow entry with the name 'vault-secrets-test', or remove role-from and set role. Vault said: role \"tenstorrent--.github--vault-secrets-test\" could not be found. $facts" \
+  FAKE_LOGIN=notfound ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
+refused 'claim mismatch, role-from workflow-file' \
+  "This run does not match role tenstorrent--.github--vault-secrets-test: Vault refused claim job_workflow_ref. $facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. Vault said: error validating claims: claim \"job_workflow_ref\" does not match any associated bound claim values. $wf_note" \
+  FAKE_LOGIN=claim-wf ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
+run_login ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
+if [ "$rc" -ne 0 ] || ! printf '%s\n' "$log" | grep -q -x -F -- 'Logged in to Vault with role tenstorrent--.github--vault-secrets-test (workflow-file).'; then
+  bad "login, role-from workflow-file: no success line with the role and source workflow-file"
+elif [ "$(login_calls)" -ne 1 ]; then
+  bad "login, role-from workflow-file: expected one login request, got $(login_calls)"
+else
+  echo "OK: login, role-from workflow-file: one login, success line with source workflow-file"
+fi
+no_leaks 'login, role-from workflow-file'
 refused 'claim mismatch, environment' \
   "This run does not match role tenstorrent--.github--vault-action-test: Vault refused claim environment. $facts Run from the bound branch" \
   FAKE_LOGIN=claim-env

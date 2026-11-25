@@ -228,6 +228,10 @@ if [ -z "$vault_token" ]; then
   said="Vault said: ${err:-(no error text)}."
   repo_file="grants/repos/${repository}.yaml"
   claim_re='claim "([A-Za-z0-9_.-]+)"'
+  file_note=""
+  if [ "$role_source" = workflow-file ]; then
+    file_note=" The action made the role name $role from the name of the workflow file that started the run (role-from: workflow-file). In a called reusable workflow, this is the file of the caller."
+  fi
   if [ "$code" = 200 ]; then
     fail "Vault answered the login with role $role without a token. Report this to OSPO. $run_facts"
   elif [ "$code" = 429 ]; then
@@ -239,6 +243,9 @@ if [ -z "$vault_token" ]; then
         ;;
       short)
         fail "Vault has no role $role (from role: ${ROLE_INPUT:-}). Check the name of the workflow entry in $repo_file. If you added it just now, OSPO may not have applied the grant yet. $said $run_facts"
+        ;;
+      workflow-file)
+        fail "Vault has no role $role.$file_note Check that $repo_file has a workflow entry with the name '${role#"$prefix--"}', or remove role-from and set role. $said $run_facts"
         ;;
       *)
         suffix="${role#"$prefix"}"
@@ -253,7 +260,7 @@ if [ -z "$vault_token" ]; then
     esac
   elif [[ "$err" =~ $claim_re ]]; then
     claim="${BASH_REMATCH[1]}"
-    fail "This run does not match role $role: Vault refused claim $claim. $run_facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. $said"
+    fail "This run does not match role $role: Vault refused claim $claim. $run_facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. $said$file_note"
   else
     fail "Vault refused the login with role $role (HTTP ${code:-?}). $said $run_facts"
   fi
