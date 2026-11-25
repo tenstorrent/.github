@@ -291,7 +291,10 @@ for r in \
   '.github/workflows/vault-secrets-test.yml@refs/heads/main' \
   'tenstorrent/.github/.github/workflows/sub/x.yml@refs/heads/main' \
   'tenstorrent/.github/workflows/x.yml@refs/heads/main' \
-  'tenstorrent/.github/.github/workflows/@refs/heads/main'; do
+  'tenstorrent/.github/.github/workflows/@refs/heads/main' \
+  'tenstorrent/.github/.github/workflows/x.yml@' \
+  "tenstorrent/.github/.github/workflows/x.yml${nl}@refs/heads/main" \
+  "tenstorrent/.github/.github/workflows/x.yml@refs/heads/main${nl}"; do
   refuses_with "role-from, GITHUB_WORKFLOW_REF '$r'" "$odd" \
     IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$r"
 done
@@ -313,6 +316,48 @@ done
 long="$(printf 'x%.0s' $(seq 240))"
 refuses_with 'role-from, role name too long' "$not_short" \
   IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="tenstorrent/.github/.github/workflows/$long.yml@refs/heads/main"
+
+# Values in role-from messages are escaped for the workflow command: '%' is
+# %25, CR is %0D, LF is %0A, other control characters are blanks. Fails unless
+# prepare.sh, with the replaced inputs $3..., fails with exactly one log line,
+# an '::error' line that contains $2.
+refuses_escaped() {
+  local title="$1" want="$2"
+  shift 2
+  run_env "$@"
+  if [ "$rc" -eq 0 ]; then
+    echo "::error::$title: prepare.sh accepted it, expected a refusal"
+    status=1
+  elif [ "$(wc -l <"$work/log")" -ne 1 ] || ! grep -q '^::error title=vault-secrets::' "$work/log"; then
+    echo "::error::$title: the log is not exactly one ::error line"
+    sed 's/^::/: :/' "$work/log"
+    status=1
+  elif ! grep -q -F -- "$want" "$work/log"; then
+    echo "::error::$title: the ::error line does not have the escaped text '$want'"
+    sed 's/^::/: :/' "$work/log"
+    status=1
+  elif LC_ALL=C grep -q '[[:cntrl:]]' "$work/log"; then
+    echo "::error::$title: the ::error line has a control character"
+    status=1
+  else
+    echo "OK: refused, escaped: $title"
+  fi
+}
+wf='tenstorrent/.github/.github/workflows'
+refuses_escaped 'role with LF and a command' "(role: 'x%0A::warning::injected')" \
+  IN_ROLE_FROM=workflow-file "IN_ROLE=x${nl}::warning::injected" GITHUB_WORKFLOW_REF="$wf/x.yml@refs/heads/main"
+refuses_escaped 'role with %0A and CR' "(role: 'a%250Ab%0Dc')" \
+  IN_ROLE_FROM=workflow-file "IN_ROLE=a%0Ab"$'\r'"c" GITHUB_WORKFLOW_REF="$wf/x.yml@refs/heads/main"
+refuses_escaped 'ref with LF and a command' "GITHUB_WORKFLOW_REF '$wf/x.yml@refs/heads/main%0A::warning::injected'" \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$wf/x.yml@refs/heads/main${nl}::warning::injected"
+refuses_escaped 'ref with %0D%0A, %25 and ESC' "'$wf/x.yml%250D%250A%2525 x' is not in the form" \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$wf/x.yml%0D%0A%25"$'\033'"x"
+refuses_escaped 'file name with %0A' "the name of the workflow file a%250A::warning::b.yml does not give" \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$wf/a%0A::warning::b.yml@refs/heads/main"
+refuses_escaped 'file name with %0D, no .yml' "the workflow file a%250Db.json does not end" \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="$wf/a%0Db.json@refs/heads/main"
+refuses_escaped 'other repository with %0A' "the workflow file tenstorrent/o%250Ax/.github/workflows/x.yml is not in" \
+  IN_ROLE= IN_ROLE_FROM=workflow-file GITHUB_WORKFLOW_REF="tenstorrent/o%0Ax/.github/workflows/x.yml@refs/heads/main"
 # role-from input and an empty role-from behave as no role-from (release 1.1).
 role_from_input_is() {
   local title="$1" in="$2" want_role="$3" want_source="$4"

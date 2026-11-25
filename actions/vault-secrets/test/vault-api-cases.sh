@@ -328,6 +328,17 @@ else
   echo "OK: login, role-from workflow-file: one login, success line with source workflow-file"
 fi
 no_leaks 'login, role-from workflow-file'
+# A JWT that cannot be decoded: the facts come from the runner env. Control
+# characters there become blanks, and '%' is escaped (%25) in the annotation.
+refused 'facts from the runner env, control characters' \
+  'workflow=tenstorrent/.github/.github/workflows/x.yml@refs/heads/a ::warning::b c%250Ad.' \
+  FAKE_LOGIN=notfound FAKE_JWT=not-a-jwt ROLE_SOURCE=full \
+  GITHUB_WORKFLOW_REF="tenstorrent/.github/.github/workflows/x.yml@refs/heads/a"$'\n'"::warning::b"$'\033'"c%0Ad"
+if [ "$(printf '%s\n' "$log" | grep -c '^::warning')" -ne 0 ] || printf '%s\n' "$log" | LC_ALL=C grep -q $'\033'; then
+  bad "facts from the runner env: an injected command line or a control character in the log"
+else
+  echo "OK: facts from the runner env: no injected line, no control character"
+fi
 refused 'claim mismatch, environment' \
   "This run does not match role tenstorrent--.github--vault-action-test: Vault refused claim environment. $facts Run from the bound branch" \
   FAKE_LOGIN=claim-env

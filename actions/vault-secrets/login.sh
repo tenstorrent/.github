@@ -172,6 +172,9 @@ if [ -n "$claims" ]; then
   IFS=$'\x1f' read -r c_repo c_ref c_env c_event c_workflow <<<"$claims" || true
 else
   c_repo="$repository" c_ref="${GITHUB_REF:-}" c_env="unknown" c_event="${GITHUB_EVENT_NAME:-}" c_workflow="${GITHUB_WORKFLOW_REF:-}"
+  # The same as for the claims above: control characters become blanks.
+  c_repo="${c_repo//[[:cntrl:]]/ }" c_ref="${c_ref//[[:cntrl:]]/ }"
+  c_event="${c_event//[[:cntrl:]]/ }" c_workflow="${c_workflow//[[:cntrl:]]/ }"
 fi
 run_facts="This run: repository=${c_repo:-?}, ref=${c_ref:-?}, environment=${c_env:-none}, event=${c_event:-?}, workflow=${c_workflow:-?}."
 
