@@ -369,6 +369,7 @@ one job.
 | `this runner has no curl` / `no jq` | A self-hosted runner without these tools. | Install bash, curl and jq on the runner. |
 | `refused on pull_request_target` | The workflow runs on `pull_request_target`. | Use another event. Vault never accepts this event. |
 | `Vault gave an empty value for <NAME>` | The value stored in Vault is an empty string. | Ask the owner of the secret to store it again. |
+| `Vault gave a token with a control character (for example a line break) for GitHub token set ...` | Release 1.2. Vault gave a token value with a line break or another control character. A GitHub token has none. The action does not print the value and does not use it. | Report it to OSPO. |
 | `Vault gave an empty value for github-token key <key>` | Release 1.2. The token step gave no token for one key of the list. This is not expected. | Report it to OSPO. |
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role has characters ...` / `input role '...' is not a role of <repo>` | `role` is not valid, or it is a role of another repository. | Use the short name of your workflow entry, or leave `role` empty for the default role. |

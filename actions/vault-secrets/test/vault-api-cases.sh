@@ -162,6 +162,11 @@ case "$target" in
       ok) answer 200 "{\"lease_id\":\"\",\"data\":{\"token\":\"$FAKE_GH_TOKEN\",\"permissions\":{\"contents\":\"read\"}}}" ;;
       ok2) answer 200 "{\"lease_id\":\"\",\"data\":{\"token\":\"$FAKE_GH_TOKEN2\",\"permissions\":{\"metadata\":\"read\"}}}" ;;
       quote) answer 200 '{"data":{"token":"ghs_a\"b"}}' ;;
+      # Values with a line break or CR: they must never reach a workflow command.
+      inject-lf) answer 200 '{"data":{"token":"ghs_evilA\n::set-output name=token::pwnedA\n::add-mask::x"}}' ;;
+      inject-cr) answer 200 '{"data":{"token":"ghs_evilB\r::warning::pwnedB"}}' ;;
+      tab) answer 200 '{"data":{"token":"ghs_evilC\tpwnedC"}}' ;;
+      percent) answer 200 '{"data":{"token":"ghs_pct%0Apwned%25D"}}' ;;
       notoken) answer 200 '{"data":{}}' ;;
       denied) answer 403 '{"errors":["1 error occurred:\n\t* permission denied\n\n"]}' ;;
       notfound) answer 404 '{"errors":[]}' ;;
@@ -1037,6 +1042,67 @@ if printf '%s\n' "$log" | awk '/^(secrets|tokens)<</ { d = substr($0, index($0, 
 else
   echo "OK: check tokens: no value in the log"
 fi
+
+# ── Token values that are not safe in a workflow command ───────────────────
+# A value with a control character (LF, CR, tab, ...) is refused before any
+# '::add-mask::' line. No line of the log has any part of it, so it cannot
+# start a workflow command. No output is written. Single path and list path.
+bad_value_refused() {
+  local title="$1" part="$2" want_set="$3"
+  shift 3
+  run_read "$@"
+  if [ "$rc" -eq 0 ]; then
+    bad "$title: read-token.sh succeeded, expected a failure"
+  elif ! printf '%s\n' "$log" | grep -F -- '::error title=vault-secrets::' \
+    | grep -q -F -- "Vault gave a token with a control character (for example a line break) for GitHub token set $want_set"; then
+    bad "$title: read-token.sh failed, but not with the control character message"
+  elif printf '%s\n' "$log" | grep -q -F -e "ghs_evil" -e "pwned" -e "$part"; then
+    bad "$title: a part of the value is in the log"
+  elif printf '%s\n' "$log" | grep -q -E '^(tokens?<<|::add-mask::ghs_evil)'; then
+    bad "$title: read-token.sh wrote an output or a mask of the value"
+  elif printf '%s\n' "$log" | grep '^::' | grep -v -q -E '^::(error title=vault-secrets::|add-mask::'"$gh_token"'$)'; then
+    bad "$title: the log has a workflow command that the script did not write"
+  else
+    echo "OK: bad value refused: $title"
+  fi
+}
+bad_value_refused 'single, LF with commands' pwnedA "$set_name (from github-token: contents-read)" \
+  FAKE_ENGINES='github=inject-lf'
+bad_value_refused 'single, CR' pwnedB "$set_name (from github-token: contents-read)" \
+  FAKE_ENGINES='github=inject-cr'
+bad_value_refused 'single, tab' pwnedC "$set_name (from github-token: contents-read)" \
+  FAKE_ENGINES='github=tab'
+bad_value_refused 'single, LF in the 2nd engine' pwnedA "$set_name (from github-token: contents-read)" \
+  FAKE_ENGINES='github=denied github-members=inject-lf'
+bad_value_refused 'list, LF with commands in the 2nd entry' pwnedA "$set2 (from github-token: Metadata-Read)" \
+  TOKEN_LIST="$list2" FAKE_ENGINES="github:$set_name=ok github:$set2=inject-lf"
+bad_value_refused 'list, CR in the 1st entry' pwnedB "$set_name (from github-token: contents-read)" \
+  TOKEN_LIST="$list2" FAKE_ENGINES="github:$set_name=inject-cr github:$set2=ok2"
+# The runner decodes %25, %0D and %0A in a command value. A '%' in a token is
+# written as %25, so the mask is the token itself and not a decoded text.
+run_read FAKE_ENGINES='github=percent'
+if [ "$rc" -ne 0 ] || ! printf '%s\n' "$log" | grep -q -x -F -- '::add-mask::ghs_pct%250Apwned%2525D' \
+  || [ "$(out_block token)" != 'ghs_pct%0Apwned%25D' ]; then
+  bad "token with %: the mask line does not escape '%' as %25, or the output is not the token"
+else
+  echo "OK: token with %: mask line escapes '%', output is the token"
+fi
+
+# A token-list that is valid JSON but not an array is an internal error, not
+# "no list". No read is sent.
+for v in '{}' '"x"' 0 null '{"set":"x"}'; do
+  read_refused "token-list $v" '' 'internal error: output token-list of the prepare step is not a JSON array.' \
+    TOKEN_LIST="$v"
+done
+# What prepare.sh writes for no list: an empty value. Also '[]'. Both: release 1.1 path.
+for v in '' '[]'; do
+  run_read TOKEN_LIST="$v"
+  if [ "$rc" -ne 0 ] || [ "$(out_block token)" != "$gh_token" ] || printf '%s\n' "$log" | grep -q '^tokens<<'; then
+    bad "token-list '$v': not the release 1.1 path"
+  else
+    echo "OK: token-list '$v': release 1.1 path"
+  fi
+done
 
 # No 'set -x' and no echo of a secret variable in the scripts.
 for script in "$login" "$read_token" "$check"; do

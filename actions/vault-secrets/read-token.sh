@@ -30,7 +30,8 @@
 # A denied read is an entry in the Vault audit log (path and 'permission
 # denied'). It needs no access that the role does not already have.
 #
-# Secrets: the Vault token (input) and the GitHub token. The GitHub token gets
+# Secrets: the Vault token (input) and the GitHub token. A GitHub token with a
+# control character is refused, without printing it. Else it gets
 # '::add-mask::' at once, before anything else can print it. Neither is ever
 # echoed, in argv, or in a file. The GitHub token goes to the step output
 # token; the action outputs token and secrets take it from there. With a list,
@@ -183,10 +184,19 @@ for engine in "${ENGINES[@]}"; do
   done
   if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
     github_token="$(printf '%s' "$body" | jq -r '.data.token // empty' 2>/dev/null || true)"
-    if [ -n "$github_token" ]; then
-      printf '::add-mask::%s\n' "$github_token"
-    fi
     body=""
+    # Check the value before any byte of it goes into a workflow command. A
+    # value with a line break could start a new workflow command, and a value
+    # that cannot be masked must not be printed: refuse it, without the value.
+    # A GitHub token has no control character.
+    if [[ "$github_token" == *[[:cntrl:]]* ]]; then
+      github_token=""
+      fail "Vault gave a token with a control character (for example a line break) for GitHub token set $token_set$from. The action does not use it. Report this to OSPO."
+    fi
+    if [ -n "$github_token" ]; then
+      # The runner decodes %25, %0D and %0A in a command value: write '%' as %25.
+      printf '::add-mask::%s\n' "${github_token//'%'/%25}"
+    fi
     [ -n "$github_token" ] \
       || fail "Vault answered the read of GitHub token set $token_set$from without a token. Report this to OSPO."
     break
@@ -212,7 +222,8 @@ fi
 
 # A list has two or more entries. Else (no TOKEN_LIST, or one entry) the
 # script works as in release 1.1: see the end of this script.
-list_length="$(printf '%s' "${TOKEN_LIST:-[]}" | jq -r 'if type == "array" then length else 0 end' 2>/dev/null || true)"
+# Any other JSON value (an object, a string, a number, null) is an error.
+list_length="$(printf '%s' "${TOKEN_LIST:-[]}" | jq -r 'if type == "array" then length else error("not an array") end' 2>/dev/null || true)"
 [[ "$list_length" =~ ^[0-9]+$ ]] || fail "internal error: output token-list of the prepare step is not a JSON array."
 if [ "$list_length" -ge 2 ]; then
   # ── A list of token sets (release 1.2) ──────────────────────────────────────
