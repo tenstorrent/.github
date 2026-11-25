@@ -4,6 +4,7 @@
 # left both outputs empty. Never prints a token or secrets output value.
 #
 # Reads: OUTCOME TOKEN SECRETS FAILED_STEP EXPECT_STEP
+# Optional: TOKENS (output tokens, release 1.2): must be empty or '{}'.
 # EXPECT_STEP is prepare, join, wait, vault or check (output failed-step).
 # The direct tests (prepare-cases.sh, wait-cases.sh) check the message of each
 # step. This check proves that the action stopped in that step.
@@ -25,6 +26,11 @@ fi
 compact="$(printf '%s' "$SECRETS" | tr -d '[:space:]')"
 if [ -n "$compact" ] && [ "$compact" != '{}' ]; then
   echo "::error::output secrets is not empty"
+  status=1
+fi
+compact="$(printf '%s' "${TOKENS:-}" | tr -d '[:space:]')"
+if [ -n "$compact" ] && [ "$compact" != '{}' ]; then
+  echo "::error::output tokens is not empty"
   status=1
 fi
 if [ "${FAILED_STEP:-}" != "$EXPECT_STEP" ]; then

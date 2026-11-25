@@ -53,6 +53,46 @@ short name, for example `role: nightly`.
 reads token set `tenstorrent--example-app--lib-read`. The full name and a full
 Vault path also still work. See [Inputs](#inputs).
 
+### More than one GitHub token (release 1.2)
+
+Since release 1.2, `github-token` takes more than one key. Put one key on each
+line (commas or blanks between the keys also work):
+
+```yaml
+      - id: vault
+        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
+        with:
+          github-token: |
+            lib-read
+            repo-admin
+
+      - name: Use the tokens
+        env:
+          GH_TOKEN: ${{ fromJSON(steps.vault.outputs.tokens)['lib-read'] }}
+          ADMIN_TOKEN: ${{ fromJSON(steps.vault.outputs.tokens)['repo-admin'] }}
+        run: ./sync.sh
+```
+
+The workflow names the keys only. It does not name a Vault engine or a Vault
+path. The rules for a list (two or more entries):
+
+- Each entry is a key or a full token name `<org>--<repo>--<key>` of this
+  repository. A Vault path with `/` is refused in a list: put a path in
+  `secrets`.
+- Each key one time. A key and its full name count as the same key.
+- At most 10 entries.
+- A token name of another repository is refused before any request to Vault.
+- The action reads the token sets one after the other, in the order of the
+  list. Each read follows the same rules as one key (see
+  [Security notes](#security-notes)).
+- All or nothing: if one read fails, the action fails and gives no token.
+  `token` is empty and `tokens` is `{}`. The message names the token set that
+  failed.
+- Output `token` is the token of the first entry. Output `tokens` has all of
+  them, under the short key (also for an entry that is a full name).
+
+One entry works as in release 1.1. Output `tokens` then has that one key.
+
 ## Releases
 
 Each release has a tag with the action name as prefix: `vault-secrets-vX.Y.Z`. The repository holds several actions, so the prefix is needed. There is no moving major tag such as `v1`.
@@ -136,7 +176,7 @@ messages in [Failures](#failures).
 | Input | Required | Default | Meaning |
 |---|---|---|---|
 | `role` | no | | Vault role of the workflow. Empty: the default role `<org>--<repo>` of the repository that runs the workflow. A short name, for example `nightly`: the role `<org>--<repo>--nightly` of a named workflow entry. A full name `<org>--<repo>--<name>` is used as is. The action uses lower case. A role of another repository is refused. |
-| `github-token` | no | | Key of the token in the grant of this repository, for example `lib-read`. The action reads token set `<org>--<repo>--<key>` and finds where Vault keeps it. Still accepted: the full name `<org>--<repo>--<key>`, and (1.0 form) a full Vault path with `/`, which the action reads as is. A name of another repository is refused. |
+| `github-token` | no | | Key of the token in the grant of this repository, for example `lib-read`. The action reads token set `<org>--<repo>--<key>` and finds where Vault keeps it. Still accepted: the full name `<org>--<repo>--<key>`, and (1.0 form) a full Vault path with `/`, which the action reads as is. A name of another repository is refused. Since release 1.2: more than one key (at most 10), one on each line, or with commas or blanks between them. A list takes keys and full names only, each key one time. See [More than one GitHub token](#more-than-one-github-token-release-12). |
 | `secrets` | no | | Secrets in [hashicorp/vault-action](https://github.com/hashicorp/vault-action) `secrets` syntax: `<path> <field> \| <NAME> ;` per line. |
 | `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
 | `join-tailnet` | no | `auto` | `auto` joins unless the runner is already on the tailnet. `true` always joins. `false` never joins. |
@@ -231,7 +271,8 @@ of the `vault-action-test` environment. Also test on the target runner.
 
 | Output | Meaning |
 |---|---|
-| `token` | The GitHub token from `github-token`. Empty if `github-token` is not set. |
+| `token` | The GitHub token from `github-token`. With a list: the token of the first entry. Empty if `github-token` is not set. |
+| `tokens` | Since release 1.2. JSON object with one key per token key in `github-token`: the short key, also for an entry that is a full name. Read a token with `fromJSON(steps.<id>.outputs.tokens)['<key>']`. `{}` if `github-token` is not set or is a Vault path with `/`. |
 | `secrets` | JSON object with one key per `<NAME>` in `secrets`. Read a value with `fromJSON(steps.<id>.outputs.secrets).<NAME>`. |
 | `failed-step` | The step of the action that failed: `prepare` (input and job checks), `join` (Tailscale join), `wait` (Vault not reachable), `vault` (Vault login or read, also when it took longer than `vault-timeout-seconds`), `check` (empty value). Empty when the action succeeds. Use it with `continue-on-error: true`. |
 
@@ -242,18 +283,21 @@ name after `|` (in any case), and to the name that hashicorp/vault-action makes
 from the field when a line has no `| <NAME>`. A path that only contains the
 text is accepted.
 
-When the action fails, `token` is empty and `secrets` is `{}`.
-When the step is skipped (an `if:` that is false), both outputs are empty.
+When the action fails, `token` is empty, and `secrets` and `tokens` are `{}`.
+When the step is skipped (an `if:` that is false), these outputs are empty.
 `fromJSON('')` is an error. For a login that is optional, read a value with
 `fromJSON(steps.<id>.outputs.secrets || '{}').<NAME>`.
 
-`github-token` gets one token. To get more than one token in one call, put
-one line for each token in `secrets`, for example
-`github/token/<name> token | TOKEN_A ;`.
+To get more than one GitHub token in one call, put the keys in `github-token`
+(release 1.2), not Vault paths in `secrets`. See
+[More than one GitHub token](#more-than-one-github-token-release-12).
 In `secrets`, end each line except the last with `;`.
 
 All values are masked in the log. hashicorp/vault-action registers a mask for
-each value (and for each line of a multi-line value). The runner masks a value
+each value (and for each line of a multi-line value). `read-token.sh`
+registers a mask for each GitHub token at once after its read, before the next
+read and before any output. So the JSON text of `tokens` shows `***` for each
+token in the log. The runner masks a value
 everywhere in the job log, also when it comes through a composite output, a
 JSON string or `fromJSON`. Do not print values anyway.
 
@@ -277,7 +321,7 @@ GitHub token read. Up to 3 tries, 2 seconds apart. The log shows one line for
 each new try, for example `Could not reach Vault (name lookup timed out). Try
 2 of 3.` A failed try that was not sent stops after 5 seconds or less, so the
 tries add at most 14 seconds to the login, and at most 14 seconds to each of
-the 3 token engines. Any answer of Vault (also an HTTP error) and a request
+the 3 token engines, for each token key. Any answer of Vault (also an HTTP error) and a request
 that was sent get no new try.
 The Vault read stops after `vault-timeout-seconds` (default 120).
 Without this limit, one stalled network connection can hold the step for
@@ -325,6 +369,7 @@ one job.
 | `this runner has no curl` / `no jq` | A self-hosted runner without these tools. | Install bash, curl and jq on the runner. |
 | `refused on pull_request_target` | The workflow runs on `pull_request_target`. | Use another event. Vault never accepts this event. |
 | `Vault gave an empty value for <NAME>` | The value stored in Vault is an empty string. | Ask the owner of the secret to store it again. |
+| `Vault gave an empty value for github-token key <key>` | Release 1.2. The token step gave no token for one key of the list. This is not expected. | Report it to OSPO. |
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role has characters ...` / `input role '...' is not a role of <repo>` | `role` is not valid, or it is a role of another repository. | Use the short name of your workflow entry, or leave `role` empty for the default role. |
 | `This repository has no default Vault role` | `role` is empty, and every workflow entry in the grant has a name. | Set `role` to the name of your entry, for example `role: nightly`. |
@@ -334,7 +379,11 @@ one job.
 | `Vault did not answer the login within 15 seconds` | The action sent the login, and Vault did not answer in time. A stalled network connection. The action does not send the login again. | Run the job again. |
 | `the action could not reach Vault ... in 3 tries (<cause>, curl exit N). Vault did not get the login.` / `... for the read of GitHub token set ...` | Since release 1.2. The name lookup or the connection to Vault failed or timed out 3 times, or the Tailscale proxy could not connect to Vault. The cause is in the message. Vault did not get the request. | Run the job again. If it occurs again, read the "Join tailnet" and "Wait for Vault" step logs. |
 | `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the key of the token only, for example `lib-read`. |
-| `input github-token '...' is not a token of <repo>` | `github-token` is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
+| `input github-token '...' is not a token of <repo>` / `entry '...' of input github-token is not a token of <repo>` | `github-token` (or one entry of the list) is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
+| `entry N of input github-token is a Vault path. A list in github-token takes token keys only` | Release 1.2. A list in `github-token` has an entry with `/`. | Use the key. For a token that has no key in your grant, put its path in `secrets`. |
+| `input github-token has the token <key> more than one time` | Release 1.2. The same key is two times in the list (also as key and full name). | Give each key one time. |
+| `input github-token has N entries. The maximum is 10.` | Release 1.2. More than 10 entries. | Use two calls of the action, each with its own `id`. |
+| `entry N of input github-token is not a valid token name` / `entry '...' of input github-token does not give a valid token name` | Release 1.2. Bad characters in one entry of the list. | Use the key of the token only, for example `lib-read`. |
 | `Role ... has no grant for GitHub token set ...` | Vault refused the token set in every place where a token can be. The role has no grant for it, the key is wrong, or the grant is not applied yet. | Check the key in `github_tokens` of your workflow entry in your grant. |
 | `Vault did not answer the read of GitHub token set ...` / `Vault refused the read of GitHub token set ...` | A stalled network connection, or a Vault error other than "permission denied". | Run the job again. If it occurs again, report it to OSPO. |
 | `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
@@ -365,6 +414,13 @@ one job.
   never reads it a second time. Each refused try is a `permission denied`
   entry in the Vault audit log. The role needs no access that it does not
   already have.
+- With more than one key (release 1.2), the action does this for each key, in
+  the order of the list. Each key can ask up to 3 engines, so a list of N keys
+  sends up to 3 x N reads and can write up to 2 x N `permission denied`
+  entries (more for a key without a grant). The engine of one key is not used
+  as a hint for the next key: two keys can be in different engines. The action
+  writes the outputs only after every read worked. A token read before a
+  failure stays masked, but no output has it.
 - Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
   Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
 
@@ -386,8 +442,9 @@ What a pull request can reach:
 
 Why the risk is low:
 
-- The test role can get one token with read access to contents and metadata
-  of this public repository, and one dummy KV value. These give no more access
+- The test role can get two read-only tokens of this public repository
+  (`contents-read`: contents and metadata; `metadata-read`: metadata), and one
+  dummy KV value. These give no more access
   than the public repository already gives.
 - The test role must never get a token with write access, a token for another
   repository, or a real secret. Add new test values to the test role only.

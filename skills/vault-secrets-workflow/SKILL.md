@@ -97,6 +97,11 @@ example `role: nightly`. A full role name also works.
 `github-token` takes the key of the token in the grant, not a Vault path. The
 action finds where Vault keeps it. A full name `<org>--<repo>--<key>` or a full
 path with `/` also works, but do not write new workflows with them.
+Since release 1.2, `github-token` takes more than one key, one on each line (at
+most 10). Then output `token` is the token of the first key, and output
+`tokens` has all of them: `${{ fromJSON(steps.vault.outputs.tokens)['<key>'] }}`.
+Do not put a second token as a Vault path in `secrets`. A list takes keys only.
+If one key fails, the action fails and gives no token.
 
 ## 4. Which events can log in
 

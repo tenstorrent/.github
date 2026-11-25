@@ -7,7 +7,7 @@
 #         REPOSITORY (github.repository) ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
 # Optional: IN_NETWORK_MODE IN_PROXY_PORT RUNNER_OS NODE_OPTIONS
 # Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix,
-#         token-set, tailscaled-args, proxy-url, proxy-env
+#         token-set, token-list, tailscaled-args, proxy-url, proxy-env
 set -euo pipefail
 
 DEFAULT_URL='https://vault-ospo.eng-svc.aws.tenstorrent.com'
@@ -80,6 +80,13 @@ while [[ "$secrets" =~ ^[[:space:]\;] ]]; do secrets="${secrets#?}"; done
 github_token="${IN_GITHUB_TOKEN:-}"
 github_token="${github_token#"${github_token%%[![:space:]]*}"}"
 github_token="${github_token%"${github_token##*[![:space:]]}"}"
+# Release 1.2: github-token can hold more than one entry, separated by new
+# lines, commas or blanks. Empty entries are ignored. One entry is the value
+# of release 1.1 and follows its rules exactly.
+token_entries=()
+read -r -d '' -a token_entries <<<"${github_token//,/ }" || true
+[ "${#token_entries[@]}" -ne 1 ] || github_token="${token_entries[0]}"
+[ "${#token_entries[@]}" -ne 0 ] || github_token=""
 if [ -z "$github_token" ] && [ -z "$secrets" ]; then
   fail "nothing to get: set github-token, secrets, or both."
 fi
@@ -129,9 +136,60 @@ done
 #   <prefix>--<key>          full name; read-token.sh finds the engine
 #   name of another repo     refused here, before any request
 #   value with '/'           full Vault path, read as is by vault-action (1.0 form)
+# A list (two or more entries, release 1.2): every entry is a key or a full
+# name of this repository, each key one time, at most MAX_TOKENS entries. A
+# path is refused in a list. The output token-list gives read-token.sh the
+# token set, key and input of each entry, in the order of the input.
+
+# Sets token_set (the full token set name) from the entry $1, or fails. $2
+# names the entry in a message where the entry may have bad characters, $3
+# where its characters are valid, and $4 says what the entry can be.
+resolve_token_set() {
+  local entry="$1" plain="$2" named="$3" what="$4" entry_lower key
+  if ! [[ "$entry" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$entry" == [-.]* ]]; then
+    fail "$plain is not a valid $what. Allowed: letters, digits, '.', '_', '-'. Use the key of the token in your grant, for example contents-read."
+  fi
+  entry_lower="$(lower "$entry")"
+  if [[ "$entry_lower" == "$prefix--"* ]]; then
+    token_set="$entry_lower"
+  elif [ "$entry_lower" = "$prefix" ] || [[ "$entry_lower" == *--* ]]; then
+    fail "$named is not a token of $repository. Its token names start with $prefix--. Use the key of the token in your grant, the part after '$prefix--'."
+  else
+    token_set="$prefix--$entry_lower"
+  fi
+  key="${token_set#"$prefix--"}"
+  if ! [[ "$key" =~ ^[a-z0-9_]([a-z0-9._-]*[a-z0-9_])?$ ]]; then
+    fail "$named does not give a valid token name ($token_set). Use the key of the token in your grant, for example contents-read."
+  fi
+  [ "${#token_set}" -le 255 ] || fail "$plain is too long for a token name."
+}
+
+MAX_TOKENS=10
 token_set=""
+token_list=""
 spec="$secrets"
-if [[ "$github_token" == */* ]]; then
+if [ "${#token_entries[@]}" -gt 1 ]; then
+  [ "${#token_entries[@]}" -le "$MAX_TOKENS" ] \
+    || fail "input github-token has ${#token_entries[@]} entries. The maximum is $MAX_TOKENS."
+  token_list='[]'
+  first_set=""
+  n=0
+  for entry in "${token_entries[@]}"; do
+    n=$((n + 1))
+    if [[ "$entry" == */* ]]; then
+      fail "entry $n of input github-token is a Vault path. A list in github-token takes token keys only, for example contents-read. Put a Vault path in secrets."
+    fi
+    resolve_token_set "$entry" "entry $n of input github-token" \
+      "entry '$entry' of input github-token" "token name"
+    if jq -e --arg s "$token_set" 'any(.[]; .set == $s)' <<<"$token_list" >/dev/null; then
+      fail "input github-token has the token ${token_set#"$prefix--"} more than one time. Give each token key one time."
+    fi
+    token_list="$(jq -c --arg s "$token_set" --arg k "${token_set#"$prefix--"}" --arg i "$entry" \
+      '. + [{set: $s, key: $k, input: $i}]' <<<"$token_list")"
+    [ -n "$first_set" ] || first_set="$token_set"
+  done
+  token_set="$first_set"
+elif [[ "$github_token" == */* ]]; then
   [[ "$github_token" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] \
     || fail "input github-token is not a valid token name or path. Use the key of the token in your grant, for example contents-read."
   token_line="$github_token token | $TOKEN_OUTPUT"
@@ -141,22 +199,10 @@ if [[ "$github_token" == */* ]]; then
     spec="$token_line"
   fi
 elif [ -n "$github_token" ]; then
-  if ! [[ "$github_token" =~ ^[A-Za-z0-9._-]+$ ]] || [[ "$github_token" == [-.]* ]]; then
-    fail "input github-token is not a valid token name or path. Allowed: letters, digits, '.', '_', '-'. Use the key of the token in your grant, for example contents-read."
-  fi
-  token_lower="$(lower "$github_token")"
-  if [[ "$token_lower" == "$prefix--"* ]]; then
-    token_set="$token_lower"
-  elif [ "$token_lower" = "$prefix" ] || [[ "$token_lower" == *--* ]]; then
-    fail "input github-token '$github_token' is not a token of $repository. Its token names start with $prefix--. Use the key of the token in your grant, the part after '$prefix--'."
-  else
-    token_set="$prefix--$token_lower"
-  fi
-  token_key="${token_set#"$prefix--"}"
-  if ! [[ "$token_key" =~ ^[a-z0-9_]([a-z0-9._-]*[a-z0-9_])?$ ]]; then
-    fail "input github-token '$github_token' does not give a valid token name ($token_set). Use the key of the token in your grant, for example contents-read."
-  fi
-  [ "${#token_set}" -le 255 ] || fail "input github-token is too long for a token name."
+  resolve_token_set "$github_token" "input github-token" \
+    "input github-token '$github_token'" "token name or path"
+  token_list="$(jq -c -n --arg s "$token_set" --arg k "${token_set#"$prefix--"}" --arg i "$github_token" \
+    '[{set: $s, key: $k, input: $i}]')"
 fi
 
 url="${IN_VAULT_URL:-$DEFAULT_URL}"
@@ -252,6 +298,7 @@ delimiter="vault_secrets_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   printf 'role-source=%s\n' "$role_source"
   printf 'prefix=%s\n' "$prefix"
   printf 'token-set=%s\n' "$token_set"
+  printf 'token-list=%s\n' "$token_list"
   printf 'tailscaled-args=%s\n' "$tailscaled_args"
   printf 'proxy-url=%s\n' "$proxy_url"
   printf 'proxy-env=%s\n' "$proxy_env"

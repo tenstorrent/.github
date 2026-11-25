@@ -37,6 +37,10 @@ case "$CASE" in
   wrong-token) token="${VAULT_TOKEN_NAME}-no-such-token" ;;
   # A short key that the role has no grant for: denied in every engine.
   short-key-no-grant) token="no-such-key" ;;
+  # Release 1.2: a list whose second key has no grant. The first token is
+  # read, but the action fails and gives no token. A comma, not a new line:
+  # the output github-token of this script is one line.
+  list-no-grant) token="${VAULT_TOKEN_KEY},no-such-key" ;;
   wrong-kv-path)
     token=""
     secrets="${VAULT_KV_PATH}-no-such-path $VAULT_KV_FIELD | KV_TEST"

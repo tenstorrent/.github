@@ -46,6 +46,7 @@ url='https://vault-ospo.eng-svc.aws.tenstorrent.com'
 request_token='dummy-request-token-5a1d0c3e'
 vault_token='hvs.dummy-vault-token-7f3e9b21'
 gh_token='ghs_dummyGitHubToken0123456789abcdef'
+gh_token2='ghs_dummySecondToken9876543210fedcba'
 
 b64url() {
   printf '%s' "$1" | base64 | tr -d '\n=' | tr '+/' '-_'
@@ -145,15 +146,22 @@ case "$target" in
     ;;
   */v1/*/token/*)
     # FAKE_ENGINES: '<engine>=<answer>' words; an engine not listed is denied.
+    # A word '<engine>:<token set>=<answer>' is for that token set only.
     engine="${target#*/v1/}"
     engine="${engine%%/*}"
+    tset="${target##*/}"
     mode=denied
     for w in $FAKE_ENGINES; do
       [ "${w%%=*}" = "$engine" ] && mode="${w#*=}"
     done
+    for w in $FAKE_ENGINES; do
+      [ "${w%%=*}" = "$engine:$tset" ] && mode="${w#*=}"
+    done
     mode="$(pick "$mode")"
     case "$mode" in
       ok) answer 200 "{\"lease_id\":\"\",\"data\":{\"token\":\"$FAKE_GH_TOKEN\",\"permissions\":{\"contents\":\"read\"}}}" ;;
+      ok2) answer 200 "{\"lease_id\":\"\",\"data\":{\"token\":\"$FAKE_GH_TOKEN2\",\"permissions\":{\"metadata\":\"read\"}}}" ;;
+      quote) answer 200 '{"data":{"token":"ghs_a\"b"}}' ;;
       notoken) answer 200 '{"data":{}}' ;;
       denied) answer 403 '{"errors":["1 error occurred:\n\t* permission denied\n\n"]}' ;;
       notfound) answer 404 '{"errors":[]}' ;;
@@ -532,7 +540,7 @@ run_read() {
     GITHUB_OUTPUT="$all" \
     FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" FAKE_ENV="$work/env" FAKE_COUNT="$work/count" FAKE_SLEEP="$work/sleep" \
     FAKE_JWT="$jwt" FAKE_VAULT_TOKEN="$vault_token" FAKE_OIDC=ok FAKE_LOGIN=ok \
-    FAKE_GH_TOKEN="$gh_token" FAKE_ENGINES='github=ok' \
+    FAKE_GH_TOKEN="$gh_token" FAKE_GH_TOKEN2="$gh_token2" FAKE_ENGINES='github=ok' \
     "$@" \
     bash "$read_token" >>"$all" 2>&1 || rc=$?
   log="$(cat "$all")"
@@ -799,6 +807,236 @@ found 'userspace: proxy cannot connect to Vault, then found' 'github github' \
   VAULT_PROXY="$proxy" FAKE_ENGINES='github=proxy-502,ok'
 read_refused 'userspace: proxy refuses CONNECT (403): no new try' 'github' '(curl exit 56)' \
   VAULT_PROXY="$proxy" FAKE_ENGINES='github=proxy-403,ok'
+
+# ── read-token.sh with a list of token sets (release 1.2) ──────────────────
+set2='tenstorrent--.github--metadata-read'
+list2="[{\"set\":\"$set_name\",\"key\":\"contents-read\",\"input\":\"contents-read\"},{\"set\":\"$set2\",\"key\":\"metadata-read\",\"input\":\"Metadata-Read\"}]"
+# contents-read is in github, metadata-read in github-members.
+two_engines="github:$set_name=ok github-members:$set2=ok2"
+
+# Prints the block of output $1 in the log.
+out_block() {
+  printf '%s\n' "$log" | awk -v n="$1" '
+    index($0, n "<<") == 1 && !on { d = substr($0, length(n) + 3); on = 1; next }
+    on && $0 == d { on = 0; next }
+    on { print }'
+}
+# Fails if a secret value appears outside '::add-mask::' lines and outside the
+# token and tokens output blocks, or appears in argv.
+no_list_leaks() {
+  local title="$1" value
+  for value in "$vault_token" "$gh_token" "$gh_token2"; do
+    if printf '%s\n' "$log" | awk -v v="$value" '
+        /^tokens?<</ { d = substr($0, index($0, "<<") + 2); on = 1; next }
+        on && $0 == d { on = 0; next }
+        on { next }
+        /^::add-mask::/ { next }
+        index($0, v) { found = 1 }
+        END { exit !found }'; then
+      bad "$title: a secret value appears in the log outside an ::add-mask:: line"
+    fi
+    if grep -q -F -- "$value" "$work/argv"; then
+      bad "$title: a secret value appears in the argv of curl"
+    fi
+  done
+}
+# Number of reads of the token set $1 in this run.
+reads_of() {
+  grep -c -F -- "/token/$1" "$work/argv" || true
+}
+
+# Fails unless read-token.sh, with the list and the replaced inputs $3...,
+# gets both tokens after the requests $2 (engines, in order).
+list_found() {
+  local title="$1" want_asked="$2" first_output last_mask
+  shift 2
+  run_read TOKEN_LIST="$list2" "$@"
+  first_output="$(printf '%s\n' "$log" | grep -n -E '^tokens?<<' | head -n 1 | cut -d: -f1)"
+  last_mask="$(printf '%s\n' "$log" | grep -n '^::add-mask::' | tail -n 1 | cut -d: -f1)"
+  if [ "$rc" -ne 0 ]; then
+    bad "list $title: read-token.sh failed (exit $rc), expected exit 0"
+  elif [ "$(out_block token)" != "$gh_token" ]; then
+    bad "list $title: output token is not the token of the first entry"
+  elif ! out_block tokens | jq -e --arg a "$gh_token" --arg b "$gh_token2" \
+    '. == {"contents-read": $a, "metadata-read": $b} and (keys_unsorted == ["contents-read", "metadata-read"])' >/dev/null; then
+    bad "list $title: output tokens is not {contents-read, metadata-read} with both tokens"
+  elif [ "$(out_block tokens | grep -c .)" -ne 1 ]; then
+    bad "list $title: output tokens is not one line of JSON"
+  elif ! printf '%s\n' "$log" | grep -q -x -F -- "::add-mask::$gh_token" \
+    || ! printf '%s\n' "$log" | grep -q -x -F -- "::add-mask::$gh_token2"; then
+    bad "list $title: no ::add-mask:: line for each token"
+  elif [ -z "$first_output" ] || [ "$last_mask" -ge "$first_output" ]; then
+    bad "list $title: an ::add-mask:: line comes after the first write to GITHUB_OUTPUT"
+  elif [ "$(asked)" != "$want_asked" ]; then
+    bad "list $title: asked engines '$(asked)', expected '$want_asked'"
+  elif ! printf '%s\n' "$log" | grep -q -x -F -- "Found GitHub token set $set_name (from github-token: contents-read)." \
+    || ! printf '%s\n' "$log" | grep -q -x -F -- "Found GitHub token set $set2 (from github-token: Metadata-Read)." \
+    || ! printf '%s\n' "$log" | grep -q -x -F -- "Found 2 GitHub token sets."; then
+    bad "list $title: no success line for each token set"
+  elif [ "$(grep -c -x -F -- "X-Vault-Token: $vault_token" "$work/headers")" -ne "$(wc -l <"$work/argv" | tr -d ' ')" ]; then
+    bad "list $title: a token read has no X-Vault-Token header from a pipe"
+  elif printf '%s\n' "$log" | grep -v '^::add-mask::' | grep -q -E 'github-(members|admin)/|github/token'; then
+    bad "list $title: the log shows the engine"
+  else
+    echo "OK: list: $title"
+  fi
+  no_list_leaks "list $title"
+}
+
+list_found 'two keys in two engines' 'github github github-members' FAKE_ENGINES="$two_engines"
+# Each token set is read until its first success, and never again.
+ok_reads="$(grep -c -E "/(github|github-members)/token/" "$work/argv" || true)"
+if [ "$(reads_of "$set_name")" -ne 1 ] || [ "$(grep -c -F -- "/github-members/token/$set2" "$work/argv")" -ne 1 ] \
+  || [ "$(sort "$work/argv" | uniq -d | wc -l | tr -d ' ')" -ne 0 ] || [ "$ok_reads" -ne 3 ]; then
+  bad "list: a token set was read more than once"
+else
+  echo "OK: list: each token read exactly once, no path read twice"
+fi
+# The engine of the first key is not a hint: the second key starts in github again.
+list_found 'first key in github-members, second key in github' 'github github-members github' \
+  FAKE_ENGINES="github-members:$set_name=ok github:$set2=ok2"
+list_found 'second key in github-admin' 'github github github-members github-admin' \
+  FAKE_ENGINES="github:$set_name=ok github-admin:$set2=ok2"
+# A read that curl did not send gets new tries, for each entry on its own.
+list_found 'pre-send retry in the second entry' 'github github github-members github-members' \
+  FAKE_ENGINES="github:$set_name=ok github-members:$set2=lookup-timeout,ok2"
+if [ "$(read_retries)" -ne 1 ] || ! printf '%s\n' "$log" | grep -q -x -F -- 'Could not reach Vault (name lookup timed out). Try 2 of 3.'; then
+  bad "list: pre-send retry: expected one retry line"
+else
+  echo "OK: list: pre-send retry of the second entry, one retry line"
+fi
+list_found 'pre-send retry in both entries' 'github github github github github-members github-members' \
+  FAKE_ENGINES="github:$set_name=refused,connect-timeout,ok github-members:$set2=lookup-failed,ok2"
+
+# Fails unless read-token.sh, with the list and the replaced inputs $4...,
+# fails with an error that contains $3 after the requests $2, and writes no
+# output at all.
+list_refused() {
+  local title="$1" want_asked="$2" want="$3"
+  shift 3
+  run_read TOKEN_LIST="$list2" "$@"
+  if [ "$rc" -eq 0 ]; then
+    bad "list $title: read-token.sh succeeded, expected a failure"
+  elif ! printf '%s\n' "$log" | grep -F -- '::error title=vault-secrets::' | grep -q -F -- "$want"; then
+    bad "list $title: read-token.sh failed, but not with the message '$want'"
+  elif printf '%s\n' "$log" | grep -q -E '^tokens?<<'; then
+    bad "list $title: read-token.sh wrote an output"
+  elif [ "$(asked)" != "$want_asked" ]; then
+    bad "list $title: asked engines '$(asked)', expected '$want_asked'"
+  else
+    echo "OK: list refused: $title"
+  fi
+  no_list_leaks "list $title"
+}
+list_refused 'second key has no grant' 'github github github-members github-admin' \
+  "Role tenstorrent--.github--vault-action-test has no grant for GitHub token set $set2 (from github-token: Metadata-Read). Check the token key in github_tokens of your workflow entry in grants/repos/tenstorrent/.github.yaml in github-vault-iac." \
+  FAKE_ENGINES="github:$set_name=ok"
+# The first token was read and masked: its mask stays, but no output has it.
+if ! printf '%s\n' "$log" | grep -q -x -F -- "::add-mask::$gh_token"; then
+  bad "list: second key has no grant: the first token has no ::add-mask:: line"
+else
+  echo "OK: list: second key has no grant: first token masked, no output"
+fi
+list_refused 'first key has no grant: no read of the second' 'github github-members github-admin' \
+  "has no grant for GitHub token set $set_name (from github-token: contents-read)." \
+  FAKE_ENGINES="github:$set2=ok2"
+list_refused 'second key: 5xx stops' 'github github' \
+  "Vault refused the read of GitHub token set $set2 (from github-token: Metadata-Read) (HTTP 500)." \
+  FAKE_ENGINES="github:$set_name=ok github:$set2=e500"
+list_refused 'second key: not reached in 3 tries' 'github github github github' \
+  "for the read of GitHub token set $set2 (from github-token: Metadata-Read) in 3 tries (name lookup timed out, curl exit 28)." \
+  FAKE_ENGINES="github:$set_name=ok github:$set2=lookup-timeout"
+list_refused 'second key: token with a quote' 'github github' \
+  "Vault gave a token with characters that the action cannot put in output tokens, for GitHub token set $set2 (from github-token: Metadata-Read). Report this to OSPO." \
+  FAKE_ENGINES="github:$set_name=ok github:$set2=quote"
+list_refused 'list that does not start with TOKEN_SET' '' 'internal error: the token list does not start with token set' \
+  TOKEN_SET="$set2" FAKE_ENGINES="github=ok"
+list_refused 'list with a bad key' '' 'internal error: entry 2 of the token list is not valid.' \
+  TOKEN_LIST="[{\"set\":\"$set_name\",\"key\":\"contents-read\",\"input\":\"x\"},{\"set\":\"$set2\",\"key\":\"a\\\"b\",\"input\":\"x\"}]"
+list_refused 'token-list that is not JSON' '' 'internal error: output token-list of the prepare step is not a JSON array.' \
+  TOKEN_LIST='not json'
+
+# A list of one entry works as in release 1.1: output token only.
+run_read TOKEN_LIST="[{\"set\":\"$set_name\",\"key\":\"contents-read\",\"input\":\"contents-read\"}]" \
+  'TOKEN_INPUT=contents-read,'
+if [ "$rc" -ne 0 ] || [ "$(out_block token)" != "$gh_token" ] || printf '%s\n' "$log" | grep -q '^tokens<<' \
+  || ! printf '%s\n' "$log" | grep -q -x -F -- "Found GitHub token set $set_name (from github-token: contents-read)."; then
+  bad "list of one entry: not the result of release 1.1"
+else
+  echo "OK: list of one entry: output token only, success line of release 1.1"
+fi
+
+# ── check-values.sh with output tokens (release 1.2) ───────────────────────
+one_list="[{\"set\":\"$set_name\",\"key\":\"contents-read\",\"input\":\"contents-read\"}]"
+both="{\"contents-read\":\"$gh_token\",\"metadata-read\":\"$gh_token2\"}"
+# Runs check-values.sh with VAULT_OUTPUTS=$1, TOKEN_VALUE=$2, TOKEN_LIST=$3 and
+# TOKENS_VALUE=$4. Sets rc, log, secrets_out and tokens_out.
+run_check2() {
+  local all="$work/all"
+  : >"$all"
+  rc=0
+  env -i PATH="$PATH" VAULT_OUTPUTS="$1" TOKEN_VALUE="$2" TOKEN_LIST="$3" TOKENS_VALUE="$4" GITHUB_OUTPUT="$all" \
+    bash "$check" >>"$all" 2>&1 || rc=$?
+  log="$(cat "$all")"
+  secrets_out="$(out_block secrets)"
+  tokens_out="$(out_block tokens)"
+}
+tokens_give() {
+  local title="$1" want_secrets="$6" want_tokens="$7"
+  run_check2 "$2" "$3" "$4" "$5"
+  if [ "$rc" -ne 0 ]; then
+    bad "check tokens $title: check-values.sh failed (exit $rc)"
+  elif ! jq -e --argjson want "$want_secrets" '. == $want' <<<"$secrets_out" >/dev/null 2>&1; then
+    bad "check tokens $title: output secrets is not as expected"
+  elif ! jq -e --argjson want "$want_tokens" '. == $want' <<<"$tokens_out" >/dev/null 2>&1; then
+    bad "check tokens $title: output tokens is not as expected"
+  else
+    echo "OK: check tokens: $title"
+  fi
+}
+tokens_give 'no github-token' '{"KV_TEST":"kv-dummy"}' '' '' '' '{"KV_TEST":"kv-dummy"}' '{}'
+tokens_give 'path (read by vault-action)' "{\"VAULT_SECRETS_GITHUB_TOKEN\":\"$gh_token\"}" '' '' '' \
+  "{\"VAULT_SECRETS_GITHUB_TOKEN\":\"$gh_token\"}" '{}'
+tokens_give 'one key' '{}' "$gh_token" "$one_list" '' \
+  "{\"VAULT_SECRETS_GITHUB_TOKEN\":\"$gh_token\"}" "{\"contents-read\":\"$gh_token\"}"
+tokens_give 'two keys' '{"KV_TEST":"kv-dummy"}' "$gh_token" "$list2" "$both" \
+  "{\"KV_TEST\":\"kv-dummy\",\"VAULT_SECRETS_GITHUB_TOKEN\":\"$gh_token\"}" "$both"
+
+# Fails unless check-values.sh fails with the text $6 and writes no output.
+check_refused() {
+  local title="$1" want="$6"
+  run_check2 "$2" "$3" "$4" "$5"
+  if [ "$rc" -eq 0 ]; then
+    bad "check tokens $title: check-values.sh succeeded, expected a failure"
+  elif ! printf '%s\n' "$log" | grep -q -F -- "$want"; then
+    bad "check tokens $title: no message '$want'"
+  elif printf '%s\n' "$log" | grep -q -E '^(secrets|tokens)<<'; then
+    bad "check tokens $title: check-values.sh wrote an output"
+  else
+    echo "OK: check tokens refused: $title"
+  fi
+}
+check_refused 'two keys, one empty' '{}' "$gh_token" "$list2" "{\"contents-read\":\"$gh_token\",\"metadata-read\":\"\"}" \
+  '::error::Vault gave an empty value for github-token key metadata-read. Report this to OSPO.'
+check_refused 'two keys, one missing' '{}' "$gh_token" "$list2" "{\"contents-read\":\"$gh_token\"}" \
+  'Vault gave an empty value for github-token key metadata-read.'
+check_refused 'two keys, no tokens output' '{}' "$gh_token" "$list2" '' \
+  'Vault gave an empty value for github-token key contents-read.'
+check_refused 'two keys, an extra key' '{}' "$gh_token" "$list2" \
+  "{\"contents-read\":\"$gh_token\",\"metadata-read\":\"$gh_token2\",\"x\":\"y\"}" \
+  'internal error: the tokens of the token step do not match the list in github-token.'
+check_refused 'two keys, token is not the first' '{}' "$gh_token2" "$list2" "$both" \
+  'internal error: the tokens of the token step do not match the list in github-token.'
+check_refused 'one key, empty token' '{}' '' "$one_list" '' \
+  '::error::Vault gave an empty value for github-token.'
+# No value in the log: the log holds only the output blocks.
+run_check2 '{"KV_TEST":"kv-dummy"}' "$gh_token" "$list2" "$both"
+if printf '%s\n' "$log" | awk '/^(secrets|tokens)<</ { d = substr($0, index($0, "<<") + 2); on = 1; next } on && $0 == d { on = 0; next } on { next } { print }' \
+  | grep -q -F -e "$gh_token" -e "$gh_token2" -e kv-dummy; then
+  bad "check tokens: a value appears in the log outside the output blocks"
+else
+  echo "OK: check tokens: no value in the log"
+fi
 
 # No 'set -x' and no echo of a secret variable in the scripts.
 for script in "$login" "$read_token" "$check"; do
