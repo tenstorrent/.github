@@ -76,6 +76,11 @@ jobs:
             echo "::error title=org-member-check::Only repositories of the organization tenstorrent can call this workflow."
             exit 1
           fi
+          # Not supported, in every case.
+          if [ "$EVENT_NAME" = pull_request_target ]; then
+            echo "::error title=org-member-check::pull_request_target is not supported."
+            exit 1
+          fi
           if [ -z "$LOGIN" ] && [ -z "$USER_ID" ]; then
             echo "::error title=org-member-check::Give the secret login, the secret user-id, or both."
             exit 1
@@ -84,6 +89,15 @@ jobs:
             lower_login="$(printf '%s' "$LOGIN" | tr '[:upper:]' '[:lower:]')"
             if [[ true == *"$lower_login"* ]] || [[ false == *"$lower_login"* ]]; then
               echo "::error title=org-member-check::This login cannot be checked by login. Pass this account as the secret user-id only."
+              exit 1
+            fi
+          fi
+          # Same output rule for user-id. A valid id (digits) never matches;
+          # an invalid one such as "e" or "false" would drop the answer.
+          if [ -n "$USER_ID" ]; then
+            lower_id="$(printf '%s' "$USER_ID" | tr '[:upper:]' '[:lower:]')"
+            if [[ true == *"$lower_id"* ]] || [[ false == *"$lower_id"* ]]; then
+              echo "::error title=org-member-check::The secret user-id is not a numeric GitHub user id."
               exit 1
             fi
           fi
@@ -106,12 +120,6 @@ jobs:
             exit 1
           fi
           if [ "$valid" = true ]; then
-            # Remove only after both the shared action and the OSPO setup
-            # accept pull_request_target.
-            if [ "$EVENT_NAME" = pull_request_target ]; then
-              echo "::error title=org-member-check::pull_request_target is not supported."
-              exit 1
-            fi
             if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
               echo "::error title=org-member-check::This run has no GitHub identity token. Give the calling job 'permissions: id-token: write'. A pull request from a fork never has one."
               exit 1

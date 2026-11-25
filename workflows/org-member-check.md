@@ -99,7 +99,8 @@ Rules:
 an outside collaborator, a pending invitation, a bot, an organization, an
 unknown login or id, and a value that is not a valid login or id. With both
 values given, an invalid value, an unknown id, a bot or an organization fails
-the job; an outside collaborator or a pending invitation is `false`.
+the job; an outside collaborator or a pending invitation is `false`. A `user-id` that is part of the word `true` or `false` always fails the
+job.
 
 If the check cannot get an answer (sign-in, network or GitHub error), the job
 fails. It never answers `false` on an error. Jobs that need it do not run.
@@ -144,6 +145,7 @@ An empty output is an error, never "not a member". Test for `true` and for
 | `This run has no GitHub identity token.` | A pull request from a fork. | Do not call it from a fork pull request. |
 | `pull_request_target is not supported.` | See [Events](#events). | Use another event. |
 | `This login cannot be checked by login.` | The login is part of the word `true` or `false`. | Pass the account as `user-id`. |
+| `The secret user-id is not a numeric GitHub user id.` | The value is part of the word `true` or `false`. | Pass the numeric id. |
 | A sign-in error from the step "Get token" | The setup for your repository is not ready, or the run does not match it (branch, event, caller file, pinned commit). | Ask on your OSPO ticket. |
 | `The secrets login and user-id do not name the same user account.` | Both are given, and they do not match, or one is invalid, unknown or not a user. | Pass `user-id` only, or values of the same account. |
 | `GitHub answered HTTP <code> ...` | GitHub error or network error. | Run the job again. If it fails again, ask on your OSPO ticket. |
