@@ -1,7 +1,8 @@
 # hf-oidc-token
 
-**Prototype. Not released (no tag).** One live test passed on a
-GitHub-hosted Linux runner on 2026-11-25. See
+Current release:
+[`hf-oidc-token-v1.0.0`](https://github.com/tenstorrent/.github/releases/tag/hf-oidc-token-v1.0.0).
+See [Releases](#releases) and
 [What is proven](#what-is-proven-and-what-is-not).
 
 Gets a short-lived, read-only Hugging Face token for gated models in one step.
@@ -69,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - id: hf
-        uses: tenstorrent/.github/actions/hf-oidc-token@<full-commit-sha>
+        uses: tenstorrent/.github/actions/hf-oidc-token@<full-commit-sha> # hf-oidc-token-v1.0.0
         with:
           resource: ${{ vars.HF_OIDC_RESOURCE }}
           models: |
@@ -84,7 +85,11 @@ jobs:
           python3 scripts/run_models.py
 ```
 
-Pin the action to a full commit SHA. There is no release yet.
+Pin the action to a full commit SHA. The current release is
+`hf-oidc-token-v1.0.0`. The section [Releases](#releases) tells how to get
+its commit. Check that a commit is on `main` with
+`gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The
+status `identical` or `behind` means yes.
 
 ### Rules for the calling workflow
 
@@ -113,6 +118,31 @@ Pin the action to a full commit SHA. There is no release yet.
    change the workflow and use the identity.
 8. **Long jobs:** the token ends after 60 minutes (output `expires-at`).
    For a later use, call the action again just before it.
+
+## Releases
+
+Each release has a tag with the action name as prefix:
+`hf-oidc-token-vX.Y.Z`. The repository holds several actions, so the prefix is
+needed. There is no moving major tag such as `v1`.
+
+Pin the full commit SHA of a release. Put the tag in the comment. Do not pin a
+branch.
+
+```yaml
+uses: tenstorrent/.github/actions/hf-oidc-token@<full-commit-sha> # hf-oidc-token-v1.0.0
+```
+
+Current release:
+[`hf-oidc-token-v1.0.0`](https://github.com/tenstorrent/.github/releases/tag/hf-oidc-token-v1.0.0).
+New releases are listed on the
+[Releases page](https://github.com/tenstorrent/.github/releases).
+To get the commit of a tag, run
+`gh api repos/tenstorrent/.github/commits/hf-oidc-token-v1.0.0 --jq .sha`.
+This gives the commit also when the tag is an annotated tag.
+
+| Release | Commit |
+| --- | --- |
+| `hf-oidc-token-v1.0.0` | The commit of the tag. Get it with the command above. |
 
 ## Inputs
 
@@ -296,15 +326,34 @@ Options:
 
 ## What is proven and what is not
 
-Proven in live tests: runs
-[45521842112](https://github.com/tenstorrent/.github/actions/runs/45521842112)
-(commit `780ce2a`) and
-[45527326671](https://github.com/tenstorrent/.github/actions/runs/45527326671)
-(commit `18f5e20`, the last live proof), 2026-11-25 (UTC), GitHub-hosted
-Ubuntu runner, branch `ospo/hf-oidc-token`. The CI/CD identity for the test
-named the repository and the workflow file only, not the branch. These runs
-were before the action stopped on an unprotected branch; the pull request
-branch was not protected.
+Proven in live tests. All dates are UTC. All runs used a GitHub-hosted Ubuntu
+runner.
+
+1. 2026-11-25, runs
+   [45521842112](https://github.com/tenstorrent/.github/actions/runs/45521842112)
+   (commit `780ce2a`) and
+   [45527326671](https://github.com/tenstorrent/.github/actions/runs/45527326671)
+   (commit `18f5e20`), in `tenstorrent/.github`, from the pull request branch
+   `ospo/hf-oidc-token`. They ran before the action stopped on an unprotected
+   branch; the pull request branch was not protected.
+2. 2026-11-25, run
+   [45528703008](https://github.com/tenstorrent/.github/actions/runs/45528703008)
+   on `main` at commit `cb5c934` (the released code). It did a real exchange,
+   the model check, a read of `config.json` (855 bytes) from
+   `meta-llama/Llama-3.1-8B-Instruct`, and the refusal case. No token text was
+   in the log. This run also proves that GitHub reports a branch as protected
+   when only rulesets protect it: `main` of this repository has rulesets and
+   no classic branch protection.
+3. 2026-11-25, run
+   [45530027646](https://github.com/tenstorrent/tt-metal/actions/runs/45530027646).
+   A workflow in another repository (`tenstorrent/tt-metal`) called the action
+   at commit `cb5c934632c5aefbb465840db204e4f893d38765`. It ran from a
+   temporary test branch that a temporary ruleset protected (input `branch`
+   set to that branch), with `workflow_dispatch`. The job got a token and read
+   the same gated file. Without a token, the file gave HTTP 401. No token text
+   was in the log. The branch and the ruleset were deleted after the test.
+
+What these runs proved:
 
 - A real exchange at `https://huggingface.co/oauth/token` for the account,
   with the request format in [How the exchange works](#how-the-exchange-works).
@@ -316,6 +365,9 @@ branch was not protected.
   Hugging Face answered `invalid_grant` with the text
   `User '<account>' not found`, and the header `X-Request-Id` held the
   Request ID. The action failed in step `exchange` with an empty token.
+- A caller in another repository works.
+- A branch that only rulesets protect counts as protected
+  (`GITHUB_REF_PROTECTED` is `true`).
 - No token text in the log.
 
 Proven offline (with a fake `curl`, on each pull request):
@@ -326,20 +378,16 @@ Proven offline (with a fake `curl`, on each pull request):
 
 Not proven:
 
+- Self-hosted runners, and macOS and Windows runners.
+- A job longer than 60 minutes.
 - The answer 403 `GatedRepo` for a model whose licence the account has not
   accepted.
 - The real error text when the account exists but no identity matches (for
   example a wrong branch or workflow file), and the texts for HTTP 429 and 5xx.
-- A caller in another repository.
-- An identity that also names the branch (the test identity had no branch).
-- That GitHub reports `main` of this repository, which has rulesets only and
-  no classic branch protection, as protected (`GITHUB_REF_PROTECTED` is
-  `true`). The first live run on `main` after merge must confirm it.
-- A job longer than 60 minutes.
-- Self-hosted runners, and macOS and Windows runners.
+- An identity that names a `branch` claim.
 - That one service account can hold many CI/CD identities.
-- How the `workflow` field matches a reusable workflow (the action assumes
-  the calling file, from `workflow_ref`).
+- A reusable workflow as caller: how the `workflow` field matches it (the
+  action assumes the calling file, from `workflow_ref`).
 - Whether a custom GitHub Enterprise OIDC issuer would match the Hugging Face
   preset (`https://token.actions.githubusercontent.com`).
 
