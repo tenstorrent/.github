@@ -204,7 +204,13 @@ proxy_url=""
 tailscaled_args=""
 proxy_env='{}'
 case "$network_mode" in
-  kernel) ;;
+  kernel)
+    # proxy-port has no effect in kernel mode. Not set gives 1055 (the default
+    # in action.yml) or empty (prepare.sh run directly): no warning for these.
+    if [ -n "${IN_PROXY_PORT:-}" ] && [ "$IN_PROXY_PORT" != 1055 ]; then
+      printf '::warning title=vault-secrets::%s\n' "input proxy-port has no effect without network-mode: userspace. The action ignores it in kernel mode."
+    fi
+    ;;
   userspace)
     [ "${RUNNER_OS:-}" = Linux ] || fail "input network-mode userspace needs a Linux runner (this runner: ${RUNNER_OS:-unknown})."
     if ! [[ "$proxy_port" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$proxy_port" -gt 65535 ]; then

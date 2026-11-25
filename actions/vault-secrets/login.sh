@@ -214,6 +214,9 @@ if [ -n "$cause" ]; then
   fail "the action could not reach Vault $url in $TRIES tries ($cause, curl exit $rc). Vault did not get the login. The likely cause is a short network problem on the tailnet. Run the job again."
 elif [ "$rc" -eq 28 ]; then
   fail "Vault did not answer the login within $REQUEST_TIMEOUT seconds. The likely cause is a stalled network connection on the tailnet. Run the job again."
+elif [ "$rc" -ne 0 ] && [[ "$t_start" =~ ^[0-9]+(\.[0-9]+)?$ ]] && ! [[ "$t_start" =~ ^0(\.0+)?$ ]]; then
+  # time_pretransfer > 0: curl sent the login, then the connection broke.
+  fail "the connection to Vault $url broke after the action sent the login (curl exit $rc). Vault may have got the login. The action does not send it again. Run the job again."
 elif [ "$rc" -ne 0 ]; then
   fail "the action could not send the login to Vault $url (curl exit $rc). Run the job again."
 fi
