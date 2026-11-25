@@ -11,5 +11,9 @@
 /.github/workflows/org-member-check.yml      @jbakerTT
 /workflows/org-member-check.md               @jbakerTT
 
+# Shared action for short-lived Hugging Face tokens (OIDC) and its test workflow.
+/actions/hf-oidc-token/                      @jbakerTT
+/.github/workflows/hf-oidc-token-test.yml    @jbakerTT
+
 # This file.
 /.github/CODEOWNERS                          @jbakerTT

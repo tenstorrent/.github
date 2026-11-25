@@ -11,7 +11,12 @@
 # exposes no composite output with it. Do not use 'set -x' here.
 #
 # One login, no retry: each refused login is an audit entry and counts against
-# the rate-limit quota on auth/jwt-github/.
+# the rate-limit quota on auth/jwt-github/. A login that curl sent is never
+# sent again, also when Vault did not answer in time.
+# The one exception (release 1.2): curl did not send the login, because the
+# name lookup or the connection failed or timed out, or the proxy could not
+# open a tunnel to Vault. Then Vault did not get the login, and the script
+# sends it again: up to 3 tries, 2 seconds apart. See not_sent_cause.
 #
 # Proxy (release 1.2): when VAULT_PROXY is set (network-mode userspace), the
 # Vault login goes through that Tailscale loopback proxy, also when NO_PROXY
@@ -28,6 +33,13 @@ set -euo pipefail
 
 # Seconds per HTTP request.
 REQUEST_TIMEOUT=15
+# Tries of the Vault login when curl did not send it, and seconds between them.
+TRIES=3
+RETRY_DELAY=2
+# curl -w for Vault requests: the HTTP code, the CONNECT code of a proxy, and
+# the times of the name lookup and of the start of the transfer. curl writes
+# this line also when it fails.
+WRITE_OUT='\n%{http_code} %{http_connect} %{time_namelookup} %{time_pretransfer}'
 
 # Prints one error annotation and exits. Escapes the characters that end or
 # change a workflow command.
@@ -69,11 +81,58 @@ split_response() {
   [ "$body" != "$1" ] || body=""
 }
 
+# Splits "<body>\n<WRITE_OUT line>" into body, code, proxy_code, t_lookup and
+# t_start. All are empty when curl wrote no such line.
+split_vault_response() {
+  local line="${1##*$'\n'}"
+  body="${1%$'\n'*}"
+  [ "$body" != "$1" ] || body=""
+  code="" proxy_code="" t_lookup="" t_start=""
+  read -r code proxy_code t_lookup t_start _ <<<"$line" || true
+}
+
+# Prints why the request did not reach Vault, but only when it is certain that
+# curl did not send it. Else prints nothing. Certain means all of:
+#   - time_pretransfer is 0: curl did not get to the start of the transfer, so
+#     no byte of the request went out. curl sets this time only after the
+#     connection (with TLS, and with the CONNECT tunnel of a proxy) is ready.
+#   - no HTTP answer (http_code 000).
+#   - the curl error is one of: 5, 6 (name lookup failed), 7 (connection
+#     failed), 28 (timeout; with time_pretransfer 0 this is a timeout of the
+#     name lookup or of the connection), 56 with a 5xx answer of the proxy to
+#     CONNECT (the proxy could not open a tunnel to Vault).
+# Not retried: a request that curl started to send, any HTTP answer of Vault,
+# TLS errors, a 4xx answer of the proxy, and a missing -w line.
+not_sent_cause() {
+  local zero='^0(\.0+)?$' proxy="the proxy"
+  [ -z "${VAULT_PROXY:-}" ] || proxy="the Tailscale proxy"
+  if ! [[ "$t_start" =~ $zero ]] || [ "$code" != 000 ]; then
+    return 0
+  fi
+  case "$rc" in
+    5) echo "name lookup of $proxy failed" ;;
+    6) echo "name lookup failed" ;;
+    7) if [ -n "${VAULT_PROXY:-}" ]; then echo "connection to $proxy failed"; else echo "connection failed"; fi ;;
+    28)
+      if [[ "$t_lookup" =~ $zero ]]; then
+        echo "name lookup timed out"
+      elif [ -n "${VAULT_PROXY:-}" ]; then
+        echo "connection through $proxy timed out"
+      else
+        echo "connection timed out"
+      fi
+      ;;
+    56) if [[ "$proxy_code" =~ ^5[0-9][0-9]$ ]]; then echo "$proxy could not connect to Vault, HTTP $proxy_code"; fi ;;
+  esac
+  return 0
+}
+
 # ── OIDC token ──────────────────────────────────────────────────────────────
 # Audience: the Vault URL, as in vault-secrets 1.0 (jwtGithubAudience).
 # The request token goes in a header read from a pipe, never in argv.
 # Up to 3 tries of REQUEST_TIMEOUT seconds each, 2 seconds apart: about 50
-# seconds in the worst case. The Vault login below is one request, no retry.
+# seconds in the worst case. The Vault login below is sent one time (see the
+# header for the tries when curl did not send it).
 audience="$(printf '%s' "$url" | jq -sRr @uri)"
 rc=0
 response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
@@ -118,19 +177,30 @@ run_facts="This run: repository=${c_repo:-?}, ref=${c_ref:-?}, environment=${c_e
 
 # ── Login ───────────────────────────────────────────────────────────────────
 # The body comes from jq on stdin, so the JWT is never in argv.
-rc=0
-response="$(printf '%s' "$jwt" \
-  | jq -Rc --arg role "$role" '{role: $role, jwt: .}' \
-  | curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
-    "${vault_proxy[@]+"${vault_proxy[@]}"}" \
-    -w '\n%{http_code}' \
-    -H 'Content-Type: application/json' \
-    -X POST --data-binary @- \
-    "$url/v1/auth/jwt-github/login")" || rc=$?
+# A new try only when curl did not send the login (not_sent_cause). Worst
+# case: 2 failed tries of at most 5 seconds (--connect-timeout), 2 waits of
+# 2 seconds, then one try of 15 seconds: 29 seconds, 14 more than one try.
+try=1
+while :; do
+  rc=0
+  response="$(printf '%s' "$jwt" \
+    | jq -Rc --arg role "$role" '{role: $role, jwt: .}' \
+    | curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+      "${vault_proxy[@]+"${vault_proxy[@]}"}" \
+      -w "$WRITE_OUT" \
+      -H 'Content-Type: application/json' \
+      -X POST --data-binary @- \
+      "$url/v1/auth/jwt-github/login")" || rc=$?
+  split_vault_response "$response"
+  response=""
+  cause=""
+  [ "$rc" -eq 0 ] || cause="$(not_sent_cause)"
+  { [ -n "$cause" ] && [ "$try" -lt "$TRIES" ]; } || break
+  try=$((try + 1))
+  echo "Could not reach Vault ($cause). Try $try of $TRIES."
+  sleep "$RETRY_DELAY"
+done
 jwt=""
-code="" body=""
-[ "$rc" -ne 0 ] || split_response "$response"
-response=""
 vault_token=""
 if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
   vault_token="$(printf '%s' "$body" | jq -r '.auth.client_token // empty' 2>/dev/null || true)"
@@ -140,7 +210,9 @@ if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
   body=""
 fi
 
-if [ "$rc" -eq 28 ]; then
+if [ -n "$cause" ]; then
+  fail "the action could not reach Vault $url in $TRIES tries ($cause, curl exit $rc). Vault did not get the login. The likely cause is a short network problem on the tailnet. Run the job again."
+elif [ "$rc" -eq 28 ]; then
   fail "Vault did not answer the login within $REQUEST_TIMEOUT seconds. The likely cause is a stalled network connection on the tailnet. Run the job again."
 elif [ "$rc" -ne 0 ]; then
   fail "the action could not send the login to Vault $url (curl exit $rc). Run the job again."

@@ -153,7 +153,8 @@ runs:
     # login.sh masks the OIDC JWT and the Vault token at once. The Vault token
     # goes to the step output vault-token, which only the token and read steps below use.
     # No composite output exposes it. Each request has a limit of 15 seconds;
-    # the OIDC token request is tried up to 3 times, the Vault login one time.
+    # the OIDC token request is tried up to 3 times. Vault gets the login one
+    # time: a new try (up to 3 tries) only when curl did not send it.
     - name: Log in to Vault
       id: login
       shell: bash
@@ -168,7 +169,9 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/login.sh"
 
     # Only for github-token without '/': finds the engine of the token set and
-    # reads the token, one request per engine, 15 seconds each, no retry. The
+    # reads the token, 15 seconds for each request. A request that curl sent is
+    # not sent again. A request that curl did not send gets a new try, up to
+    # 3 tries for each engine. The
     # first success is the token: vault-action does not read it again. Masks the
     # token at once. See read-token.sh.
     - name: Get GitHub token from Vault
