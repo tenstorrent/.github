@@ -60,7 +60,7 @@ jwt_noenv="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims_noenv").dum
 # line per call) to FAKE_ARGV, headers read from '-H @file' to FAKE_HEADERS,
 # and the request body to FAKE_BODY.
 # Like curl, it writes the -w line also when it fails, with the values that
-# real curl gives (checked with curl 8.5 and 8.7):
+# real curl gives (checked with curl 7.81, 8.5 and 8.7):
 #   not sent    time_pretransfer 0; time_namelookup 0 for a name lookup timeout
 #   sent        time_pretransfer > 0
 # An answer can be a list 'a,b,c': call n of that URL gets word n, the last
@@ -113,6 +113,7 @@ vault_fail() {
     proxy-502) fails 56 'CONNECT tunnel failed, response 502' 000 502 0.000100 0.000000 ;;
     proxy-403) fails 56 'CONNECT tunnel failed, response 403' 000 403 0.000100 0.000000 ;;
     reset) fails 56 'Recv failure: Connection reset by peer' 000 000 0.001200 0.010500 ;;
+    empty-reply) fails 52 'Empty reply from server' 000 000 0.001200 0.010500 ;;
     tls) fails 35 'TLS connect error' 000 000 0.001200 0.000000 ;;
     no-w) echo "curl: (28) Resolving timed out after 5000 milliseconds" >&2; exit 28 ;;
     *) echo "fake curl: unknown answer $1" >&2; exit 99 ;;
@@ -501,8 +502,14 @@ login_tries 'HTTP 429: no new try' fail 1 'too many logins (rate limit)' FAKE_LO
 login_tries 'HTTP 500: no new try' fail 1 '(HTTP 500)' FAKE_LOGIN=e500,ok
 login_tries 'HTTP 503: no new try' fail 1 '(HTTP 503). Vault said: Vault is sealed.' FAKE_LOGIN=e503,ok
 login_tries 'HTTP 502 of Vault: no new try' fail 1 '(HTTP 502)' FAKE_LOGIN=nobody,ok
-login_tries 'connection reset after send: no new try' fail 1 '(curl exit 56)' FAKE_LOGIN=reset,ok
-login_tries 'TLS error: no new try' fail 1 '(curl exit 35)' FAKE_LOGIN=tls,ok
+broke_after_login="the connection to Vault $url broke after the action sent the login"
+login_tries 'connection reset after send: no new try' fail 1 \
+  "$broke_after_login (curl exit 56). Vault may have got the login. The action does not send it again. Run the job again." \
+  FAKE_LOGIN=reset,ok
+login_tries 'empty reply after send: no new try' fail 1 "$broke_after_login (curl exit 52)." \
+  FAKE_LOGIN=empty-reply,ok
+login_tries 'TLS error: no new try' fail 1 \
+  "the action could not send the login to Vault $url (curl exit 35). Run the job again." FAKE_LOGIN=tls,ok
 login_tries 'no -w line from curl: no new try' fail 1 'Vault did not answer the login within 15 seconds.' \
   FAKE_LOGIN=no-w,ok
 # Userspace: the proxy does the name lookup and the connection to Vault. A 5xx
@@ -519,8 +526,11 @@ login_tries 'userspace: proxy not listening, then success' ok 2 \
 login_tries 'userspace: CONNECT timeout, then success' ok 2 \
   'Could not reach Vault (connection through the Tailscale proxy timed out). Try 2 of 3.' \
   VAULT_PROXY="$proxy" FAKE_LOGIN=connect-timeout,ok
-login_tries 'userspace: proxy refuses CONNECT (403): no new try' fail 1 '(curl exit 56)' \
+login_tries 'userspace: proxy refuses CONNECT (403): no new try' fail 1 \
+  "the action could not send the login to Vault $url (curl exit 56)." \
   VAULT_PROXY="$proxy" FAKE_LOGIN=proxy-403,ok
+login_tries 'userspace: connection reset after send: no new try' fail 1 "$broke_after_login (curl exit 56)." \
+  VAULT_PROXY="$proxy" FAKE_LOGIN=reset,ok
 login_tries 'userspace: sent, no answer in time: no new try' fail 1 \
   'Vault did not answer the login within 15 seconds.' \
   VAULT_PROXY="$proxy" FAKE_LOGIN=timeout,ok
@@ -820,11 +830,18 @@ read_refused 'sent, no answer in time: no new try' 'github' 'within 15 seconds' 
   FAKE_ENGINES='github=timeout,ok'
 read_refused 'HTTP 500: no new try' 'github' '(HTTP 500)' FAKE_ENGINES='github=e500,ok'
 read_refused 'HTTP 429: no new try' 'github' '(HTTP 429)' FAKE_ENGINES='github=ratelimit,ok'
-read_refused 'connection reset after send: no new try' 'github' '(curl exit 56)' \
+read_refused 'connection reset after send: no new try' 'github' \
+  "the connection to Vault $url broke after the action sent the read of GitHub token set $set_name (from github-token: contents-read) (curl exit 56). Vault may have got the read. The action does not send it again. Run the job again." \
   FAKE_ENGINES='github=reset,ok'
+read_refused 'empty reply after send: no new try' 'github' 'broke after the action sent the read' \
+  FAKE_ENGINES='github=empty-reply,ok'
+read_refused 'TLS error: no new try' 'github' \
+  "the action could not send the read of GitHub token set $set_name (from github-token: contents-read) to Vault $url (curl exit 35). Run the job again." \
+  FAKE_ENGINES='github=tls,ok'
 found 'userspace: proxy cannot connect to Vault, then found' 'github github' \
   VAULT_PROXY="$proxy" FAKE_ENGINES='github=proxy-502,ok'
-read_refused 'userspace: proxy refuses CONNECT (403): no new try' 'github' '(curl exit 56)' \
+read_refused 'userspace: proxy refuses CONNECT (403): no new try' 'github' \
+  "the action could not send the read of GitHub token set $set_name (from github-token: contents-read) to Vault $url (curl exit 56)." \
   VAULT_PROXY="$proxy" FAKE_ENGINES='github=proxy-403,ok'
 
 # No 'set -x' and no echo of a secret variable in the scripts.
