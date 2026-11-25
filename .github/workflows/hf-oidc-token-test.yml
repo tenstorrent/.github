@@ -1,0 +1,209 @@
+name: Test hf-oidc-token action
+
+# Tests actions/hf-oidc-token from this checkout (uses: ./actions/hf-oidc-token),
+# so a pull request tests its own code.
+#
+# Offline jobs (every pull request that changes the action): the test scripts
+# with a fake curl, shellcheck, and runs of the action that stop in the
+# pre-checks. No OIDC token, no Hugging Face request, no secret.
+#
+# Live jobs: a real exchange at Hugging Face. They run only when
+#   - the repository variable HF_OIDC_TEST_ENABLED is 'true', and
+#   - the run is a manual run (workflow_dispatch).
+# They use the environment hf-oidc-token-test, which must have required
+# reviewers. Until OSPO sets up the Hugging Face side, they are skipped, and a
+# run does not create the environment.
+#
+# Repository variables for the live jobs (set by OSPO, not in this file):
+#   HF_OIDC_TEST_ENABLED  'true' to run the live jobs
+#   HF_OIDC_RESOURCE      the OSPO Hugging Face service account (user name)
+#   HF_OIDC_TEST_MODEL    one gated model whose licence the account accepted,
+#                         for example meta-llama/Llama-3.2-1B
+#   HF_OIDC_TEST_FILE     a small file of that model (default config.json)
+#   HF_OIDC_TEST_BRANCH   the branch in the CI/CD identity (default main);
+#                         set it only for a test from a pull request branch
+#
+# The CI/CD identity on the Hugging Face account for this test:
+#   repository  tenstorrent/.github
+#   branch      main (or, for a test before merge, the pull request branch)
+#   workflow    hf-oidc-token-test.yml
+#
+# Security of this test
+# ---------------------
+# A live job gets a token that reads every gated model that the service
+# account can read (read-only; not private repositories, no writes). Anyone
+# who can change this file on the branch in the identity, and start a manual
+# run, can get such a token. These controls limit the risk:
+#   1. The identity names one branch and this file. On main, every change has
+#      a reviewed pull request.
+#   2. REQUIRED: the environment hf-oidc-token-test has required reviewers.
+#      A person approves before a live job starts. (Hugging Face does not
+#      check the environment: this control is on the GitHub side only.)
+#   3. A temporary identity for a pull request branch must be deleted at
+#      Hugging Face right after the test.
+#   4. Fork pull requests get no OIDC token; pull request runs never start a
+#      live job.
+
+on:
+  pull_request:
+    paths:
+      - "actions/hf-oidc-token/**"
+      - "!actions/hf-oidc-token/**/*.md"
+      - ".github/workflows/hf-oidc-token-test.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: hf-oidc-token-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Offline ────────────────────────────────────────────────────────────────
+
+  # Runs prepare.sh, exchange.sh and check-models.sh directly. A fake curl
+  # answers GitHub and Hugging Face. See the header of each test script.
+  offline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash actions/hf-oidc-token/test/prepare-cases.sh
+      - run: bash actions/hf-oidc-token/test/exchange-cases.sh
+      - name: shellcheck
+        run: shellcheck actions/hf-oidc-token/*.sh actions/hf-oidc-token/test/*.sh
+
+  # Runs the action itself. Each case stops in the pre-checks (the branch
+  # no-such-branch is never the branch of the run), so no OIDC token and no
+  # network are needed. Checks the wiring of action.yml: outcome, output
+  # failed-step, and an empty token.
+  stops-in-prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: run-not-allowed-fail
+            resource: ospo-test-account
+            if-no-token: fail
+            expect-outcome: failure
+          - case: run-not-allowed-warn
+            resource: ospo-test-account
+            if-no-token: warn
+            expect-outcome: success
+          - case: repository-as-resource
+            resource: acme/model
+            if-no-token: warn
+            expect-outcome: failure
+          - case: bad-model-name
+            resource: ospo-test-account
+            models: "not a repo"
+            if-no-token: warn
+            expect-outcome: failure
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: hf
+        continue-on-error: true
+        uses: ./actions/hf-oidc-token
+        with:
+          resource: ${{ matrix.resource }}
+          models: ${{ matrix.models }}
+          if-no-token: ${{ matrix.if-no-token }}
+          branch: no-such-branch
+      - name: Assert the result
+        env:
+          OUTCOME: ${{ steps.hf.outcome }}
+          EXPECT_OUTCOME: ${{ matrix.expect-outcome }}
+          TOKEN: ${{ steps.hf.outputs.token }}
+          EXPIRES_AT: ${{ steps.hf.outputs.expires-at }}
+          FAILED_STEP: ${{ steps.hf.outputs.failed-step }}
+          EXPECT_STEP: prepare
+        run: bash actions/hf-oidc-token/test/assert-result.sh
+
+  # ── Live (needs the Hugging Face setup; skipped until then) ────────────────
+
+  # A real exchange, the models check, and a read of one small file of one
+  # gated model with the token.
+  live-exchange:
+    if: vars.HF_OIDC_TEST_ENABLED == 'true' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: hf-oidc-token-test
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: hf
+        uses: ./actions/hf-oidc-token
+        with:
+          resource: ${{ vars.HF_OIDC_RESOURCE }}
+          models: ${{ vars.HF_OIDC_TEST_MODEL }}
+          branch: ${{ vars.HF_OIDC_TEST_BRANCH || 'main' }}
+      # The token goes to this step only. The step removes the OIDC request
+      # variables first, as every run step of a caller should.
+      - name: Read one file of the gated model with the token
+        env:
+          HF_ACCESS_TOKEN: ${{ steps.hf.outputs.token }}
+          EXPIRES_AT: ${{ steps.hf.outputs.expires-at }}
+          FAILED_STEP: ${{ steps.hf.outputs.failed-step }}
+          WITHOUT: ${{ steps.hf.outputs.models-without-access }}
+          MODEL: ${{ vars.HF_OIDC_TEST_MODEL }}
+          FILE: ${{ vars.HF_OIDC_TEST_FILE || 'config.json' }}
+        run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          set -euo pipefail
+          [ -z "$FAILED_STEP" ] || { echo "::error::output failed-step is '$FAILED_STEP', expected empty"; exit 1; }
+          [ -z "$WITHOUT" ] || { echo "::error::output models-without-access is '$WITHOUT', expected empty"; exit 1; }
+          [ -n "$HF_ACCESS_TOKEN" ] || { echo "::error::output token is empty"; exit 1; }
+          [ -n "$EXPIRES_AT" ] || { echo "::error::output expires-at is empty"; exit 1; }
+          # Without a token the file must be refused: else the test proves nothing.
+          anon="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "https://huggingface.co/$MODEL/resolve/main/$FILE")"
+          case "$anon" in 401 | 403) ;; *) echo "::error::$MODEL/$FILE is readable without a token (HTTP $anon): not a gated test file"; exit 1 ;; esac
+          # curl does not send the header to the CDN host after the redirect.
+          code="$(curl -sSL -o "$RUNNER_TEMP/hf-test-file" -w '%{http_code}' --max-time 60 \
+            -H @<(printf 'Authorization: Bearer %s\n' "$HF_ACCESS_TOKEN") \
+            "https://huggingface.co/$MODEL/resolve/main/$FILE")"
+          [ "$code" = 200 ] || { echo "::error::reading $MODEL/$FILE with the token gave HTTP $code"; exit 1; }
+          size="$(wc -c <"$RUNNER_TEMP/hf-test-file")"
+          rm -f "$RUNNER_TEMP/hf-test-file"
+          echo "OK: the token read $MODEL/$FILE ($size bytes). The token ends at $EXPIRES_AT."
+
+  # A refusal at Hugging Face: an account name that has no identity for this
+  # run. The action must fail in step exchange with an empty token.
+  live-refusal:
+    if: vars.HF_OIDC_TEST_ENABLED == 'true' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: hf-oidc-token-test
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: hf
+        continue-on-error: true
+        uses: ./actions/hf-oidc-token
+        with:
+          resource: ospo-no-such-account-for-test-7c1e
+          branch: ${{ vars.HF_OIDC_TEST_BRANCH || 'main' }}
+      - name: Assert the action failed in step exchange
+        env:
+          OUTCOME: ${{ steps.hf.outcome }}
+          EXPECT_OUTCOME: failure
+          TOKEN: ${{ steps.hf.outputs.token }}
+          EXPIRES_AT: ${{ steps.hf.outputs.expires-at }}
+          FAILED_STEP: ${{ steps.hf.outputs.failed-step }}
+          EXPECT_STEP: exchange
+        run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          bash actions/hf-oidc-token/test/assert-result.sh

@@ -7,5 +7,9 @@
 /.github/workflows/vault-secrets-test.yml    @jbakerTT
 /skills/vault-secrets-workflow/              @jbakerTT
 
+# Shared action for short-lived Hugging Face tokens (OIDC) and its test workflow.
+/actions/hf-oidc-token/                      @jbakerTT
+/.github/workflows/hf-oidc-token-test.yml    @jbakerTT
+
 # This file.
 /.github/CODEOWNERS                          @jbakerTT
