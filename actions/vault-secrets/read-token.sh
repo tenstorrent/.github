@@ -177,6 +177,9 @@ for engine in "${ENGINES[@]}"; do
     fail "the action could not reach Vault $url for the read of GitHub token set $token_set$from in $TRIES tries ($cause, curl exit $rc). Vault did not get the read. The likely cause is a short network problem on the tailnet. Run the job again."
   elif [ "$rc" -eq 28 ]; then
     fail "Vault did not answer the read of GitHub token set $token_set$from within $REQUEST_TIMEOUT seconds. The likely cause is a stalled network connection on the tailnet. Run the job again."
+  elif [ "$rc" -ne 0 ] && [[ "$t_start" =~ ^[0-9]+(\.[0-9]+)?$ ]] && ! [[ "$t_start" =~ ^0(\.0+)?$ ]]; then
+    # time_pretransfer > 0: curl sent the read, then the connection broke.
+    fail "the connection to Vault $url broke after the action sent the read of GitHub token set $token_set$from (curl exit $rc). Vault may have got the read. The action does not send it again. Run the job again."
   elif [ "$rc" -ne 0 ]; then
     fail "the action could not send the read of GitHub token set $token_set$from to Vault $url (curl exit $rc). Run the job again."
   elif [ "$code" = 403 ] || [ "$code" = 404 ]; then
