@@ -22,6 +22,11 @@ name: Test hf-oidc-token action
 #   HF_OIDC_TEST_MODEL    one gated model whose licence the account accepted,
 #                         for example meta-llama/Llama-3.2-1B
 #   HF_OIDC_TEST_FILE     a small file of that model (default config.json)
+#   HF_OIDC_TEST_PRIVATE_DATASET  optional: a private dataset of an
+#                         organization that the account is a member of, as
+#                         datasets/<owner>/<name>, for the job
+#                         live-private-dataset (default
+#                         datasets/Tenstorrent/flux.2-klein-4b-refs)
 #
 # The CI/CD identity on the Hugging Face account for this test:
 #   repository  tenstorrent/.github
@@ -187,6 +192,72 @@ jobs:
           size="$(wc -c <"$RUNNER_TEMP/hf-test-file")"
           rm -f "$RUNNER_TEMP/hf-test-file"
           echo "OK: the token read $MODEL/$FILE ($size bytes). The token ends at $EXPIRES_AT."
+
+  # A probe, not a pass/fail test. Question: can the token of the service
+  # account read a private dataset of an organization that the account is a
+  # member of? The vendor documentation says a user token cannot read "your
+  # private repos"; it does not say this for a private repository of an
+  # organization, and it does not mention SSO. The job runs the action with the
+  # dataset in `models` (if-no-token: warn), then asks auth-check again and
+  # writes the HTTP code and the error headers to the log and the job summary.
+  # The job fails only when there is no token: then the probe proves nothing.
+  live-private-dataset:
+    if: >-
+      vars.HF_OIDC_TEST_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: hf-oidc-token-test
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: hf
+        uses: ./actions/hf-oidc-token
+        with:
+          resource: ${{ vars.HF_OIDC_RESOURCE }}
+          models: ${{ vars.HF_OIDC_TEST_PRIVATE_DATASET || 'datasets/Tenstorrent/flux.2-klein-4b-refs' }}
+          if-no-token: warn
+      - name: Report if the token can read the private dataset
+        env:
+          HF_ACCESS_TOKEN: ${{ steps.hf.outputs.token }}
+          FAILED_STEP: ${{ steps.hf.outputs.failed-step }}
+          WITHOUT: ${{ steps.hf.outputs.models-without-access }}
+          DATASET: ${{ vars.HF_OIDC_TEST_PRIVATE_DATASET || 'datasets/Tenstorrent/flux.2-klein-4b-refs' }}
+        run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+          set -euo pipefail
+          [ -n "$HF_ACCESS_TOKEN" ] || { echo "::error::no token (failed-step '$FAILED_STEP'): the probe proves nothing"; exit 1; }
+          # Never put an unchecked value in a URL.
+          [[ "$DATASET" =~ ^datasets/[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$ ]] && [[ "$DATASET" != *..* ]] \
+            || { echo "::error::'$DATASET' is not datasets/<owner>/<name>"; exit 1; }
+          # Without a token the dataset must be refused: else it is not private.
+          anon="$(curl -q -sS -o /dev/null -w '%{http_code}' --max-time 30 "https://huggingface.co/api/$DATASET")"
+          case "$anon" in 401 | 403 | 404) ;; *) echo "::error::$DATASET is readable without a token (HTTP $anon): not a private dataset"; exit 1 ;; esac
+          code="$(curl -q -sS -o /dev/null -D "$RUNNER_TEMP/hf-probe-headers" -w '%{http_code}' --max-time 30 \
+            -H @<(printf 'Authorization: Bearer %s\n' "$HF_ACCESS_TOKEN") \
+            "https://huggingface.co/api/$DATASET/auth-check")"
+          header() {
+            tr -d '\r' <"$RUNNER_TEMP/hf-probe-headers" \
+              | awk -F': *' -v name="$1" 'tolower($1) == name { v = substr($0, index($0, ":") + 1) } END { print v }' \
+              | tr -cd 'A-Za-z0-9 _.,:;/()-' | cut -c1-200
+          }
+          error_code="$(header x-error-code)"
+          error_message="$(header x-error-message)"
+          rm -f "$RUNNER_TEMP/hf-probe-headers"
+          if [ "$code" = 200 ]; then
+            result="CAN READ: the token can read the private dataset $DATASET."
+          else
+            result="CANNOT READ: the token cannot read the private dataset $DATASET."
+          fi
+          {
+            echo "$result"
+            echo "auth-check: HTTP $code, X-Error-Code '${error_code# }', X-Error-Message '${error_message# }'."
+            echo "Without a token: HTTP $anon. Action output models-without-access: '$WITHOUT'."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # A refusal at Hugging Face: an account name that has no identity for this
   # run. The action must fail in step exchange with an empty token.
