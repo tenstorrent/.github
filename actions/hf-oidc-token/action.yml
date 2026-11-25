@@ -39,7 +39,9 @@ inputs:
   branch:
     description: >-
       The only branch on which the action asks for a token. It must be the
-      branch in the CI/CD identity on Hugging Face. Default `main`.
+      branch in the CI/CD identity on Hugging Face, and it must have branch
+      protection or a ruleset: on an unprotected branch the action gives no
+      token. Default `main`.
     required: false
     default: main
 

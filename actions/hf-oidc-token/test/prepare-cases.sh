@@ -4,7 +4,8 @@
 # Runs prepare.sh directly, without the network. Checks:
 #   - each bad input fails with its own message, also with if-no-token warn;
 #   - pull_request_target and workflow_run always fail;
-#   - other refusals (event, also push, branch, no resource, no id-token) fail with
+#   - other refusals (event, also push, branch, unprotected branch, no
+#     resource, no id-token) fail with
 #     if-no-token fail, and warn and succeed (go=false, stopped=prepare) with warn;
 #   - the models list: newline and comma forms, blanks, duplicates, datasets;
 #   - a valid run gives go=true and the outputs.
@@ -112,6 +113,12 @@ expect_stop "only on branch release" IN_BRANCH=release
 expect_stop "input resource is empty" IN_RESOURCE=
 expect_stop "input resource is empty" 'IN_RESOURCE=   '
 expect_stop "id-token: write" ACTIONS_ID_TOKEN_REQUEST_URL=
+# Unprotected branch: a stop (owner decision). Empty or missing counts as not
+# protected. The branch check comes first: a wrong branch gives its own message.
+expect_stop "branch main has no branch protection or ruleset (GITHUB_REF_PROTECTED is 'false')" GITHUB_REF_PROTECTED=false
+expect_stop "branch main has no branch protection or ruleset (GITHUB_REF_PROTECTED is '')" GITHUB_REF_PROTECTED=
+expect_stop "must name a protected branch" GITHUB_REF_PROTECTED=TRUE
+expect_stop "only on branch main" GITHUB_REF=refs/heads/feature GITHUB_REF_PROTECTED=false
 
 # ── Valid runs ───────────────────────────────────────────────────────────────
 for ev in schedule workflow_dispatch; do
@@ -137,10 +144,6 @@ want="meta-llama/Llama-3.1-8B-Instruct${nl}google/gemma-2b${nl}datasets/acme/gat
 run IN_MODELS=
 { [ "$rc" -eq 0 ] && [ -z "$(output models)" ]; } && ok || bad "empty models"
 
-# Unprotected branch: a warning, not a stop.
-run GITHUB_REF_PROTECTED=false
-{ [ "$rc" -eq 0 ] && grep -qF 'has no branch protection' "$work/log" && [ "$(output go)" = true ]; } \
-  && ok || bad "unprotected branch warns"
 
 echo "prepare-cases: $pass checks passed."
 [ "$status" -eq 0 ] || echo "prepare-cases: some checks FAILED."

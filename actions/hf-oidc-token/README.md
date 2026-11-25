@@ -107,7 +107,11 @@ Pin the action to a full commit SHA. There is no release yet.
 6. **Events:** only `schedule` and `workflow_dispatch`, on the branch in the
    identity. The action refuses other runs, also `push`. Never add
    `pull_request_target` or `workflow_run` to the file.
-7. **Long jobs:** the token ends after 60 minutes (output `expires-at`).
+7. **Protected branch:** the branch must have branch protection or a ruleset
+   (GitHub then sets `GITHUB_REF_PROTECTED` to `true`). On an unprotected
+   branch the action gives no token: anyone who can push to that branch could
+   change the workflow and use the identity.
+8. **Long jobs:** the token ends after 60 minutes (output `expires-at`).
    For a later use, call the action again just before it.
 
 ## Inputs
@@ -117,7 +121,7 @@ Pin the action to a full commit SHA. There is no release yet.
 | `resource` | empty | The OSPO service account name. Pass `${{ vars.HF_OIDC_RESOURCE }}`. A composite action cannot read `vars`. A value with `/` (a repository) is refused: a repository resource gives a token that can write. |
 | `models` | empty | Gated repositories that the job reads, one per line or separated by commas. `<owner>/<name>` for a model, `datasets/<owner>/<name>` for a dataset. At most 50. Empty: no check. |
 | `if-no-token` | `fail` | `fail`: the action fails when it gives no token, or when the token cannot read a repository in `models`. `warn`: it writes a warning and succeeds. Then the token is empty, or (for `models`) the token reads only the other repositories. |
-| `branch` | `main` | The only branch on which the action asks for a token. Use the branch of the CI/CD identity. |
+| `branch` | `main` | The only branch on which the action asks for a token. Use the branch of the CI/CD identity. It must have branch protection or a ruleset. |
 
 Bad input values, and the events `pull_request_target` and `workflow_run`,
 always fail, also with `if-no-token: warn`.
@@ -159,15 +163,13 @@ Checks before the exchange (step `prepare`):
 | `input resource is empty.` | The repository has no variable `HF_OIDC_RESOURCE`, or the workflow does not pass it. | Pass `resource: ${{ vars.HF_OIDC_RESOURCE }}`. If the variable does not exist, **open an OSPO ticket** (see [Before you start](#before-you-start-open-an-ospo-ticket)). |
 | `the action gives a token only for the events schedule and workflow_dispatch.` | The run came from another event, for example `pull_request` or `push`. | Run it from a schedule or by "Run workflow". |
 | `the action gives a token only on branch <branch> (input branch).` | The run is on another branch or a tag. | Run it on the branch of the identity. |
+| `branch <branch> has no branch protection or ruleset (GITHUB_REF_PROTECTED is '<value>').` | No branch protection and no ruleset applies to the branch. An empty value counts as not protected. | Run the workflow on a protected branch (normally `main`), or ask the repository admins to protect the branch. The identity must name a protected branch. |
 | `refused on pull_request_target:` / `refused on workflow_run:` | The file has a trigger that outside code can start. Always an error. | Remove the trigger. |
 | `the job has no OIDC token.` | No `id-token: write` on the job. | Add it to the job's `permissions:`. |
 | `input resource '<value>' has a '/'.` / `input resource is not a valid Hugging Face user name.` | `resource` is a repository name or has other characters. Always an error. | Pass `vars.HF_OIDC_RESOURCE`. |
 | `input models: '<value>' is not a Hugging Face repository name.` / `input models has more than 50 repositories.` | A bad entry in `models`. Always an error. | Use `<owner>/<name>` or `datasets/<owner>/<name>`. |
 | `input branch is not a valid branch name.` / `input if-no-token must be fail or warn.` | A bad input value. Always an error. | Correct the value. |
 | `this runner has no curl` / `this runner has no jq` | The runner lacks a tool. Always an error. | Install it, or use another runner. |
-
-A warning that does not stop the action: `branch <branch> has no branch
-protection or ruleset.` Protect the branch.
 
 Exchange (step `exchange`):
 
@@ -233,6 +235,10 @@ variables of the runner (`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and its CA
 settings (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`): whoever controls the runner
 environment controls these. The action never asks curl to read `.netrc`.
 
+The action gives a token only on a protected branch (`GITHUB_REF_PROTECTED`
+is `true`). GitHub sets it for branch protection and for rulesets. The
+Hugging Face identity does not check this: the check is on the GitHub side.
+
 ## What OSPO sets up
 
 Once for the service account (see the Confluence page "Hugging Face tokens in
@@ -290,11 +296,15 @@ Options:
 
 ## What is proven and what is not
 
-Proven in a live test: run
-[45521842112](https://github.com/tenstorrent/.github/actions/runs/45521842112),
-2026-11-25 (UTC), GitHub-hosted Ubuntu runner, branch `ospo/hf-oidc-token`,
-commit `780ce2a`. The CI/CD identity for the test named the repository and
-the workflow file only, not the branch.
+Proven in live tests: runs
+[45521842112](https://github.com/tenstorrent/.github/actions/runs/45521842112)
+(commit `780ce2a`) and
+[45527326671](https://github.com/tenstorrent/.github/actions/runs/45527326671)
+(commit `18f5e20`, the last live proof), 2026-11-25 (UTC), GitHub-hosted
+Ubuntu runner, branch `ospo/hf-oidc-token`. The CI/CD identity for the test
+named the repository and the workflow file only, not the branch. These runs
+were before the action stopped on an unprotected branch; the pull request
+branch was not protected.
 
 - A real exchange at `https://huggingface.co/oauth/token` for the account,
   with the request format in [How the exchange works](#how-the-exchange-works).
@@ -322,6 +332,9 @@ Not proven:
   example a wrong branch or workflow file), and the texts for HTTP 429 and 5xx.
 - A caller in another repository.
 - An identity that also names the branch (the test identity had no branch).
+- That GitHub reports `main` of this repository, which has rulesets only and
+  no classic branch protection, as protected (`GITHUB_REF_PROTECTED` is
+  `true`). The first live run on `main` after merge must confirm it.
 - A job longer than 60 minutes.
 - Self-hosted runners, and macOS and Windows runners.
 - That one service account can hold many CI/CD identities.
@@ -339,6 +352,8 @@ Not proven:
 
 The workflow [`hf-oidc-token-test.yml`](../../.github/workflows/hf-oidc-token-test.yml)
 runs these on each pull request that changes the action, and runs the action
-in cases that stop in the pre-checks. Its live jobs need the Hugging Face
-setup, the variable `HF_OIDC_TEST_ENABLED` and the environment
-`hf-oidc-token-test` with required reviewers. Its header lists the values.
+in cases that stop in the pre-checks. Its live jobs run only from `main`
+after merge: a manual run ("Run workflow") on `main`, the variable
+`HF_OIDC_TEST_ENABLED` set to `'true'`, and an approval of the environment
+`hf-oidc-token-test`. They cannot run from a pull request branch, because
+the action stops on an unprotected branch. Its header lists the values.

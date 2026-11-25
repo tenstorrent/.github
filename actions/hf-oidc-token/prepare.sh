@@ -6,8 +6,8 @@
 # Two kinds of stop:
 #   fail  An input has a bad value, or the run uses an event that must never
 #         get a token (pull_request_target, workflow_run). Always an error.
-#   stop  This run cannot get a token (no resource, wrong branch, event not
-#         allowed, no id-token: write). Error when if-no-token is `fail`;
+#   stop  This run cannot get a token (no resource, wrong branch, branch not
+#         protected, event not allowed, no id-token: write). Error when if-no-token is `fail`;
 #         warning and success when it is `warn` (output stopped=prepare).
 #
 # Reads:  IN_RESOURCE IN_MODELS IN_IF_NO_TOKEN IN_BRANCH
@@ -129,16 +129,20 @@ if [ "$ref" != "refs/heads/$branch" ]; then
   stop "the action gives a token only on branch $branch (input branch). This run: ${ref:-unknown ref}."
 fi
 
+# GitHub sets GITHUB_REF_PROTECTED to true when branch protection or a ruleset
+# applies to the ref. Empty or missing counts as not protected. On an
+# unprotected branch, anyone who can push to it can change this workflow and
+# use the Hugging Face identity.
+if [ "${GITHUB_REF_PROTECTED:-}" != true ]; then
+  stop "branch $branch has no branch protection or ruleset (GITHUB_REF_PROTECTED is '${GITHUB_REF_PROTECTED:-}'). The Hugging Face identity must name a protected branch: anyone who can push to an unprotected branch can change this workflow and use the identity. Run the workflow on a protected branch (normally main), or ask the repository admins to protect branch $branch."
+fi
+
 if [ -z "$resource" ]; then
   stop "input resource is empty. Pass resource: \${{ vars.HF_OIDC_RESOURCE }}. If the repository has no variable HF_OIDC_RESOURCE, OSPO has not set up Hugging Face access for it yet: open an OSPO ticket."
 fi
 
 if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
   stop "the job has no OIDC token. Add 'permissions: id-token: write' to this job (job level, not workflow level)."
-fi
-
-if [ "${GITHUB_REF_PROTECTED:-}" != true ]; then
-  printf '::warning title=%s::%s\n' "$TITLE" "$(escape "branch $branch has no branch protection or ruleset. Anyone who can push to it can change this workflow and use the Hugging Face identity. Protect the branch.")"
 fi
 
 delimiter="hf_oidc_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
