@@ -320,6 +320,24 @@ refused 'role not found, role-from workflow-file' \
 refused 'claim mismatch, role-from workflow-file' \
   "This run does not match role tenstorrent--.github--vault-secrets-test: Vault refused claim job_workflow_ref. $facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. Vault said: error validating claims: claim \"job_workflow_ref\" does not match any associated bound claim values. $wf_note" \
   FAKE_LOGIN=claim-wf ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
+# A job of a called reusable workflow: job_workflow_ref is the called file, so
+# a role pinned to the caller file alone refuses this claim.
+reusable_note='If this job is in a called reusable workflow: the role of the caller file must bind the called workflow (grant keys for reusable workflows, not workflow_files alone). Ask OSPO.'
+refused 'claim job_workflow_ref, role-from workflow-file: reusable note' \
+  "$wf_note $reusable_note" \
+  FAKE_LOGIN=claim-wf ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
+run_login FAKE_LOGIN=claim-env ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
+if printf '%s\n' "$log" | grep -q -F -- 'called reusable workflow: the role'; then
+  bad "claim environment, role-from workflow-file: the reusable note is only for claim job_workflow_ref"
+else
+  echo "OK: claim environment, role-from workflow-file: no reusable note"
+fi
+run_login FAKE_LOGIN=claim-wf
+if printf '%s\n' "$log" | grep -q -F -- 'called reusable workflow'; then
+  bad "claim job_workflow_ref, role source full: no role-from notes expected"
+else
+  echo "OK: claim job_workflow_ref, role source full: no role-from notes"
+fi
 run_login ROLE=tenstorrent--.github--vault-secrets-test ROLE_SOURCE=workflow-file ROLE_INPUT=
 if [ "$rc" -ne 0 ] || ! printf '%s\n' "$log" | grep -q -x -F -- 'Logged in to Vault with role tenstorrent--.github--vault-secrets-test (workflow-file).'; then
   bad "login, role-from workflow-file: no success line with the role and source workflow-file"

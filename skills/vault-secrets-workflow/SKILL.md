@@ -97,8 +97,10 @@ example `role: nightly`. A full role name also works.
 If the grant has one role for each workflow file, named after the file (for
 example role `<org>--<repo>--create-repo` for `create-repo.yml`), you can use
 `role-from: workflow-file` (release 1.2) instead of `role:`. Then do not set
-`role:`. The action uses the file that started the run, also in a called
-reusable workflow.
+`role:`. The action uses the file that started the run. In a called reusable
+workflow, this is the caller file, and the login works only if OSPO made the
+grant of that role for the reusable workflow (not with `workflow_files`
+alone). See the action README.
 `github-token` takes the key of the token in the grant, not a Vault path. The
 action finds where Vault keeps it. A full name `<org>--<repo>--<key>` or a full
 path with `/` also works, but do not write new workflows with them.

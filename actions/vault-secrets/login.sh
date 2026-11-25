@@ -266,7 +266,11 @@ if [ -z "$vault_token" ]; then
     esac
   elif [[ "$err" =~ $claim_re ]]; then
     claim="${BASH_REMATCH[1]}"
-    fail "This run does not match role $role: Vault refused claim $claim. $run_facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. $said$file_note"
+    reusable_note=""
+    if [ "$role_source" = workflow-file ] && [ "$claim" = job_workflow_ref ]; then
+      reusable_note=" If this job is in a called reusable workflow: the role of the caller file must bind the called workflow (grant keys for reusable workflows, not workflow_files alone). Ask OSPO."
+    fi
+    fail "This run does not match role $role: Vault refused claim $claim. $run_facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. $said$file_note$reusable_note"
   else
     fail "Vault refused the login with role $role (HTTP ${code:-?}). $said $run_facts"
   fi

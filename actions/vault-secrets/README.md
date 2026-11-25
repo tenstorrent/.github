@@ -184,9 +184,9 @@ Rules:
 - The action reads the file name from the runner variable
   `GITHUB_WORKFLOW_REF` (`<owner>/<repo>/.github/workflows/<file>@<ref>`).
 - In a job of a called reusable workflow, `GITHUB_WORKFLOW_REF` names the
-  file of the caller, not the called file. The runner
-  has no variable for the called file. So the role is always the role of the
-  caller file.
+  file of the caller, not the called file. The runner has no variable for the
+  called file. So the role name always comes from the CALLER file. See
+  [Reusable workflows](#reusable-workflows-and-role-from-workflow-file).
 - `role` must be empty. The action refuses `role-from: workflow-file` with a
   `role`.
 - The stem must be a valid short role name, with the same rule as a short
@@ -203,6 +203,25 @@ A login with a wrong role is a refused login, an entry in the audit log, and
 counts against the rate limit of the logins. So the action sends one login
 with the one role, as for `role`, and has no fallback to the default role.
 The log shows `Logged in to Vault with role <role> (workflow-file).`
+
+### Reusable workflows and role-from workflow-file
+
+In a job of a called reusable workflow, the OIDC claims are:
+
+- `workflow_ref`: the caller file (the file that started the run).
+- `job_workflow_ref`: the called file (the file that holds the job).
+
+The action uses the role of the caller file. Vault accepts the login only if
+the grant of that role binds the called workflow as the job's workflow. The
+grant keys for this are `reusable_job_workflow_refs` (or `job_workflow_refs`
+for a reusable file of the same repository) with `callers` or
+`workflow_refs` for the caller files. A role that is pinned to the caller file
+alone with `workflow_files` binds both claims to the caller file, so Vault
+refuses a job in a called reusable workflow (claim `job_workflow_ref`). Ask
+OSPO to set up the grant for a reusable workflow.
+
+A login through a reusable workflow with `role-from: workflow-file` is not
+proven live yet.
 
 ## Linux runner pods without TUN (release 1.2)
 
