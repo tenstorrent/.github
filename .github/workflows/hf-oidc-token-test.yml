@@ -75,6 +75,17 @@ jobs:
       - run: bash actions/hf-oidc-token/test/exchange-cases.sh
       - name: shellcheck
         run: shellcheck actions/hf-oidc-token/*.sh actions/hf-oidc-token/test/*.sh
+      # The runner reads expressions also in description texts of action.yml,
+      # and an unknown context there (for example vars) stops the load.
+      - name: No expression in a description of action.yml
+        run: |
+          set -euo pipefail
+          # The pattern is built in two parts: this file must not hold it as one text.
+          pattern='$'
+          pattern+='{{'
+          found="$(yq '.description, .inputs[].description, .outputs[].description' actions/hf-oidc-token/action.yml | grep -F "$pattern" || true)"
+          [ -z "$found" ] || { echo "::error::action.yml has an expression in a description: $found"; exit 1; }
+          echo "OK: no expression in a description."
 
   # Runs the action itself. Each case stops in the pre-checks (the branch
   # no-such-branch is never the branch of the run), so no OIDC token and no

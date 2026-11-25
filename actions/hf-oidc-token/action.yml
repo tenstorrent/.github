@@ -9,9 +9,10 @@ inputs:
   resource:
     description: >-
       Name of the OSPO Hugging Face service account (a user name, not a
-      repository). Pass `${{ vars.HF_OIDC_RESOURCE }}`: a composite action
-      cannot read `vars`. No default: OSPO sets the variable when it sets up
-      the account for the repository.
+      repository). Pass the repository variable HF_OIDC_RESOURCE from the
+      calling workflow: a composite action cannot read the vars context. (Do
+      not write an expression in this text: the runner reads it.) No default:
+      OSPO sets the variable when it sets up the account for the repository.
     required: false
     default: ""
   models:
