@@ -22,6 +22,9 @@
 #     a pipe; models and datasets paths;
 #   - gated without access, not found, other errors: listed in
 #     models-without-access with their reason; fail or warn by mode.
+# Checks of both scripts: every curl call starts with -q (no .curlrc); with a
+# real curl and a .curlrc that sets trace-ascii, no trace file is written
+# (requests go to a closed local port, no network).
 # Uses only dummy values: no real token.
 set -euo pipefail
 
@@ -51,6 +54,8 @@ cat >"$work/bin/curl" <<'FAKE'
 set +x
 set -euo pipefail
 printf '%s\n' "$*" >>"$FAKE_ARGV"
+# -q must be the first argument: else curl reads ~/.curlrc first.
+[ "${1:-}" = -q ] || printf '%s\n' "$*" >>"$FAKE_NOQ"
 target="" prev="" data=false dump="" out=""
 for a in "$@"; do
   case "$a" in http://* | https://*) target="$a" ;; esac
@@ -122,7 +127,7 @@ bad() {
 run_script() {
   local script="$1"; shift
   local all="$work/all"
-  : >"$all"; : >"$work/argv"; : >"$work/headers"; : >"$work/body"; : >"$work/summary"
+  : >"$all"; : >"$work/argv"; : >"$work/headers"; : >"$work/body"; : >"$work/summary"; : >"$work/noq"
   rc=0
   env -i PATH="$work/bin:$PATH" \
     RESOURCE=ospo-ci-account \
@@ -132,12 +137,20 @@ run_script() {
     HF_TOKEN=stored-token-must-not-be-used \
     GITHUB_OUTPUT="$all" \
     GITHUB_STEP_SUMMARY="$work/summary" \
-    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" \
+    FAKE_ARGV="$work/argv" FAKE_HEADERS="$work/headers" FAKE_BODY="$work/body" FAKE_NOQ="$work/noq" \
     FAKE_JWT="$jwt" FAKE_HF_TOKEN="$hf_token" FAKE_OIDC=ok FAKE_EXCHANGE=ok \
     "$@" \
     bash "$script" >>"$all" 2>&1 || rc=$?
   log="$(cat "$all")"
+  curl_calls=$((curl_calls + $(wc -l <"$work/argv")))
+  if [ -s "$work/noq" ]; then
+    noq_calls=$((noq_calls + $(wc -l <"$work/noq")))
+    noq_first="${noq_first:-$(head -n 1 "$work/noq")}"
+  fi
 }
+curl_calls=0
+noq_calls=0
+noq_first=""
 
 output() {
   printf '%s\n' "$log" | awk -v k="$1" '
@@ -345,6 +358,56 @@ run_script "$models_sh" HF_ACCESS_TOKEN="$hf_token" MODELS="$models" MODE=warn
 
 run_script "$models_sh" HF_ACCESS_TOKEN="$hf_token" MODELS='a/b?x=1'
 { [ "$rc" -eq 1 ] && [ ! -s "$work/argv" ]; } && ok || bad "models: a bad name must not reach a URL"
+
+# ── curl reads no config file ───────────────────────────────────────────────
+# Every curl call of the scripts above starts with -q (--disable).
+if [ "$curl_calls" -eq 0 ]; then
+  log="" bad "curl -q: the fake curl saw no call"
+elif [ "$noq_calls" -ne 0 ]; then
+  log="$noq_first" bad "curl -q: $noq_calls of $curl_calls curl calls do not start with -q (first one in the log)"
+else ok; fi
+
+# With a real curl: a .curlrc in HOME that sets trace-ascii must have no
+# effect. The request goes to a closed local port; no network.
+real_curl="$(PATH="${PATH#"$work/bin:"}" command -v curl || true)"
+if [ -n "$real_curl" ]; then
+  mkdir -p "$work/home"
+  printf 'trace-ascii = "%s"\n' "$work/trace.txt" >"$work/home/.curlrc"
+  # The control: without -q, this curl reads the file (proves the test works).
+  HOME="$work/home" CURL_HOME="" "$real_curl" -sS --max-time 3 -o /dev/null http://127.0.0.1:9/ 2>/dev/null || true
+  if [ ! -e "$work/trace.txt" ]; then
+    log="" bad "real curl: the control run did not read ~/.curlrc; the test cannot prove -q"
+  else
+    rm -f "$work/trace.txt"
+    # A curl wrapper that keeps the argv of the scripts (with -q first) but
+    # sends every request to a closed local port.
+    mkdir -p "$work/bin-real"
+    cat >"$work/bin-real/curl" <<REAL
+#!/usr/bin/env bash
+args=()
+for a in "\$@"; do
+  case "\$a" in http://* | https://*) a=http://127.0.0.1:9/ ;; esac
+  args+=("\$a")
+done
+exec "$real_curl" "\${args[@]}"
+REAL
+    chmod +x "$work/bin-real/curl"
+    for script in "$exchange" "$models_sh"; do
+      env -i PATH="$work/bin-real:$PATH" HOME="$work/home" \
+        RESOURCE=ospo-ci-account MODE=warn HF_ACCESS_TOKEN="$hf_token" MODELS=acme/x \
+        ACTIONS_ID_TOKEN_REQUEST_URL='https://token.invalid/oidc?api-version=2.0' \
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN="$request_token" \
+        GITHUB_OUTPUT="$work/real-out" bash "$script" </dev/null >/dev/null 2>&1 || true
+    done
+    # The wrapper really ran (else the check below proves nothing).
+    [ -s "$work/real-out" ] || log="" bad "real curl: the scripts wrote no output"
+    if [ -e "$work/trace.txt" ]; then
+      log="" bad "real curl: a script read ~/.curlrc (trace file written)"
+    else ok; fi
+  fi
+else
+  echo "real curl: not found, test skipped"
+fi
 
 echo "exchange-cases: $pass checks passed."
 [ "$status" -eq 0 ] || echo "exchange-cases: some checks FAILED."

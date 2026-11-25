@@ -102,7 +102,8 @@ clean() {
 # The request token goes in a header from a pipe, never in argv.
 audience_q="$(printf '%s' "$AUDIENCE" | jq -sRr @uri)"
 rc=0
-response="$(curl -sS --connect-timeout 5 --max-time 15 \
+# -q (first argument): curl reads no .curlrc, which could trace headers or change the target.
+response="$(curl -q -sS --connect-timeout 5 --max-time 15 \
   --retry 2 --retry-delay 2 --retry-max-time 50 \
   -w '\n%{http_code}' \
   -H @<(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
@@ -168,6 +169,7 @@ summary() {
 # ── 3. Exchange at Hugging Face ────────────────────────────────────────────
 # The body comes from jq on stdin, so the JWT is never in argv. The response
 # headers go to a file in a private directory; they hold no secret.
+# -q (first argument): curl reads no .curlrc, which could trace headers or change the target.
 rc=0
 response="$(printf '%s' "$jwt" \
   | jq -Rc --arg resource "$resource" '{
@@ -176,7 +178,7 @@ response="$(printf '%s' "$jwt" \
       subject_token: .,
       resource: $resource
     }' \
-  | curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+  | curl -q -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
     -w '\n%{http_code}' \
     -D "$work/headers" \
     -H 'Content-Type: application/json' \

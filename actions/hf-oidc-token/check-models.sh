@@ -65,7 +65,8 @@ while IFS= read -r repo || [ -n "$repo" ]; do
   fi
   checked=$((checked + 1))
   rc=0
-  code="$(curl -sS --connect-timeout 5 --max-time 15 \
+  # -q (first argument): curl reads no .curlrc, which could trace headers or change the target.
+  code="$(curl -q -sS --connect-timeout 5 --max-time 15 \
     --retry 2 --retry-delay 2 --retry-max-time 50 \
     -o /dev/null -w '%{http_code}' \
     -D "$work/headers" \

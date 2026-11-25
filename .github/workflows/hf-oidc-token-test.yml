@@ -179,10 +179,10 @@ jobs:
           [ -n "$HF_ACCESS_TOKEN" ] || { echo "::error::output token is empty"; exit 1; }
           [ -n "$EXPIRES_AT" ] || { echo "::error::output expires-at is empty"; exit 1; }
           # Without a token the file must be refused: else the test proves nothing.
-          anon="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "https://huggingface.co/$MODEL/resolve/main/$FILE")"
+          anon="$(curl -q -sS -o /dev/null -w '%{http_code}' --max-time 30 "https://huggingface.co/$MODEL/resolve/main/$FILE")"
           case "$anon" in 401 | 403) ;; *) echo "::error::$MODEL/$FILE is readable without a token (HTTP $anon): not a gated test file"; exit 1 ;; esac
           # curl does not send the header to the CDN host after the redirect.
-          code="$(curl -sSL -o "$RUNNER_TEMP/hf-test-file" -w '%{http_code}' --max-time 60 \
+          code="$(curl -q -sSL -o "$RUNNER_TEMP/hf-test-file" -w '%{http_code}' --max-time 60 \
             -H @<(printf 'Authorization: Bearer %s\n' "$HF_ACCESS_TOKEN") \
             "https://huggingface.co/$MODEL/resolve/main/$FILE")"
           [ "$code" = 200 ] || { echo "::error::reading $MODEL/$FILE with the token gave HTTP $code"; exit 1; }

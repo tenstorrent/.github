@@ -227,6 +227,12 @@ output.
 The OIDC request token goes in a header from a pipe. The exchange body comes
 from `jq` on stdin.
 
+Each `curl` call starts with `-q`, so curl reads no `.curlrc` (a file on the
+runner could trace headers or change the target). curl still uses the proxy
+variables of the runner (`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and its CA
+settings (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`): whoever controls the runner
+environment controls these. The action never asks curl to read `.netrc`.
+
 ## What OSPO sets up
 
 Once for the service account (see the Confluence page "Hugging Face tokens in
