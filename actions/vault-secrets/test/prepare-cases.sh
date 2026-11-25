@@ -432,8 +432,38 @@ kernel_is_plain() {
 }
 kernel_is_plain 'network-mode not set'
 kernel_is_plain 'network-mode kernel' IN_NETWORK_MODE=kernel
-kernel_is_plain 'kernel ignores proxy-port' IN_NETWORK_MODE=kernel IN_PROXY_PORT=x
 kernel_is_plain 'kernel on macOS' IN_NETWORK_MODE=kernel RUNNER_OS=macOS
+# proxy-port not set: action.yml gives the default 1055; empty when not set.
+kernel_is_plain 'kernel with the default proxy-port' IN_NETWORK_MODE=kernel IN_PROXY_PORT=1055
+kernel_is_plain 'kernel with an empty proxy-port' IN_NETWORK_MODE=kernel IN_PROXY_PORT=
+
+# Fails unless kernel mode with the replaced inputs $2... succeeds, gives the
+# kernel outputs, and prints one '::warning' line (and nothing more) that says
+# that proxy-port has no effect without network-mode: userspace.
+kernel_warns() {
+  local title="$1"
+  shift
+  run_env "$@"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::$title: prepare.sh failed (exit $rc), expected exit 0 with a warning"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x 'proxy-env={}' "$work/out" || ! grep -q -x 'proxy-url=' "$work/out" \
+    || ! grep -q -x 'tailscaled-args=' "$work/out"; then
+    echo "::error::$title: kernel mode has proxy or tailscaled outputs"
+    status=1
+  elif [ "$(wc -l <"$work/log" | tr -d ' ')" -ne 1 ] \
+    || ! grep -q -x -F -- '::warning title=vault-secrets::input proxy-port has no effect without network-mode: userspace. The action ignores it in kernel mode.' "$work/log"; then
+    echo "::error::$title: expected one warning about proxy-port, got:"
+    cat "$work/log"
+    status=1
+  else
+    echo "OK: $title: one warning, no proxy"
+  fi
+}
+kernel_warns 'kernel with proxy-port 21055' IN_NETWORK_MODE=kernel IN_PROXY_PORT=21055
+kernel_warns 'network-mode not set, proxy-port 21055' IN_PROXY_PORT=21055
+kernel_warns 'kernel with a bad proxy-port (no refusal)' IN_NETWORK_MODE=kernel IN_PROXY_PORT=x
 
 # Fails unless userspace mode with proxy-port $1 gives the proxy on loopback
 # port $2, only an HTTP proxy (no SOCKS5), and an environment for vault-action
@@ -528,7 +558,9 @@ userspace_join_is 'userspace, auto, not on the tailnet' true "$free_port" \
   IN_JOIN_TAILNET=auto PATH="$off_tailnet"
 userspace_join_is 'userspace, join true, no probe' true "$free_port" IN_JOIN_TAILNET=true
 run_env IN_NETWORK_MODE=kernel IN_PROXY_PORT="$free_port" IN_JOIN_TAILNET=auto PATH="$on_tailnet"
-if [ "$rc" -ne 0 ] || ! grep -q -x 'join=false' "$work/out" || grep -q 'proxy' "$work/log"; then
+# The proxy-port warning of kernel mode is expected; no other proxy message.
+if [ "$rc" -ne 0 ] || ! grep -q -x 'join=false' "$work/out" \
+  || grep -v -F -- '::warning title=vault-secrets::input proxy-port has no effect' "$work/log" | grep -q 'proxy'; then
   echo "::error::kernel, auto, on the tailnet: expected join=false and no proxy check"
   cat "$work/log"
   status=1

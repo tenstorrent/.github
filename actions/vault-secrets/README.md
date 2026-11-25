@@ -181,7 +181,7 @@ messages in [Failures](#failures).
 | `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
 | `join-tailnet` | no | `auto` | `auto` joins unless the runner is already on the tailnet. `true` always joins. `false` never joins. |
 | `network-mode` | no | `kernel` | Since release 1.2. `kernel`: the runner reaches Vault through its own routes, as in 1.1. `userspace`: for Linux runner pods without `/dev/net/tun` or `NET_ADMIN`; all Vault requests go through a Tailscale proxy on 127.0.0.1. See [Linux runner pods without TUN](#linux-runner-pods-without-tun-release-12). |
-| `proxy-port` | no | `1055` | Since release 1.2. Port of the Tailscale proxy on 127.0.0.1 in `userspace` mode, from 1 to 65535. Not used in `kernel` mode. |
+| `proxy-port` | no | `1055` | Since release 1.2. Port of the Tailscale proxy on 127.0.0.1 in `userspace` mode, from 1 to 65535. Not used in `kernel` mode: there, a value other than 1055 gives a warning, and the job continues. |
 | `tailscale-client-id` | no | value of org variable `TS_VAULT_OSPO_CLIENT_ID` | Tailscale OAuth client ID. Not a secret. |
 | `tailscale-audience` | no | value of org variable `TS_VAULT_OSPO_AUDIENCE` | Tailscale OIDC audience. Not a secret. |
 | `tailscale-tags` | no | `tag:tt-gha-vault-ospo` | Tags of the runner node. |
@@ -379,6 +379,7 @@ one job.
 | `Vault refused the login: too many logins (rate limit)` | Too many logins in a short time. | Run the job again in a minute. |
 | `Vault did not answer the login within 15 seconds` | The action sent the login, and Vault did not answer in time. A stalled network connection. The action does not send the login again. | Run the job again. |
 | `the action could not reach Vault ... in 3 tries (<cause>, curl exit N). Vault did not get the login.` / `... for the read of GitHub token set ...` | Since release 1.2. The name lookup or the connection to Vault failed or timed out 3 times, or the Tailscale proxy could not connect to Vault. The cause is in the message. Vault did not get the request. | Run the job again. If it occurs again, read the "Join tailnet" and "Wait for Vault" step logs. |
+| `the connection to Vault ... broke after the action sent the login (curl exit N). Vault may have got the login.` / `... after the action sent the read of GitHub token set ...` | Since release 1.2. curl sent the request, then the connection broke (for example curl exit 52 or 56). Vault may have got the request. The action does not send it again. | Run the job again. |
 | `input github-token is not a valid token name or path` | Bad characters in `github-token`. | Use the key of the token only, for example `lib-read`. |
 | `input github-token '...' is not a token of <repo>` / `entry '...' of input github-token is not a token of <repo>` | `github-token` (or one entry of the list) is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
 | `entry N of input github-token is a Vault path. A list in github-token takes token keys only` | Release 1.2. A list in `github-token` has an entry with `/`. | Use the key. For a token that has no key in your grant, put its path in `secrets`. |
