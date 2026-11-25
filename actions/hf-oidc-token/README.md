@@ -1,6 +1,7 @@
 # hf-oidc-token
 
-**Prototype. Not released and not proven in a real run.** See
+**Prototype. Not released (no tag).** One live test passed on a
+GitHub-hosted Linux runner on 2026-11-25. See
 [What is proven](#what-is-proven-and-what-is-not).
 
 Gets a short-lived, read-only Hugging Face token for gated models in one step.
@@ -142,18 +143,45 @@ repository. An empty value gives a clear message: open an OSPO ticket.
 ## Failures
 
 The action writes one error (or, with `warn`, one warning) with the cause.
+The table shows the start of each message, as the scripts write it. With
+`warn`, the message ends with "The job continues without a Hugging Face
+token (if-no-token: warn)." `<...>` is a value of the run.
+
+Checks before the exchange (step `prepare`):
 
 | Message starts with | Cause | What to do |
 | --- | --- | --- |
-| `input resource is empty` | The repository has no variable `HF_OIDC_RESOURCE`, or the workflow does not pass it. | Pass `resource: ${{ vars.HF_OIDC_RESOURCE }}`. If the variable does not exist, open an OSPO ticket (see [Before you start](#before-you-start-open-an-ospo-ticket)). |
-| `the action gives a token only for the events ...` | The run came from another event, for example `pull_request`. | Run it from a schedule, by "Run workflow", or on push. |
-| `the action gives a token only on branch ...` | The run is on another branch or a tag. | Run it on the branch of the identity. |
-| `refused on pull_request_target` / `workflow_run` | The file has a trigger that outside code can start. | Remove the trigger. |
-| `the job has no OIDC token` | No `id-token: write` on the job. | Add it to the job's `permissions:`. |
-| `Hugging Face did not accept this run ...` (`invalid_grant`) | No CI/CD identity on the account matches this run. Or the account does not exist. | **Open an OSPO ticket** (or add to your ticket). Copy the values from the message or the job summary: repository, branch, workflow file. Add the gated models. Give the Request ID. |
-| `Hugging Face refused the exchange (HTTP 400) ... invalid_request` | A bad request. | Report to OSPO with the Request ID. |
-| `too many requests` / `Hugging Face had an error` / `did not answer` / `could not send` | Rate limit, server error, timeout, or no route to `huggingface.co`. | Run the job again. On a self-hosted runner, check that it reaches `huggingface.co`. |
-| `account ... cannot read N of M repositories` | The account has not accepted the licence of those models, or the vendor has not approved it yet. Or the repository is private or does not exist. | Ask OSPO on your ticket to accept the licence. The list is in the job summary. |
+| `input resource is empty.` | The repository has no variable `HF_OIDC_RESOURCE`, or the workflow does not pass it. | Pass `resource: ${{ vars.HF_OIDC_RESOURCE }}`. If the variable does not exist, **open an OSPO ticket** (see [Before you start](#before-you-start-open-an-ospo-ticket)). |
+| `the action gives a token only for the events schedule, workflow_dispatch and push.` | The run came from another event, for example `pull_request`. | Run it from a schedule, by "Run workflow", or on push. |
+| `the action gives a token only on branch <branch> (input branch).` | The run is on another branch or a tag. | Run it on the branch of the identity. |
+| `refused on pull_request_target:` / `refused on workflow_run:` | The file has a trigger that outside code can start. Always an error. | Remove the trigger. |
+| `the job has no OIDC token.` | No `id-token: write` on the job. | Add it to the job's `permissions:`. |
+| `input resource '<value>' has a '/'.` / `input resource is not a valid Hugging Face user name.` | `resource` is a repository name or has other characters. Always an error. | Pass `vars.HF_OIDC_RESOURCE`. |
+| `input models: '<value>' is not a Hugging Face repository name.` / `input models has more than 50 repositories.` | A bad entry in `models`. Always an error. | Use `<owner>/<name>` or `datasets/<owner>/<name>`. |
+| `input branch is not a valid branch name.` / `input if-no-token must be fail or warn.` | A bad input value. Always an error. | Correct the value. |
+| `this runner has no curl` / `this runner has no jq` | The runner lacks a tool. Always an error. | Install it, or use another runner. |
+
+A warning that does not stop the action: `branch <branch> has no branch
+protection or ruleset.` Protect the branch.
+
+Exchange (step `exchange`):
+
+| Message starts with | Cause | What to do |
+| --- | --- | --- |
+| `Hugging Face did not accept this run for account <account>.` | Hugging Face answered `invalid_grant`. No CI/CD identity on the account matches this run, or the account does not exist (Hugging Face then says `User '<account>' not found`). | **Open an OSPO ticket** (or add to your ticket). Copy the values from the message or the job summary: repository, branch, workflow file. Add the gated models. Give the Request ID. |
+| `Hugging Face refused the exchange (HTTP <code>).` | Another refusal, for example `invalid_request`. | Report to OSPO with the Request ID. |
+| `Hugging Face refused the exchange: too many requests.` | Rate limit (HTTP 429). | Run the job again later. |
+| `Hugging Face had an error (HTTP <code>).` | Server error (HTTP 5xx). | Run the job again. |
+| `Hugging Face did not answer the exchange within 20 seconds.` | Timeout. | Run the job again. |
+| `the action could not send the exchange to https://huggingface.co (curl exit <n>).` | No route to `huggingface.co`. | Run the job again. On a self-hosted runner, check that it reaches `huggingface.co`. |
+| `GitHub did not give an OIDC token (HTTP <code>).` / `GitHub did not give the OIDC token in 3 tries.` / `the action could not get the OIDC token from GitHub (curl exit <n>).` | GitHub did not give the OIDC token. | Check `id-token: write`. Run the job again. |
+| `Hugging Face answered the exchange without a token.` / `Hugging Face gave a token in a form that the action does not expect.` | An answer that the vendor does not document. Always an error. | Report to OSPO. |
+
+Model check (step `models`):
+
+| Message starts with | Cause | What to do |
+| --- | --- | --- |
+| `account <account> cannot read <n> of <m> repositories:` | The account has not accepted the licence of those models, or the vendor has not approved it yet. Or the repository is private or does not exist. The log line `NO ACCESS: <repo>: <reason>.` gives the reason for each one. | Ask OSPO on your ticket to accept the licence. The list is in the job summary. |
 
 Never paste a token into a ticket. In the log, a token shows as `***`.
 
@@ -189,7 +217,8 @@ section "API reference"; `huggingface_hub` `src/huggingface_hub/_oidc.py`
 (`auth_check`).
 
 Secrets never go into argv or a file. The OIDC token and the Hugging Face
-token are masked as soon as the action has them, before any other output.
+token are masked (each line) as soon as the action has them, before any other
+output.
 The OIDC request token goes in a header from a pipe. The exchange body comes
 from `jq` on stdin.
 
@@ -250,26 +279,43 @@ Options:
 
 ## What is proven and what is not
 
-Proven (offline, with a fake `curl`):
+Proven in a live test: run
+[45521842112](https://github.com/tenstorrent/.github/actions/runs/45521842112),
+2026-11-25 (UTC), GitHub-hosted Ubuntu runner, branch `ospo/hf-oidc-token`,
+commit `780ce2a`. The CI/CD identity for the test named the repository and
+the workflow file only, not the branch.
+
+- A real exchange at `https://huggingface.co/oauth/token` for the account,
+  with the request format in [How the exchange works](#how-the-exchange-works).
+- The model check: `auth-check` accepts the token of a CI/CD identity and
+  answers 200 for `meta-llama/Llama-3.1-8B-Instruct`.
+- The token reads `config.json` of that gated model. Without a token, the
+  same request gets 401 or 403.
+- A refused exchange (job `live-refusal`, an account that does not exist):
+  Hugging Face answered `invalid_grant` with the text
+  `User '<account>' not found`, and the header `X-Request-Id` held the
+  Request ID. The action failed in step `exchange` with an empty token.
+- No token text in the log.
+
+Proven offline (with a fake `curl`, on each pull request):
 
 - the input, event and branch checks and their messages;
-- the request format that the action sends (from the vendor documentation
-  and the library source, not from a real answer);
 - masking before any output, no secret in argv, the log or the job summary;
-- the message for each failure class, and the models check classification.
+- the message for each failure class, and the model check classification.
 
 Not proven:
 
-- **No real exchange has run.** The Hugging Face side is not set up for this
-  repository.
-- That `/api/models/<repo>/auth-check` accepts a token from a CI/CD identity
-  (scope `gated-repos`) and answers 403 `GatedRepo` for a missing licence.
-- The exact error text of Hugging Face for each failure; the header name of
-  the Request ID (`X-Request-Id`, taken from the library source).
+- The answer 403 `GatedRepo` for a model whose licence the account has not
+  accepted.
+- The real error text when the account exists but no identity matches (for
+  example a wrong branch or workflow file), and the texts for HTTP 429 and 5xx.
+- A caller in another repository.
+- An identity that also names the branch (the test identity had no branch).
+- A job longer than 60 minutes.
+- Self-hosted runners, and macOS and Windows runners.
 - That one service account can hold many CI/CD identities.
 - How the `workflow` field matches a reusable workflow (the action assumes
   the calling file, from `workflow_ref`).
-- Self-hosted runners, and macOS and Windows runners.
 - Whether a custom GitHub Enterprise OIDC issuer would match the Hugging Face
   preset (`https://token.actions.githubusercontent.com`).
 

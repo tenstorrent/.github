@@ -3,7 +3,8 @@ description: >-
   Gets a short-lived, read-only Hugging Face token for gated repositories with
   the job's GitHub OIDC token. No stored secret. Optionally checks that the
   token can read each gated model. The job needs `permissions: id-token: write`.
-  PROTOTYPE: not proven in a real run. See README.md.
+  PROTOTYPE: not released. One live test passed on a GitHub-hosted Linux
+  runner; see README.md for what is proven and what is not.
 
 inputs:
   resource:
