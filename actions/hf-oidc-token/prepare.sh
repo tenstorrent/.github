@@ -116,13 +116,13 @@ workflow_file="${workflow_file##*/}"
 # (a pull request, another workflow run) controls them. Never a token.
 case "$event" in
   pull_request_target | workflow_run)
-    fail "refused on $event: this event runs on the default branch but can be started by code from outside, for example a pull request from a fork. Hugging Face cannot tell this run from a trusted run. Use schedule, workflow_dispatch or push."
+    fail "refused on $event: this event runs on the default branch but can be started by code from outside, for example a pull request from a fork. Hugging Face cannot tell this run from a trusted run. Use schedule or workflow_dispatch."
     ;;
 esac
 
 case "$event" in
-  schedule | workflow_dispatch | push) ;;
-  *) stop "the action gives a token only for the events schedule, workflow_dispatch and push. This run: $event." ;;
+  schedule | workflow_dispatch) ;;
+  *) stop "the action gives a token only for the events schedule and workflow_dispatch. This run: $event." ;;
 esac
 
 if [ "$ref" != "refs/heads/$branch" ]; then

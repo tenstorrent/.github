@@ -30,6 +30,8 @@ inputs:
       the token cannot read a repository in `models`. `warn`: the action
       writes a warning and succeeds; output `token` is then empty, or (for
       `models`) the token reads only the other repositories.
+      Only the events schedule and workflow_dispatch get a token; other
+      events (also push) stop by this rule.
       Bad input values and the events pull_request_target and workflow_run
       always fail.
     required: false

@@ -104,8 +104,8 @@ Pin the action to a full commit SHA. There is no release yet.
 5. **Ignore stored tokens on the runner.** In the step that uses the token,
    set `HF_TOKEN_PATH` to a file that does not exist. Then the Hugging Face
    library cannot use an old token file on a self-hosted runner.
-6. **Events:** only `schedule`, `workflow_dispatch` and `push`, on the branch
-   in the identity. The action refuses other runs. Never add
+6. **Events:** only `schedule` and `workflow_dispatch`, on the branch in the
+   identity. The action refuses other runs, also `push`. Never add
    `pull_request_target` or `workflow_run` to the file.
 7. **Long jobs:** the token ends after 60 minutes (output `expires-at`).
    For a later use, call the action again just before it.
@@ -126,6 +126,11 @@ Why `fail` is the default: a job that needs gated models usually cannot do its
 work without them. A warning is easy to miss, and a test that skips its gated
 part looks green. Use `warn` for a job that also runs on pull requests and
 skips the gated part there.
+
+Why `push` is not allowed (owner decision): the action gives a token only to
+runs that a schedule or a person starts. A `push` run (for example a merge)
+must not get a token. A `push` run stops like any other event that is not
+allowed: an error with `fail`, a warning with `warn`.
 
 There is no built-in default for `resource`. The account name is not secret,
 but the variable `HF_OIDC_RESOURCE` also shows that OSPO set up the
@@ -152,7 +157,7 @@ Checks before the exchange (step `prepare`):
 | Message starts with | Cause | What to do |
 | --- | --- | --- |
 | `input resource is empty.` | The repository has no variable `HF_OIDC_RESOURCE`, or the workflow does not pass it. | Pass `resource: ${{ vars.HF_OIDC_RESOURCE }}`. If the variable does not exist, **open an OSPO ticket** (see [Before you start](#before-you-start-open-an-ospo-ticket)). |
-| `the action gives a token only for the events schedule, workflow_dispatch and push.` | The run came from another event, for example `pull_request`. | Run it from a schedule, by "Run workflow", or on push. |
+| `the action gives a token only for the events schedule and workflow_dispatch.` | The run came from another event, for example `pull_request` or `push`. | Run it from a schedule or by "Run workflow". |
 | `the action gives a token only on branch <branch> (input branch).` | The run is on another branch or a tag. | Run it on the branch of the identity. |
 | `refused on pull_request_target:` / `refused on workflow_run:` | The file has a trigger that outside code can start. Always an error. | Remove the trigger. |
 | `the job has no OIDC token.` | No `id-token: write` on the job. | Add it to the job's `permissions:`. |

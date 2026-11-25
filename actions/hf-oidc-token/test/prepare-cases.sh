@@ -4,7 +4,7 @@
 # Runs prepare.sh directly, without the network. Checks:
 #   - each bad input fails with its own message, also with if-no-token warn;
 #   - pull_request_target and workflow_run always fail;
-#   - other refusals (event, branch, no resource, no id-token) fail with
+#   - other refusals (event, also push, branch, no resource, no id-token) fail with
 #     if-no-token fail, and warn and succeed (go=false, stopped=prepare) with warn;
 #   - the models list: newline and comma forms, blanks, duplicates, datasets;
 #   - a valid run gives go=true and the outputs.
@@ -102,8 +102,10 @@ expect_fail "refused on pull_request_target" GITHUB_EVENT_NAME=pull_request_targ
 expect_fail "refused on workflow_run" GITHUB_EVENT_NAME=workflow_run
 
 # ── Refusals that depend on if-no-token ──────────────────────────────────────
-expect_stop "only for the events schedule, workflow_dispatch and push" GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/merge
+expect_stop "only for the events schedule and workflow_dispatch" GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/merge
 expect_stop "only for the events" GITHUB_EVENT_NAME=issue_comment
+# push on the allowed branch: not an allowed event (owner decision).
+expect_stop "only for the events schedule and workflow_dispatch. This run: push." GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main
 expect_stop "only on branch main" GITHUB_REF=refs/heads/feature
 expect_stop "only on branch main" GITHUB_REF=refs/tags/v1
 expect_stop "only on branch release" IN_BRANCH=release
@@ -112,7 +114,7 @@ expect_stop "input resource is empty" 'IN_RESOURCE=   '
 expect_stop "id-token: write" ACTIONS_ID_TOKEN_REQUEST_URL=
 
 # ── Valid runs ───────────────────────────────────────────────────────────────
-for ev in schedule workflow_dispatch push; do
+for ev in schedule workflow_dispatch; do
   run GITHUB_EVENT_NAME="$ev"
   { [ "$rc" -eq 0 ] && [ "$(output go)" = true ] && [ "$(output resource)" = ospo-ci-account ] \
     && [ "$(output mode)" = fail ]; } && ok || bad "valid run with event $ev"

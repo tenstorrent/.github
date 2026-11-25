@@ -7,12 +7,14 @@ name: Test hf-oidc-token action
 # with a fake curl, shellcheck, and runs of the action that stop in the
 # pre-checks. No OIDC token, no Hugging Face request, no secret.
 #
-# Live jobs: a real exchange at Hugging Face. They run only when
-#   - the repository variable HF_OIDC_TEST_ENABLED is 'true', and
-#   - the run is a manual run (workflow_dispatch).
-# They use the environment hf-oidc-token-test, which must have required
-# reviewers. Until OSPO sets up the Hugging Face side, they are skipped, and a
-# run does not create the environment.
+# Live jobs: a real exchange at Hugging Face. The Hugging Face side, the
+# environment hf-oidc-token-test (with a required reviewer) and the variables
+# below exist. The live jobs run only when all of these are true:
+#   - the run is a manual run (workflow_dispatch), on the branch in the
+#     CI/CD identity;
+#   - the repository variable HF_OIDC_TEST_ENABLED is 'true';
+#   - a reviewer approves the environment hf-oidc-token-test.
+# A pull request run always skips them.
 #
 # Repository variables for the live jobs (set by OSPO, not in this file):
 #   HF_OIDC_TEST_ENABLED  'true' to run the live jobs
