@@ -1,0 +1,123 @@
+name: Hugging Face OIDC token
+description: >-
+  Gets a short-lived, read-only Hugging Face token for gated repositories with
+  the job's GitHub OIDC token. No stored secret. Optionally checks that the
+  token can read each gated model. The job needs `permissions: id-token: write`.
+  PROTOTYPE: not released. One live test passed on a GitHub-hosted Linux
+  runner; see README.md for what is proven and what is not.
+
+inputs:
+  resource:
+    description: >-
+      Name of the OSPO Hugging Face service account (a user name, not a
+      repository). Pass the repository variable HF_OIDC_RESOURCE from the
+      calling workflow: a composite action cannot read the vars context. (Do
+      not write an expression in this text: the runner reads it.) No default:
+      OSPO sets the variable when it sets up the account for the repository.
+    required: false
+    default: ""
+  models:
+    description: >-
+      Gated repositories that the job reads, one per line or separated by
+      commas: `<owner>/<name>` for a model, `datasets/<owner>/<name>` for a
+      dataset. After the exchange, the action checks that the token can read
+      each one and lists the ones it cannot read. Empty: no check.
+    required: false
+    default: ""
+  if-no-token:
+    description: >-
+      `fail` (default): the action fails when it cannot give a token, or when
+      the token cannot read a repository in `models`. `warn`: the action
+      writes a warning and succeeds; output `token` is then empty, or (for
+      `models`) the token reads only the other repositories.
+      Only the events schedule and workflow_dispatch get a token; other
+      events (also push) stop by this rule.
+      Bad input values and the events pull_request_target and workflow_run
+      always fail.
+    required: false
+    default: fail
+  branch:
+    description: >-
+      The only branch on which the action asks for a token. It must be the
+      branch in the CI/CD identity on Hugging Face, and it must have branch
+      protection or a ruleset: on an unprotected branch the action gives no
+      token. Default `main`.
+    required: false
+    default: main
+
+outputs:
+  token:
+    description: >-
+      Read-only Hugging Face token, valid 60 minutes. Masked in logs. Empty
+      when the action did not get a token, or (with if-no-token fail) when it
+      failed. Give it to one step only, in that step's `env:`.
+    value: >-
+      ${{
+        steps.exchange.outcome == 'success' &&
+        steps.models.outcome != 'failure' &&
+        steps.exchange.outputs.token || ''
+      }}
+  expires-at:
+    description: Time (UTC, ISO 8601) at which the token ends. Empty when there is no token.
+    value: >-
+      ${{
+        steps.exchange.outcome == 'success' &&
+        steps.models.outcome != 'failure' &&
+        steps.exchange.outputs.token != '' &&
+        steps.exchange.outputs.expires-at || ''
+      }}
+  models-without-access:
+    description: >-
+      Repositories from `models` that the token cannot read, separated by
+      commas. Empty when it can read all of them or when there was no check.
+    value: ${{ steps.models.outputs.models-without-access }}
+  failed-step:
+    description: >-
+      The step that stopped the action: `prepare`, `exchange` or `models`.
+      Also set with if-no-token warn, when the action succeeds without a
+      (full) token. Empty when the action gave a token that reads all `models`.
+    value: >-
+      ${{
+        steps.prepare.outcome == 'failure' && 'prepare' ||
+        steps.exchange.outcome == 'failure' && 'exchange' ||
+        steps.models.outcome == 'failure' && 'models' ||
+        steps.prepare.outputs.stopped ||
+        steps.exchange.outputs.stopped ||
+        steps.models.outputs.stopped || ''
+      }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check inputs and run
+      id: prepare
+      shell: bash
+      env:
+        IN_RESOURCE: ${{ inputs.resource }}
+        IN_MODELS: ${{ inputs.models }}
+        IN_IF_NO_TOKEN: ${{ inputs.if-no-token }}
+        IN_BRANCH: ${{ inputs.branch }}
+      run: bash "$GITHUB_ACTION_PATH/prepare.sh"
+
+    # Masks the OIDC token and the Hugging Face token at once. The Hugging Face
+    # token goes to the step output token, which only the models step and the
+    # composite output token read.
+    - name: Get Hugging Face token
+      id: exchange
+      if: steps.prepare.outputs.go == 'true'
+      shell: bash
+      env:
+        RESOURCE: ${{ steps.prepare.outputs.resource }}
+        MODE: ${{ steps.prepare.outputs.mode }}
+      run: bash "$GITHUB_ACTION_PATH/exchange.sh"
+
+    - name: Check access to models
+      id: models
+      if: steps.exchange.outputs.token != '' && steps.prepare.outputs.models != ''
+      shell: bash
+      env:
+        HF_ACCESS_TOKEN: ${{ steps.exchange.outputs.token }}
+        MODELS: ${{ steps.prepare.outputs.models }}
+        MODE: ${{ steps.prepare.outputs.mode }}
+        RESOURCE: ${{ steps.prepare.outputs.resource }}
+      run: bash "$GITHUB_ACTION_PATH/check-models.sh"
