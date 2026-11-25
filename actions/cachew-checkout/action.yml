@@ -145,7 +145,10 @@ runs:
         # Only for the checks that have no fallback.
         CACHEW_REF: ${{ inputs.ref }}
         CACHEW_PATH: ${{ inputs.path }}
-      # Runs from this action's own directory: the consumer's pin to this action
+        # Whether the token is the job's own, without the token itself.
+        CACHEW_JOB_TOKEN: ${{ inputs.token == github.token }}
+      # Runs from this action's own directory, with the shared tripwires from
+      # ../tripwires in the same download: the consumer's pin to this action
       # is the only pin. There is no post step; the runner empties RUNNER_TEMP,
       # and with it the session, when the job completes. Once a session exists,
       # CACHEW_PYTHON is the interpreter its Git wrapper already depends on.
@@ -164,6 +167,7 @@ runs:
         CACHEW_REPOSITORY: ${{ inputs.repository }}
         CACHEW_REF: ${{ inputs.ref }}
         CACHEW_TOKEN: ${{ inputs.token }}
+        CACHEW_JOB_TOKEN: ${{ inputs.token == github.token }}
         CACHEW_SSH_KEY_SET: ${{ inputs.ssh-key != '' }}
         CACHEW_SSH_KNOWN_HOSTS: ${{ inputs.ssh-known-hosts }}
         CACHEW_SSH_STRICT: ${{ inputs.ssh-strict }}

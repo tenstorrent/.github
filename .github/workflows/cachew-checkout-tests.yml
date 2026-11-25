@@ -11,11 +11,15 @@ on:
   pull_request:
     paths:
       - "actions/cachew-checkout/**"
+      # checkout.py imports the shared tripwires.
+      - "actions/tripwires/**"
       - ".github/workflows/cachew-checkout-tests.yml"
   push:
     branches: [main]
     paths:
       - "actions/cachew-checkout/**"
+      # checkout.py imports the shared tripwires.
+      - "actions/tripwires/**"
       - ".github/workflows/cachew-checkout-tests.yml"
   workflow_dispatch:
     inputs:
@@ -119,7 +123,10 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: action-under-test
-          sparse-checkout: actions/cachew-checkout
+          # The action imports the shared tripwires next to it.
+          sparse-checkout: |
+            actions/cachew-checkout
+            actions/tripwires
           persist-credentials: false
       - name: Check out through cachew
         id: full

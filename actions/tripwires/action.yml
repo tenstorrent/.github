@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent USA, Inc.
+# SPDX-License-Identifier: Apache-2.0
+name: Tripwires
+description: >-
+  Stops the job when a value only makes sense as an attack: code injection (an
+  option where a ref belongs, shell metacharacters, a path that leaves the
+  workspace) or secret exfiltration (a secret on its way to an untrusted origin,
+  an event that outside code controls). See README.md for the checks.
+inputs:
+  checks:
+    description: >-
+      One check per line: `<check> <name> [argument ...]`. `#` starts a comment.
+      name is a key of `values`, or else an environment variable of the job.
+    required: true
+  values:
+    description: >-
+      JSON object of the values to check, normally `toJSON(inputs)` (written as
+      an expression) of the calling action or workflow. Passed as data: an
+      expression here never becomes shell text.
+    default: '{}'
+  title:
+    description: Name of the calling action or workflow, shown in the error annotation.
+    default: tripwires
+outputs:
+  security-violation:
+    description: true when a check fired (the step also fails), otherwise false.
+    value: ${{ steps.tripwires.outputs.security-violation }}
+runs:
+  using: composite
+  steps:
+    # No fallback: without Python the step fails, and so does the job.
+    - name: Check for a possible security compromise attempt
+      id: tripwires
+      shell: bash
+      env:
+        TRIPWIRES_CHECKS: ${{ inputs.checks }}
+        TRIPWIRES_VALUES: ${{ inputs.values }}
+        TRIPWIRES_TITLE: ${{ inputs.title }}
+      run: python3 "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES

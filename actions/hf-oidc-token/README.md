@@ -194,12 +194,12 @@ Checks before the exchange (step `prepare`):
 | `the action gives a token only for the events schedule and workflow_dispatch.` | The run came from another event, for example `pull_request` or `push`. | Run it from a schedule or by "Run workflow". |
 | `the action gives a token only on branch <branch> (input branch).` | The run is on another branch or a tag. | Run it on the branch of the identity. |
 | `branch <branch> has no branch protection or ruleset (GITHUB_REF_PROTECTED is '<value>').` | No branch protection and no ruleset applies to the branch. An empty value counts as not protected. | Run the workflow on a protected branch (normally `main`), or ask the repository admins to protect the branch. The identity must name a protected branch. |
-| `refused on pull_request_target:` / `refused on workflow_run:` | The file has a trigger that outside code can start. Always an error. | Remove the trigger. |
+| `hf-oidc-token: possible security compromise attempt` (annotation title) | A [tripwire](../tripwires/README.md): the run is on `pull_request_target` or `workflow_run`, which outside code can start; or `branch` or `resource` starts with `-` or holds a line break; or the environment is prepared to run code in the action's scripts or print their secrets (`BASH_ENV`, `LD_PRELOAD`, a shell function named like a command, `SHELLOPTS` with `xtrace`, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`); or `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token that came back has another issuer, audience or repository than this job asked for. The annotation names the input, never the value. Always an error. | Remove the trigger, or correct the input. If you did not write this value, treat the run as hostile. |
 | `the job has no OIDC token.` | No `id-token: write` on the job. | Add it to the job's `permissions:`. |
 | `input resource '<value>' has a '/'.` / `input resource is not a valid Hugging Face user name.` | `resource` is a repository name or has other characters. Always an error. | Pass `vars.HF_OIDC_RESOURCE`. |
 | `input models: '<value>' is not a Hugging Face repository name.` / `input models has more than 50 repositories.` | A bad entry in `models`. Always an error. | Use `<owner>/<name>` or `datasets/<owner>/<name>`. |
 | `input branch is not a valid branch name.` / `input if-no-token must be fail or warn.` | A bad input value. Always an error. | Correct the value. |
-| `this runner has no curl` / `this runner has no jq` | The runner lacks a tool. Always an error. | Install it, or use another runner. |
+| `this runner has no curl` / `this runner has no jq` / `this runner has no python3` | The runner lacks a tool. Always an error. | Install it, or use another runner. |
 
 Exchange (step `exchange`):
 
@@ -224,8 +224,12 @@ Never paste a token into a ticket. In the log, a token shows as `***`.
 
 ## How the exchange works
 
-The action uses `curl` and `jq` only. It does not install Python packages:
-no package code runs while the OIDC request variables are in the step.
+The exchange uses `curl` and `jq` only. The action does not install Python
+packages: no package code runs while the OIDC request variables are in the
+step. The first step runs the shared [tripwires](../tripwires/README.md) with
+`python3 -I` (standard library only, from the same pinned commit), without the
+OIDC request token in its environment. The exchange step runs them once more,
+on the claims of the OIDC token, before it sends the token.
 
 1. `GET $ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fhuggingface.co`
    with header `Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN`.

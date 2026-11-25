@@ -124,6 +124,16 @@ elif [ -z "$jwt" ]; then
   stop "GitHub did not give an OIDC token (HTTP $code). Check that the job has permissions: id-token: write."
 fi
 
+# Tripwire (../tripwires/README.md): the token must be the one this job asked
+# for: GitHub's issuer, the Hugging Face audience, this repository. Another
+# token was swapped in on the way and does not go to Hugging Face. Python
+# (-I, standard library only) gets neither the step outputs nor the OIDC
+# request token.
+env -u GITHUB_OUTPUT -u ACTIONS_ID_TOKEN_REQUEST_TOKEN TRIPWIRE_JWT="$jwt" \
+  python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../tripwires/tripwires.py" \
+  --title "$TITLE" --consequence "The OIDC token was not sent to Hugging Face." \
+  <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $AUDIENCE" || exit 1
+
 # ── 2. The identity values of this run ─────────────────────────────────────
 # From the OIDC token payload (claims are not secret), else from the runner
 # env. These are the values that a CI/CD identity on the account must have.

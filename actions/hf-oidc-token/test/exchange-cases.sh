@@ -42,9 +42,9 @@ hf_token='hf_oauth_dummyHuggingFaceToken0123456789'
 b64url() {
   printf '%s' "$1" | base64 | tr -d '\n=' | tr '+/' '-_'
 }
-claims='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"workflow_dispatch","workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","aud":"https://huggingface.co"}'
+claims='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"workflow_dispatch","workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","aud":"https://huggingface.co","iss":"https://token.actions.githubusercontent.com","aud":"https://huggingface.co"}'
 jwt="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims").dummysignature0123456789"
-claims_called='{"repository":"tenstorrent/tt-metal","ref":"refs/heads/main","event_name":"schedule","workflow_ref":"tenstorrent/tt-metal/.github/workflows/caller.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/hf.yml@refs/heads/main"}'
+claims_called='{"repository":"tenstorrent/tt-metal","ref":"refs/heads/main","event_name":"schedule","workflow_ref":"tenstorrent/tt-metal/.github/workflows/caller.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/hf.yml@refs/heads/main","iss":"https://token.actions.githubusercontent.com","aud":"https://huggingface.co"}'
 jwt_called="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims_called").dummysignature9876543210"
 
 # ── Fake curl ───────────────────────────────────────────────────────────────
@@ -133,6 +133,7 @@ run_script() {
     RESOURCE=ospo-ci-account \
     MODE=fail \
     ACTIONS_ID_TOKEN_REQUEST_URL='https://token.invalid/oidc?api-version=2.0' \
+GITHUB_REPOSITORY=tenstorrent/.github \
     ACTIONS_ID_TOKEN_REQUEST_TOKEN="$request_token" \
     HF_TOKEN=stored-token-must-not-be-used \
     GITHUB_OUTPUT="$all" \
@@ -271,7 +272,7 @@ elif ! grep -qF -- '| workflow | `nightly.yml` |' "$work/summary" || ! grep -qF 
 else ok; fi
 
 # A run in a reusable workflow: the message says the identity names the caller.
-run_script "$exchange" FAKE_EXCHANGE=grant FAKE_JWT="$jwt_called"
+run_script "$exchange" FAKE_EXCHANGE=grant FAKE_JWT="$jwt_called" GITHUB_REPOSITORY=tenstorrent/tt-metal
 printf '%s\n' "$log" | grep -qF -- 'repository=tenstorrent/tt-metal, branch=main, workflow=caller.yml' \
   && printf '%s\n' "$log" | grep -qF -- 'reusable workflow tenstorrent/.github/.github/workflows/hf.yml' \
   && ok || bad "reusable workflow: message must name the caller and the reusable workflow"
@@ -396,6 +397,7 @@ REAL
       env -i PATH="$work/bin-real:$PATH" HOME="$work/home" \
         RESOURCE=ospo-ci-account MODE=warn HF_ACCESS_TOKEN="$hf_token" MODELS=acme/x \
         ACTIONS_ID_TOKEN_REQUEST_URL='https://token.invalid/oidc?api-version=2.0' \
+GITHUB_REPOSITORY=tenstorrent/.github \
         ACTIONS_ID_TOKEN_REQUEST_TOKEN="$request_token" \
         GITHUB_OUTPUT="$work/real-out" bash "$script" </dev/null >/dev/null 2>&1 || true
     done

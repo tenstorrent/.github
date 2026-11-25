@@ -1,0 +1,77 @@
+name: Test tripwires
+
+# Unit tests for actions/tripwires, and the step itself on clean and on hostile
+# values. actions/cachew-checkout imports the module: its own workflow runs on
+# changes here too.
+
+on:
+  pull_request:
+    paths:
+      - "actions/tripwires/**"
+      - "!actions/tripwires/**/*.md"
+      - ".github/workflows/tripwires-test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "actions/tripwires/**"
+      - "!actions/tripwires/**/*.md"
+      - ".github/workflows/tripwires-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Hostile values, as data: never written into a script.
+      HOSTILE_REF: "--upload-pack=touch pwned"
+      HOSTILE_URL: "https://vault-ospo.eng-svc.aws.tenstorrent.com@example.com"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Unit tests
+        run: python3 -m unittest discover -s actions/tripwires/tests -v
+      - name: Clean values pass
+        id: clean
+        uses: ./actions/tripwires
+        with:
+          title: tripwires-test
+          values: '{"ref": "refs/heads/main", "path": "src", "url": "https://vault-ospo.eng-svc.aws.tenstorrent.com/"}'
+          checks: |
+            event
+            no-option      ref
+            single-line    ref
+            inside         path
+            relative-path  path .git
+            trusted-origin url https://vault-ospo.eng-svc.aws.tenstorrent.com
+      - name: Hostile values are refused
+        id: hostile
+        continue-on-error: true
+        uses: ./actions/tripwires
+        with:
+          title: tripwires-test (expected)
+          checks: |
+            no-option      HOSTILE_REF
+            trusted-origin HOSTILE_URL https://vault-ospo.eng-svc.aws.tenstorrent.com
+      - name: Checks that cannot run fail closed
+        id: broken
+        continue-on-error: true
+        uses: ./actions/tripwires
+        with:
+          title: tripwires-test (expected)
+          checks: no-option NOT_A_VALUE
+      - name: Verify the outcomes
+        env:
+          CLEAN: ${{ steps.clean.outcome }}/${{ steps.clean.outputs.security-violation }}
+          HOSTILE: ${{ steps.hostile.outcome }}/${{ steps.hostile.outputs.security-violation }}
+          BROKEN: ${{ steps.broken.outcome }}/${{ steps.broken.outputs.security-violation }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [ "$CLEAN" = success/false ] || fail "clean values: $CLEAN"
+          [ "$HOSTILE" = failure/true ] || fail "hostile values: $HOSTILE"
+          [ "$BROKEN" = failure/ ] || fail "checks that cannot run: $BROKEN"
+          [ ! -e pwned ] || fail "a hostile value ran"

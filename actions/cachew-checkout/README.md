@@ -309,7 +309,19 @@ any checkout runs. They are:
 - a submodule URL on the upstream host that carries a query, an encoded segment
   or anything else beyond `<owner>/<name>`;
 - a `CACHEW_SESSION_DIR` that points outside the action's own session in
-  `RUNNER_TEMP`.
+  `RUNNER_TEMP`;
+- a `github-server-url` on another server than the job's while `token` is the
+  job's own `github.token`: that token works nowhere else, so the checkout
+  would only hand it over. A checkout from another server passes its own token;
+- an environment prepared to run code in the job's scripts or to print their
+  credentials: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an
+  exported shell function named like a command (`git`, `curl`), `SHELLOPTS`
+  with `xtrace`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off or
+  `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+
+The checks that are not specific to cachew (the host, path, option and
+submodule URL checks, and the annotation) are the shared
+[tripwires](../tripwires/README.md), which other actions can use too.
 
 The annotation names the check, never the offending value. These checks run only
 where cachew runs (self-hosted Linux, or `cachew: true`) and, for every later
@@ -410,10 +422,12 @@ re-checking the cachew path against the new version's inputs, outputs and
 refusals (such as `allow-unsafe-pr-checkout`), and updating the version named
 at the top of this document.
 
-Everything runs from this action's own directory, so a consumer's pin to this
-action is the only pin. Pin a full commit SHA of this repository. Everything
+Everything runs from this action's own directory and from
+[`actions/tripwires`](../tripwires/README.md) next to it, which the same
+download of this repository holds, so a consumer's pin to this action is the
+only pin. Pin a full commit SHA of this repository. Everything
 except `README.md` and `tests/` reaches consumers only through their pin: the
-action's files run from the pinned commit, and consumers fetch `migrate.py` at
+action's files and the tripwires run from the pinned commit, and consumers fetch `migrate.py` at
 that commit too. To release a change, merge it here, then re-pin consumers to a
 commit that contains it.
 

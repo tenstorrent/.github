@@ -36,6 +36,8 @@
 #         VAULT_PROXY (empty in network-mode kernel)
 # Writes: output token
 set -euo pipefail
+# A caller can set SHELLOPTS=xtrace: no trace may print a secret.
+set +x
 
 # Seconds per HTTP request. At most one request per engine that Vault gets.
 REQUEST_TIMEOUT=15
@@ -139,6 +141,16 @@ vault_said() {
   printf 'Vault said: %s.' "${err:0:300}"
 }
 
+# Masks a value, one '::add-mask::' line per line of the value. A value with a
+# newline cannot then start a workflow command of its own.
+mask() {
+  local l
+  while IFS= read -r l || [ -n "$l" ]; do
+    l="${l%$'\r'}"
+    [ -z "$l" ] || printf '::add-mask::%s\n' "$l"
+  done <<<"$1"
+}
+
 from=""
 [ "$token_input" = "$token_set" ] || from=" (from github-token: $token_input)"
 
@@ -149,7 +161,7 @@ for engine in "${ENGINES[@]}"; do
   try=1
   while :; do
     rc=0
-    response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+    response="$(curl -q -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
       "${vault_proxy[@]+"${vault_proxy[@]}"}" \
       -w "$WRITE_OUT" \
       -H @<(printf 'X-Vault-Token: %s\n' "$VAULT_TOKEN") \
@@ -165,12 +177,14 @@ for engine in "${ENGINES[@]}"; do
   done
   if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
     github_token="$(printf '%s' "$body" | jq -r '.data.token // empty' 2>/dev/null || true)"
-    if [ -n "$github_token" ]; then
-      printf '::add-mask::%s\n' "$github_token"
-    fi
+    [ -z "$github_token" ] || mask "$github_token"
     body=""
     [ -n "$github_token" ] \
       || fail "Vault answered the read of GitHub token set $token_set$from without a token. Report this to OSPO."
+    # A token is one word of printable characters.
+    if ! [[ "$github_token" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || [ "${#github_token}" -gt 8192 ]; then
+      fail "Vault gave a GitHub token for token set $token_set in a form that the action does not expect. Report this to OSPO."
+    fi
     break
   fi
   if [ -n "$cause" ]; then

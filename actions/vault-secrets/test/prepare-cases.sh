@@ -4,6 +4,8 @@
 # pre-check refuses its case with its own message, and checks the reserved
 # output name rule: prepare.sh accepts a `secrets` value that only contains the
 # reserved name, and refuses a value that uses it as an output name. Checks
+# that each tripwire (an event, URL or name that only makes sense as an
+# attack) gives its own annotation and never shows the value. Checks
 # the role resolution (default, short and full names) and its refusals, and
 # the github-token resolution (key, full name, full path) and its refusals.
 # Uses no token and no secret.
@@ -31,7 +33,7 @@ run_env() {
   : >"$out"
   rc=0
   env -i PATH="$PATH" \
-    ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/not-used \
+    ACTIONS_ID_TOKEN_REQUEST_URL=https://test.actions.githubusercontent.com/not-used \
     EVENT_NAME=workflow_dispatch \
     REPOSITORY=tenstorrent/.github \
     IN_ROLE=test-role \
@@ -79,6 +81,33 @@ refuses_with() {
   fi
 }
 
+# Fails unless prepare.sh, with the replaced inputs $3..., fails with exactly
+# one line: the tripwire annotation with the text $2. The canary (any text
+# CANARY in an input) must not be in the log.
+trips_with() {
+  local title="$1" want="$2"
+  shift 2
+  run_env "$@"
+  if [ "$rc" -ne 1 ]; then
+    echo "::error::$title: prepare.sh ended with $rc, expected a tripwire (exit 1)"
+    cat "$work/log"
+    status=1
+  elif [ "$(wc -l <"$work/log" | tr -d ' ')" -ne 1 ] \
+    || ! grep -q -x -F -- "::error title=vault-secrets: possible security compromise attempt::$want. No request was sent to Vault. If this input is intentional, it is not supported; otherwise treat the workflow run as hostile." "$work/log"; then
+    echo "::error::$title: expected one tripwire annotation with '$want'"
+    cat "$work/log"
+    status=1
+  elif grep -q CANARY "$work/log"; then
+    echo "::error::$title: the annotation shows the value"
+    status=1
+  elif [ -s "$work/out" ]; then
+    echo "::error::$title: prepare.sh wrote outputs before it failed"
+    status=1
+  else
+    echo "OK: tripwire: $title"
+  fi
+}
+
 accepts() {
   local title="$1" secrets="$2" token="$3" want="$4"
   run_prepare "$secrets" "$token"
@@ -107,8 +136,64 @@ path_token='github/token/test-token'
 token_line="$path_token token | VAULT_SECRETS_GITHUB_TOKEN"
 
 # One case for each pre-check, in the order of prepare.sh.
-refuses_with 'pull_request_target' 'refused on pull_request_target' \
+# The tripwires come first: they need no OIDC token and no valid input.
+trips_with 'pull_request_target' \
+  'the workflow runs on pull_request_target, where code from outside the repository can reach the job'"'"'s secrets' \
   EVENT_NAME=pull_request_target
+trips_with 'pull_request_target without an OIDC token' 'the workflow runs on pull_request_target, where code from outside the repository can reach the job'"'"'s secrets' \
+  EVENT_NAME=pull_request_target ACTIONS_ID_TOKEN_REQUEST_URL=
+option="starts with '-' and would be read as a command-line option"
+line='contains a line break or control character and could inject a line or a command'
+trips_with 'role that starts with -' "role $option" IN_ROLE=-CANARY
+trips_with 'role that starts with - after blanks' "role $option" 'IN_ROLE=  -CANARY'
+trips_with 'role with a line break' "role $line" "IN_ROLE=x${nl}CANARY=1"
+trips_with 'token key that starts with -' "github-token $option" IN_GITHUB_TOKEN=-CANARY
+trips_with 'token key with a line break' "github-token $line" "IN_GITHUB_TOKEN=x${nl}CANARY"
+trips_with 'tailscale-client-id that starts with -' "tailscale-client-id $option" IN_TS_CLIENT_ID=--CANARY
+trips_with 'tailscale-audience with a line break' "tailscale-audience $line" "IN_TS_AUDIENCE=x${nl}CANARY"
+trips_with 'tailscale-tags that starts with -' "tailscale-tags $option" IN_TS_TAGS=--CANARY=1
+for url in \
+  http://vault-ospo.eng-svc.aws.tenstorrent.com \
+  https://vault-ospo.CANARY.invalid \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com.CANARY.invalid \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com/v1 \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com:8200 \
+  https://user@vault-ospo.eng-svc.aws.tenstorrent.com \
+  https://vault-ospo.eng-svc.aws.tenstorrent.com@CANARY.invalid; do
+  trips_with "vault-url $url" 'vault-url is not a trusted origin and would have received a secret' IN_VAULT_URL="$url"
+done
+trips_with 'vault-url with a shell metacharacter in the host' \
+  'vault-url host contains shell or configuration metacharacters' \
+  'IN_VAULT_URL=https://vault-ospo.eng-svc.aws.tenstorrent.com;CANARY'
+# The environment an earlier step can prepare, and the OIDC request URL.
+trips_with 'BASH_ENV' 'BASH_ENV is set, so every bash script of the job first runs the file it names' \
+  BASH_ENV=/nonexistent/CANARY
+trips_with 'a shell function named curl' 'an exported shell function replaces a command the action runs' \
+  'BASH_FUNC_curl%%=() { echo CANARY; }'
+trips_with 'GIT_TRACE_REDACT off' 'GIT_TRACE_REDACT is off, so Git traces print credentials' GIT_TRACE_REDACT=0
+trips_with 'Node without TLS verification' \
+  'NODE_TLS_REJECT_UNAUTHORIZED is 0, so Node sends secrets to servers it has not verified' \
+  NODE_TLS_REJECT_UNAUTHORIZED=0
+for oidc in https://CANARY.invalid/oidc http://test.actions.githubusercontent.com/oidc \
+  https://test.actions.githubusercontent.com.CANARY.invalid/oidc; do
+  trips_with "OIDC request URL $oidc" \
+    'ACTIONS_ID_TOKEN_REQUEST_URL is not a GitHub OIDC endpoint and would have received the OIDC request token' \
+    ACTIONS_ID_TOKEN_REQUEST_URL="$oidc"
+done
+# Not an attack: OSPO Vault in a spelling the later steps do not use.
+for url in https://VAULT-OSPO.eng-svc.aws.tenstorrent.com https://vault-ospo.eng-svc.aws.tenstorrent.com:443; do
+  refuses_with "vault-url $url" 'input vault-url is not an OSPO Vault URL' IN_VAULT_URL="$url"
+done
+# Two tripwires give two annotations.
+run_env EVENT_NAME=pull_request_target IN_ROLE=-x
+if [ "$rc" -ne 1 ] || [ "$(grep -c -F -- '::error title=vault-secrets: possible security compromise attempt::' "$work/log")" -ne 2 ]; then
+  echo "::error::two tripwires: expected exit 1 and two annotations"
+  cat "$work/log"
+  status=1
+else
+  echo "OK: tripwire: two at once give two annotations"
+fi
+
 refuses_with 'no OIDC token' 'job needs permissions: id-token: write' \
   ACTIONS_ID_TOKEN_REQUEST_URL=
 refuses_with 'empty REPOSITORY' 'github.repository is empty' REPOSITORY=
@@ -118,7 +203,6 @@ chars='input role has characters that a Vault role name cannot have'
 refuses_with 'role with a space' "$chars" 'IN_ROLE=test role'
 refuses_with 'role with a /' "$chars" IN_ROLE=test/role
 refuses_with 'role with a ;' "$chars" 'IN_ROLE=x;y'
-refuses_with 'role that starts with -' "$chars" IN_ROLE=-x
 refuses_with 'role that starts with .' "$chars" IN_ROLE=.x
 refuses_with 'role of another repository' \
   "input role 'tenstorrent--other--x' is not a role of tenstorrent/.github" \
@@ -138,8 +222,6 @@ refuses_with 'token path with //' 'input github-token is not a valid token name 
   IN_GITHUB_TOKEN=github//token
 refuses_with 'token key with a space' 'input github-token is not a valid token name or path' \
   'IN_GITHUB_TOKEN=contents read'
-refuses_with 'token key that starts with -' 'input github-token is not a valid token name or path' \
-  IN_GITHUB_TOKEN=-x
 refuses_with 'token key that starts with .' 'input github-token is not a valid token name or path' \
   IN_GITHUB_TOKEN=.x
 refuses_with 'token key with a quote' 'input github-token is not a valid token name or path' \
@@ -161,15 +243,6 @@ refuses_with 'token key that ends with -' 'does not give a valid token name (ten
   IN_GITHUB_TOKEN=x-
 refuses_with 'nothing to get, github-token only blanks' 'nothing to get' \
   'IN_GITHUB_TOKEN=   ' IN_SECRETS=
-for url in \
-  http://vault-ospo.eng-svc.aws.tenstorrent.com \
-  https://vault-ospo.invalid \
-  https://vault-ospo.eng-svc.aws.tenstorrent.com.invalid \
-  https://vault-ospo.eng-svc.aws.tenstorrent.com/v1 \
-  https://vault-ospo.eng-svc.aws.tenstorrent.com:8200 \
-  https://user@vault-ospo.eng-svc.aws.tenstorrent.com; do
-  refuses_with "vault-url $url" 'input vault-url is not an OSPO Vault URL' IN_VAULT_URL="$url"
-done
 for t in abc 0 9 601 -1 12.5 ' 60' 0060 99999; do
   refuses_with "vault-timeout-seconds '$t'" 'input vault-timeout-seconds must be a whole number from 10 to 600' \
     IN_VAULT_TIMEOUT="$t"
@@ -276,7 +349,7 @@ token_is 'secrets only' tenstorrent/.github '' "$kv" '' "$kv"
 refuses_without_tool() {
   local missing="$1" bin="$work/bin-no-$1" tool path
   mkdir -p "$bin"
-  for tool in bash env od tr curl jq; do
+  for tool in bash env od tr curl jq python3; do
     [ "$tool" = "$missing" ] && continue
     path="$(command -v "$tool")"
     ln -sf "$path" "$bin/$tool"
@@ -285,6 +358,7 @@ refuses_without_tool() {
 }
 refuses_without_tool jq
 refuses_without_tool curl
+refuses_without_tool python3
 
 # Fails unless prepare.sh, with IN_VAULT_TIMEOUT=$1, writes vault-timeout=$2.
 timeout_is() {

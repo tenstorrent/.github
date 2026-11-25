@@ -322,8 +322,8 @@ one job.
 | Message | Cause | Action |
 |---|---|---|
 | `job needs permissions: id-token: write (not available on fork pull requests)` | The job has no OIDC token. | Add `id-token: write` to the job permissions. Fork pull requests never get it. |
-| `this runner has no curl` / `no jq` | A self-hosted runner without these tools. | Install bash, curl and jq on the runner. |
-| `refused on pull_request_target` | The workflow runs on `pull_request_target`. | Use another event. Vault never accepts this event. |
+| `this runner has no curl` / `no jq` / `no python3` | A self-hosted runner without these tools. | Install bash, curl, jq and python3 on the runner. |
+| `vault-secrets: possible security compromise attempt` (annotation title) | A [tripwire](../tripwires/README.md): the workflow runs on `pull_request_target`; or `vault-url` names another host than OSPO Vault, which would have received the OIDC token of the job; or `role`, `github-token` or a Tailscale input starts with `-` or holds a line break; or the environment is prepared to run code in the action's scripts or print their secrets (`BASH_ENV`, `LD_PRELOAD`, a shell function named like a command, `SHELLOPTS` with `xtrace`, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`); or `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token that came back has another issuer, audience or repository than this job asked for. The annotation names the input, never the value. | Use another event (Vault never accepts `pull_request_target`), remove `vault-url`, or correct the input. If you did not write this value, treat the run as hostile. |
 | `Vault gave an empty value for <NAME>` | The value stored in Vault is an empty string. | Ask the owner of the secret to store it again. |
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role has characters ...` / `input role '...' is not a role of <repo>` | `role` is not valid, or it is a role of another repository. | Use the short name of your workflow entry, or leave `role` empty for the default role. |
@@ -338,7 +338,7 @@ one job.
 | `input github-token '...' is not a token of <repo>` | `github-token` is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
 | `Role ... has no grant for GitHub token set ...` | Vault refused the token set in every place where a token can be. The role has no grant for it, the key is wrong, or the grant is not applied yet. | Check the key in `github_tokens` of your workflow entry in your grant. |
 | `Vault did not answer the read of GitHub token set ...` / `Vault refused the read of GitHub token set ...` | A stalled network connection, or a Vault error other than "permission denied". | Run the job again. If it occurs again, report it to OSPO. |
-| `input vault-url is not an OSPO Vault URL` | `vault-url` is not the production or staging URL of OSPO Vault. The action sends the OIDC token of the job to this URL, so no other host is allowed. | Remove `vault-url` to use the default. |
+| `input vault-url is not an OSPO Vault URL` | `vault-url` names OSPO Vault in a spelling the action does not use (upper case, a port). Another host is a tripwire, above. | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
 | `input network-mode must be kernel or userspace` | Wrong value (release 1.2). | Use `kernel` or `userspace`, in lower case, or remove the input. |
 | `input network-mode userspace needs a Linux runner` | `userspace` on a macOS or Windows runner. | Remove `network-mode`. |
