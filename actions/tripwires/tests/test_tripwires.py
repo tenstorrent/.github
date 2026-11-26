@@ -556,6 +556,17 @@ class CompositeStepTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn(f"checks could not run::{reason} The checks need Python 3.9 or newer", text)
 
+    def test_the_version_probe_gets_no_oidc_request_token(self):
+        def prepare(root):
+            path = root / "old" / "bin" / "python3"
+            path.parent.mkdir(parents=True)
+            path.write_text(f"#!/bin/sh\nprintf '%s\\n' \"token=${{ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}}\" >>'{root / 'canary'}'\nexit 1\n")
+            path.chmod(0o755)
+
+        code, _ = self.run_step("no-option HOSTILE", prepare, PATH="ROOT/old/bin", ACTIONS_ID_TOKEN_REQUEST_TOKEN="secret")
+        self.assertEqual(code, 1)
+        self.assertEqual(self.canary.read_text(), "token=\n")
+
     def test_without_an_interpreter_the_title_input_is_not_printed(self):
         title = "x::forged\n::add-mask::swallowed\n::error title=y"
         code, text = self.run_step("no-option HOSTILE", PATH="ROOT/work/bin", TRIPWIRES_TITLE=title)

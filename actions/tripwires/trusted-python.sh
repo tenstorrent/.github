@@ -62,9 +62,11 @@ while [[ -n "$tripwires_rest" ]]; do
     fi
     tripwires_seen=old
     # -I: PYTHONPATH and the user site cannot replace a module. POSIX mode, on
-    # a line of its own, so that exec is the builtin and not a function.
+    # a line of its own, so that exec is the builtin and not a function. The
+    # probe gets no OIDC request token, like the checks it comes before.
     if (
       POSIXLY_CORRECT=1
+      unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
       exec "$tripwires_directory/$tripwires_name" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))'
     ) >/dev/null 2>&1; then
       trusted_python="$tripwires_directory/$tripwires_name"
