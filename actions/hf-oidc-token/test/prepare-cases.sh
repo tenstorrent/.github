@@ -144,6 +144,17 @@ expect_trip "the first curl on PATH is inside the workspace, where a pull reques
   GITHUB_WORKSPACE="$work/ws" PATH="$work/ws/bin:$PATH"
 run GITHUB_WORKSPACE="$work/elsewhere" PATH="$work/ws/bin:$PATH"
 grep -q 'possible security compromise attempt' "$work/log" && bad "a curl outside the workspace must pass the tripwire" || ok
+# A python3 that a pull request placed in the workspace, first on PATH, must
+# not stand in for the checks: it never runs, and the real checks still fire.
+# The same for another spelling of the workspace (a link to it).
+mkdir -p "$work/pr/bin"
+printf '#!/bin/sh\necho ran >>"%s"\nexit 0\n' "$work/fake-python-ran" >"$work/pr/bin/python3"
+chmod +x "$work/pr/bin/python3"
+ln -s "$work/pr" "$work/pr-link"
+for spelled in "$work/pr/bin" "$work/pr-link/bin"; do
+  expect_trip "resource $option" IN_RESOURCE=-CANARY GITHUB_WORKSPACE="$work/pr" PATH="$spelled:$PATH"
+done
+[ ! -e "$work/fake-python-ran" ] && ok || bad "a python3 from the workspace ran in place of the checks"
 expect_trip "GIT_TRACE_REDACT is off, so Git traces print credentials" GIT_TRACE_REDACT=false
 expect_trip "ACTIONS_ID_TOKEN_REQUEST_URL is not a GitHub OIDC endpoint and would have received the OIDC request token" \
   ACTIONS_ID_TOKEN_REQUEST_URL=https://CANARY.invalid/oidc

@@ -200,6 +200,7 @@ Checks before the exchange (step `prepare`):
 | `input models: '<value>' is not a Hugging Face repository name.` / `input models has more than 50 repositories.` | A bad entry in `models`. Always an error. | Use `<owner>/<name>` or `datasets/<owner>/<name>`. |
 | `input branch is not a valid branch name.` / `input if-no-token must be fail or warn.` | A bad input value. Always an error. | Correct the value. |
 | `this runner has no curl` / `this runner has no jq` / `this runner has no python3` | The runner lacks a tool. Always an error. | Install it, or use another runner. |
+| `this runner has python3 only inside the workspace` | The only `python3` on `PATH` is in the checked-out repository (a virtual environment there, for example). The checks never run on an interpreter from the workspace, where a pull request can place one. | Install Python 3.9 or newer on the runner, outside the workspace. |
 
 Exchange (step `exchange`):
 

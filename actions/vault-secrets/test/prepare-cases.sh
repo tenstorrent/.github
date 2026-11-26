@@ -179,6 +179,21 @@ trips_with 'shell functions named env, python3, exec and exit' \
   'BASH_FUNC_dirname%%=() { return 0; }' 'BASH_FUNC_pwd%%=() { return 0; }' 'BASH_FUNC_cd%%=() { return 0; }'
 trips_with 'a PATH entry that means the current directory' \
   'PATH has an empty or relative entry, so commands are looked up in the current directory' "PATH=.:$PATH"
+# A python3 that a pull request placed in the workspace, first on PATH, must
+# not stand in for the checks: it never runs, and the real checks still fire.
+# The same for another spelling of the workspace (a link to it).
+mkdir -p "$work/pr/bin"
+printf '#!/bin/sh\necho ran >>"%s"\nexit 0\n' "$work/fake-python-ran" >"$work/pr/bin/python3"
+chmod +x "$work/pr/bin/python3"
+ln -s "$work/pr" "$work/pr-link"
+for spelled in "$work/pr/bin" "$work/pr-link/bin"; do
+  trips_with "a python3 from the workspace first on PATH ($spelled)" "role $option" \
+    IN_ROLE=-CANARY GITHUB_WORKSPACE="$work/pr" PATH="$spelled:$PATH"
+done
+if [ -e "$work/fake-python-ran" ]; then
+  echo "::error::a python3 from the workspace ran in place of the checks"
+  status=1
+fi
 trips_with 'GIT_TRACE_REDACT off' 'GIT_TRACE_REDACT is off, so Git traces print credentials' GIT_TRACE_REDACT=0
 trips_with 'Node without TLS verification' \
   'NODE_TLS_REJECT_UNAUTHORIZED is 0, so Node sends secrets to servers it has not verified' \

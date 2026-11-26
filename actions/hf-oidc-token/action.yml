@@ -91,20 +91,18 @@ runs:
   steps:
     - name: Check inputs and run
       id: prepare
-      shell: bash
+      shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         IN_RESOURCE: ${{ inputs.resource }}
         IN_MODELS: ${{ inputs.models }}
         IN_IF_NO_TOKEN: ${{ inputs.if-no-token }}
         IN_BRANCH: ${{ inputs.branch }}
-      # bash -p takes no shell function, BASH_ENV or SHELLOPTS from the
-      # environment, so nothing an earlier step exported runs in the script
-      # before its tripwires do. POSIX mode (on a line of its own: bash reads
-      # the rest of that line before the mode changes) finds exec before any
-      # function named exec or bash.
-      run: |
-        POSIXLY_CORRECT=1
-        exec bash -p "$GITHUB_ACTION_PATH/prepare.sh"
+      # Every step here starts bash with -p (privileged mode), and so does each
+      # script it runs: bash then reads no BASH_ENV file and takes no shell
+      # function or SHELLOPTS from the environment, so nothing an earlier step
+      # of the job exported runs before the tripwires do. Plain `shell: bash`
+      # reads BASH_ENV before the first line of the step.
+      run: bash -p "$GITHUB_ACTION_PATH/prepare.sh"
 
     # Masks the OIDC token and the Hugging Face token at once. The Hugging Face
     # token goes to the step output token, which only the models step and the
@@ -112,22 +110,19 @@ runs:
     - name: Get Hugging Face token
       id: exchange
       if: steps.prepare.outputs.go == 'true'
-      shell: bash
+      shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         RESOURCE: ${{ steps.prepare.outputs.resource }}
         MODE: ${{ steps.prepare.outputs.mode }}
-      # bash -p, POSIX mode: as for prepare.sh above.
-      run: |
-        POSIXLY_CORRECT=1
-        exec bash -p "$GITHUB_ACTION_PATH/exchange.sh"
+      run: bash -p "$GITHUB_ACTION_PATH/exchange.sh"
 
     - name: Check access to models
       id: models
       if: steps.exchange.outputs.token != '' && steps.prepare.outputs.models != ''
-      shell: bash
+      shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         HF_ACCESS_TOKEN: ${{ steps.exchange.outputs.token }}
         MODELS: ${{ steps.prepare.outputs.models }}
         MODE: ${{ steps.prepare.outputs.mode }}
         RESOURCE: ${{ steps.prepare.outputs.resource }}
-      run: bash "$GITHUB_ACTION_PATH/check-models.sh"
+      run: bash -p "$GITHUB_ACTION_PATH/check-models.sh"

@@ -73,29 +73,36 @@ here can run the script next to it. That keeps one pin, where a nested `uses:`
 would need a second.
 
 ```yaml
-- shell: bash
+- shell: bash --noprofile --norc -p -e -o pipefail {0}
   env:
     IN_REF: ${{ inputs.ref }}
     IN_PATH: ${{ inputs.path }}
   run: |
-    POSIXLY_CORRECT=1
-    exec python3 -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title my-action <<'EOF'
+    tripwires_python_names=python3
+    . "$GITHUB_ACTION_PATH/../tripwires/trusted-python.sh"
+    [[ -n "$tripwires_python" ]] || { echo "::error::no Python 3.9+ outside the workspace"; exit 1; }
+    "$tripwires_python" -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title my-action <<'EOF'
     environment
     no-option IN_REF=ref
     inside    IN_PATH=path
     EOF
 ```
 
-Start the command this way, as the first thing the step does. An earlier step
-can export a shell function named `python3` or `env`, which bash would run in
-place of the command, and the check would never start. In POSIX mode bash
-finds `exec` before any function, and `exec` runs a file from `PATH`. Keep
-`POSIXLY_CORRECT=1` on a line of its own: bash reads the rest of that line
-before the mode changes. `-I` keeps `PYTHONPATH` and the user site from
-replacing a module that the checks import. To go on after the check, run it
-in a subshell (`( POSIXLY_CORRECT=1`, a new line, `exec python3 ... )`); to run
-a whole script, start it with `exec bash -p`, which takes no function from
-the environment.
+Three parts of this keep an earlier step of the job from deciding the result
+before the checks run:
+
+- **The shell line.** `-p` (privileged mode) is the runner's own `bash` line
+  with one option added. Bash then reads no `BASH_ENV` file and takes no shell
+  function or `SHELLOPTS` from the environment. Plain `shell: bash` reads the
+  `BASH_ENV` file before the first line of the step. A script that the step
+  starts needs the same: `bash -p script.sh`.
+- **`trusted-python.sh`.** It sets `tripwires_python` to the first interpreter
+  on `PATH` whose directory, with every link followed, is outside
+  `GITHUB_WORKSPACE`, where a pull request could place a file named `python3`.
+  A virtual environment in the workspace is skipped, not refused. When `PATH`
+  has no other interpreter, the variable is empty: stop the step.
+- **`-I`.** `PYTHONPATH` and the user site cannot replace a module that the
+  checks import.
 
 Names are environment variables. `IN_REF=ref` reads the variable `IN_REF` and
 calls it `ref` in the annotation. `--consequence "No request was sent."` adds
@@ -163,17 +170,24 @@ gives a false alert, not a missed one.
 
 ## Requirements and limits
 
-- Python 3.9 or newer on `PATH`, standard library only. Without Python the step
-  fails.
+- Python 3.9 or newer on `PATH`, outside the workspace, standard library only.
+  Without it the step fails.
 - The checks read values. They cannot see what a later step does with them: a
   value that passes `shell-safe` is still best passed through `env`, not written
   into a script.
 - `inside` resolves the path when it runs. A step that creates a symlink
   afterward is not covered.
-- `environment` runs after bash has already read `BASH_ENV`: it reports that
-  the job is compromised, it cannot undo what that file did. Run the command
-  with `python3 -I`, so that `PYTHONPATH` and the user site cannot replace its
-  modules.
+- The actions here start every step with `bash -p`, so a `BASH_ENV` file does
+  not run in them, and `environment` still reports it: the other steps of the
+  job read it. A step with plain `shell: bash` has read the file before its
+  first line; there the check reports that the job is compromised and cannot
+  undo what the file did.
+- `trusted-python.sh` follows the links of each directory on `PATH`, not of
+  the interpreter file itself: bash cannot read where a link leads without a
+  command from `PATH`. A link outside the workspace that leads to a file inside
+  it is not detected; making one takes code that already runs on the runner.
+- On Windows the shell line starts the same Git Bash as `shell: bash` does;
+  this was not tested there.
 - `environment` fires on every exported shell function (`BASH_FUNC_...`),
   whatever its name: a runner that exports one on purpose cannot use this
   check. The scripts here still call builtins such as `cd` before or after the

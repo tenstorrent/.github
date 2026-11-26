@@ -184,11 +184,17 @@ fi
 # that line before the mode changes.
 tripwires_here="${BASH_SOURCE[0]%/*}"
 [[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+# The interpreter of the checks, never one from the workspace (see the file).
+# shellcheck disable=SC2034
+tripwires_python_names=python3
+# shellcheck source=/dev/null
+. "$tripwires_here/../tripwires/trusted-python.sh"
+[[ -n "$tripwires_python" ]] || fail "this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks."
 (
   POSIXLY_CORRECT=1
   unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
   export TRIPWIRE_JWT="$jwt" TRIPWIRE_REPOSITORY="$repository"
-  exec python3 -I "$tripwires_here/../tripwires/tripwires.py" \
+  exec "$tripwires_python" -I "$tripwires_here/../tripwires/tripwires.py" \
     --title vault-secrets --consequence "The OIDC token was not sent to Vault."
 ) <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $url TRIPWIRE_REPOSITORY" || {
   POSIXLY_CORRECT=1

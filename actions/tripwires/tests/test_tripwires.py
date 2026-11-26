@@ -6,6 +6,9 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -325,6 +328,13 @@ class PathTests(unittest.TestCase):
         self.assertEqual(self.found(f"{outside}:{inside}", "curl", "jq"), [])
         self.assertEqual(self.found(f"{inside}:{outside}", "jq"), [])
         self.assertEqual(self.found(f"{inside}:{outside}"), [])
+        # Another spelling of the workspace: a link to it, with the real curl
+        # reached through a link that the pull request committed.
+        (self.root / "alias").symlink_to(self.workspace)
+        self.assertEqual(self.found(f"{self.root / 'alias' / 'bin'}:{outside}", "curl"), [message])
+        (self.workspace / "linked").mkdir()
+        (self.workspace / "linked" / "curl").symlink_to(self.root / "tools" / "curl")
+        self.assertEqual(self.found(f"{self.root / 'alias' / 'linked'}:{outside}", "curl"), [message])
         # A link outside the workspace to a file inside it.
         (self.root / "tools" / "jq").symlink_to(self.program("work/bin/jq-real"))
         self.assertEqual(len(self.found(outside, "jq")), 1)
@@ -338,6 +348,71 @@ class PathTests(unittest.TestCase):
         path = ":".join(str(self.root / d) for d in ("work/.venv/bin", "temp/cachew-x/bin", "tools"))
         self.assertEqual(self.found(path, "curl", "jq", "git"), [])
         self.assertEqual(len(self.found(path, "python3")), 1)
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "needs bash")
+class CompositeStepTests(unittest.TestCase):
+    """The step of action.yml, started as the runner starts it: the shell line
+    with the script file in place of {0}."""
+
+    ACTION = Path(tripwires.__file__).resolve().parent / "action.yml"
+
+    def run_step(self, checks, **environ):
+        text = self.ACTION.read_text()
+        shell = re.search(r"^      shell: (.+)$", text, re.M)[1]
+        body = text.split("      run: |\n", 1)[1]
+        script = "\n".join(line[8:] for line in body.splitlines())
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        (self.root / "work" / "bin").mkdir(parents=True)
+        (self.root / "step.sh").write_text(script)
+        self.canary = self.root / "canary"
+        (self.root / "startup.sh").write_text(f"echo startup >>'{self.canary}'\n")
+        fake = self.root / "work" / "bin" / "python3"
+        fake.write_text(f"#!/bin/sh\necho python >>'{self.canary}'\nexit 0\n")
+        fake.chmod(0o755)
+        (self.root / "alias").symlink_to(self.root / "work")
+        environment = {
+            "PATH": os.environ["PATH"],
+            "GITHUB_ACTION_PATH": str(self.ACTION.parent),
+            "GITHUB_WORKSPACE": str(self.root / "work"),
+            "TRIPWIRES_TITLE": "t",
+            "TRIPWIRES_VALUES": "{}",
+            "TRIPWIRES_CHECKS": checks,
+            "HOSTILE": "-x",
+        }
+        environment.update({key: value.replace("ROOT", str(self.root)) for key, value in environ.items()})
+        command = shlex.split(shell.replace("{0}", shlex.quote(str(self.root / "step.sh"))))
+        command[0] = shutil.which(command[0])
+        result = subprocess.run(command, env=environment, capture_output=True, text=True, cwd=self.root / "work")
+        return result.returncode, result.stdout + result.stderr
+
+    def test_the_shell_reads_no_startup_file(self):
+        code, text = self.run_step("environment", BASH_ENV="ROOT/startup.sh")
+        self.assertEqual(code, 1)
+        self.assertIn("::BASH_ENV is set", text)
+        self.assertFalse(self.canary.exists(), "the BASH_ENV file ran before the check")
+
+    def test_an_exported_function_does_not_replace_the_launch(self):
+        functions = {f"BASH_FUNC_{name}%%": "() { return 0; }" for name in ("exec", "exit", "builtin", "cd", "echo")}
+        code, text = self.run_step("no-option HOSTILE", **functions)
+        self.assertEqual(code, 1)
+        self.assertIn("::HOSTILE starts with '-'", text)
+
+    def test_a_python_from_the_workspace_does_not_run_the_checks(self):
+        for spelled in ("ROOT/work/bin", "ROOT/alias/bin", "bin", "ROOT/work/../work/bin"):
+            with self.subTest(spelled=spelled):
+                code, text = self.run_step("no-option HOSTILE", PATH=f"{spelled}:{os.environ['PATH']}")
+                self.assertEqual(code, 1)
+                self.assertIn("::HOSTILE starts with '-'", text)
+                self.assertFalse(self.canary.exists(), "the workspace python3 ran")
+
+    def test_without_another_interpreter_the_step_fails(self):
+        code, text = self.run_step("no-option HOSTILE", PATH="ROOT/work/bin")
+        self.assertEqual(code, 1)
+        self.assertIn("no Python 3.9+ on PATH outside the workspace", text)
+        self.assertFalse(self.canary.exists())
 
 
 def captured(function, *arguments, **keywords):

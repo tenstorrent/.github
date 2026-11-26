@@ -328,7 +328,10 @@ any checkout runs. They are:
   inside the workspace (the first step checks these two; the cachew session's
   own Git wrapper is in `RUNNER_TEMP` and passes). This check is the first step of the
   action on every runner that has Python 3.9 or newer, also when cachew is off
-  and only the standard checkout runs.
+  and only the standard checkout runs. Every step of the action starts bash in
+  privileged mode (`-p`), so a `BASH_ENV` file or an exported function does
+  not run in it before the check, and the check never runs on a `python3`
+  from the workspace.
 
 The checks that are not specific to cachew (the host, path, option and
 submodule URL checks, and the annotation) are the shared

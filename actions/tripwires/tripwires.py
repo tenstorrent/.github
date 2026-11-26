@@ -353,7 +353,14 @@ def environment_violations(environ, commands=(), posix=None):
             found_at = shutil.which(command, path=path)
             if found_at and any(
                 os.path.commonpath([root, place]) == root
-                for place in (os.path.abspath(found_at), os.path.realpath(found_at))
+                # As written, with every link followed, and in its directory with
+                # every link followed: another spelling of the workspace
+                # (/proc/self/cwd, a link) is still the workspace.
+                for place in (
+                    os.path.abspath(found_at),
+                    os.path.realpath(found_at),
+                    os.path.join(os.path.realpath(os.path.dirname(found_at)), os.path.basename(found_at)),
+                )
                 if os.path.splitdrive(place)[0] == os.path.splitdrive(root)[0]
             ):
                 fire(f"the first {command} on PATH is inside the workspace, where a pull request can place it")

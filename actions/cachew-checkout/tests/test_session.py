@@ -1448,7 +1448,9 @@ class SessionTests(unittest.TestCase):
         binaries.mkdir()
         (binaries / "python3").write_text("#!/bin/sh\nexit 127\n")
         (binaries / "python3").chmod(0o700)
-        result = self.run_prepare_expecting_fallback(dict(self.env, PATH=f"{binaries}{os.pathsep}{self.env['PATH']}"))
+        (binaries / "bash").symlink_to(shutil.which("bash"))
+        # The only python3 on PATH: the step takes the first one that works.
+        result = self.run_prepare_expecting_fallback(dict(self.env, PATH=str(binaries)))
         self.assertIn("Python 3.10+ unavailable", result.stdout)
         # action.yml skips the cachew and configure steps when the session is not ready.
         self.plain_checkout_without_cache(self.env, cachew=False)

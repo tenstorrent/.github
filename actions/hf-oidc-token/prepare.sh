@@ -85,13 +85,19 @@ command -v python3 >/dev/null 2>&1 || fail "this runner has no python3; the acti
 # that line before the mode changes.
 tripwires_here="${BASH_SOURCE[0]%/*}"
 [[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+# The interpreter of the checks, never one from the workspace (see the file).
+# shellcheck disable=SC2034
+tripwires_python_names=python3
+# shellcheck source=/dev/null
+. "$tripwires_here/../tripwires/trusted-python.sh"
+[[ -n "$tripwires_python" ]] || fail "this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks."
 tripwire_fired=""
 (
   POSIXLY_CORRECT=1
   unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
   export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
   export GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" IN_BRANCH="${IN_BRANCH:-}" IN_RESOURCE="${IN_RESOURCE:-}"
-  exec python3 -I "$tripwires_here/../tripwires/tripwires.py" \
+  exec "$tripwires_python" -I "$tripwires_here/../tripwires/tripwires.py" \
     --title "$TITLE" --consequence "No token was requested."
 ) <<'EOF' || tripwire_fired=1
 event

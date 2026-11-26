@@ -29,19 +29,23 @@ runs:
   using: composite
   steps:
     # No fallback: without Python the step fails, and so does the job.
+    # bash -p (privileged mode) reads no BASH_ENV file and takes no shell
+    # function from the environment, so nothing an earlier step exported runs
+    # before the checks. trusted-python.sh finds the interpreter outside the
+    # workspace, where a pull request could place a file named python3.
     # -I: PYTHONPATH and the user site cannot replace the modules the checks import.
-    # The launch must not depend on a command that an exported shell function
-    # can replace (python3, env): in POSIX mode bash finds exec before any
-    # function, and exec runs a file from PATH. POSIXLY_CORRECT=1 is on a line
-    # of its own on purpose: bash reads the rest of that line before the mode
-    # changes.
     - name: Check for a possible security compromise attempt
       id: tripwires
-      shell: bash
+      shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         TRIPWIRES_CHECKS: ${{ inputs.checks }}
         TRIPWIRES_VALUES: ${{ inputs.values }}
         TRIPWIRES_TITLE: ${{ inputs.title }}
       run: |
-        POSIXLY_CORRECT=1
-        exec python3 -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES
+        tripwires_python_names=python3
+        . "$GITHUB_ACTION_PATH/trusted-python.sh"
+        if [[ -z "$tripwires_python" ]]; then
+          echo "::error title=$TRIPWIRES_TITLE::this runner has no Python 3.9+ on PATH outside the workspace, so the tripwires cannot run. The step was stopped."
+          exit 1
+        fi
+        exec "$tripwires_python" -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES

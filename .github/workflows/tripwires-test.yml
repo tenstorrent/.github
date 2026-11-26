@@ -75,3 +75,34 @@ jobs:
           [ "$HOSTILE" = failure/true ] || fail "hostile values: $HOSTILE"
           [ "$BROKEN" = failure/ ] || fail "checks that cannot run: $BROKEN"
           [ ! -e pwned ] || fail "a hostile value ran"
+
+  # The step itself must not read a BASH_ENV file: plain `shell: bash` runs it
+  # before the first line of the step, so before any check.
+  startup-file:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set BASH_ENV for the rest of the job
+        run: |
+          # The file leaves a mark only inside the step of the action, which
+          # is the only one that has TRIPWIRES_TITLE.
+          printf '[ -z "${TRIPWIRES_TITLE:-}" ] || echo ran >>"%s"\n' "$RUNNER_TEMP/startup-ran" >"$RUNNER_TEMP/startup.sh"
+          echo "BASH_ENV=$RUNNER_TEMP/startup.sh" >>"$GITHUB_ENV"
+      - name: The environment check fires
+        id: hostile
+        continue-on-error: true
+        uses: ./actions/tripwires
+        with:
+          title: tripwires-test (expected)
+          checks: environment
+      - name: Verify that the file did not run in the step
+        env:
+          HOSTILE: ${{ steps.hostile.outcome }}/${{ steps.hostile.outputs.security-violation }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [ -n "${BASH_ENV:-}" ] || fail "the runner did not pass BASH_ENV on; this job tests nothing"
+          [ "$HOSTILE" = failure/true ] || fail "BASH_ENV: $HOSTILE"
+          [ ! -e "$RUNNER_TEMP/startup-ran" ] || fail "the BASH_ENV file ran in the step of the action"
