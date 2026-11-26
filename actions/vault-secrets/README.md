@@ -25,11 +25,13 @@ The job needs this permission:
       id-token: write
 ```
 
-Pin the action to a full commit SHA. The current release is `vault-secrets-v1.1.0`. The section [Releases](#releases) gives its commit. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+Pin the action to its release tag. The current release is
+`vault-secrets-v1.1.0`. The section [Releases](#releases) tells why this is
+safe. Never pin a branch name such as `@main`.
 
 ```yaml
       - id: vault
-        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+        uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
         with:
           github-token: lib-read
           secrets: |
@@ -57,20 +59,33 @@ Vault path also still work. See [Inputs](#inputs).
 
 Each release has a tag with the action name as prefix: `vault-secrets-vX.Y.Z`. The repository holds several actions, so the prefix is needed. There is no moving major tag such as `v1`.
 
-Pin the full commit SHA of a release. Put the tag in the comment. Do not pin a branch.
+Pin the release tag. Do not pin a branch name such as `@main`: a branch
+moves.
 
 ```yaml
-uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
 ```
 
+Pinning the tag is safe because releases of this repository are immutable. A
+release tag cannot be moved or deleted, so the tag always names the same code.
+
+Use the tag of the action that you call. A tag of another action in this
+repository (for example `hf-oidc-token-vX.Y.Z`) is not a release of this
+action.
+
+Existing workflows that pin the commit of a release, for example
+`@8909e7247ace56b203bb0db68cc9dc8fd095c6bc # vault-secrets-v1.1.0`, still
+work. They do not need a change. Use the tag form in new workflows, and when
+you next change a workflow.
+
 Current release: [`vault-secrets-v1.1.0`](https://github.com/tenstorrent/.github/releases/tag/vault-secrets-v1.1.0). New releases are listed on the [Releases page](https://github.com/tenstorrent/.github/releases).
-To get the commit of a tag, run
+To see the commit of a release, run
 `gh api repos/tenstorrent/.github/commits/vault-secrets-v1.1.0 --jq .sha`.
 This gives the commit also when the tag is an annotated tag.
 
 | Release | Commit |
 |---|---|
-| `vault-secrets-v1.1.0` | The commit of the tag. Get it with the command above. |
+| `vault-secrets-v1.1.0` | `8909e7247ace56b203bb0db68cc9dc8fd095c6bc` |
 | `vault-secrets-v1.0.0` | `a697f1bb22ad8b488b0ac63f9a261e462179fe13` |
 
 ### What is new in 1.1
@@ -102,9 +117,10 @@ This gives the commit also when the tag is an annotated tag.
 
 ### Upgrade from 1.0
 
-To upgrade, change the pin to the commit of `vault-secrets-v1.1.0` and the
-comment to `# vault-secrets-v1.1.0`. No change to the inputs or to the steps
-that use the outputs is required.
+To upgrade, change the pin to `@vault-secrets-v1.1.0`. A workflow that keeps
+the commit form changes the pin to the commit of `vault-secrets-v1.1.0` (see
+the table above) and the comment to `# vault-secrets-v1.1.0`. No change to the
+inputs or to the steps that use the outputs is required.
 
 You can simplify the inputs. All of these are optional:
 
@@ -300,12 +316,12 @@ on the tailnet and does not join again (`join-tailnet: auto`).
 
 ```yaml
       - id: vault
-        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
+        uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
         with:
           github-token: lib-read
 
       - id: vault_kv
-        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
+        uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
         with:
           role: deploy
           secrets: |
@@ -366,8 +382,9 @@ one job.
   never reads it a second time. Each refused try is a `permission denied`
   entry in the Vault audit log. The role needs no access that it does not
   already have.
-- Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
-  Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
+- Pin this action by its release tag `vault-secrets-vX.Y.Z`. Releases of this
+  repository are immutable, so a release tag cannot be moved or deleted. Do
+  not pin a branch. An existing pin of the commit of a release still works.
 
 ## Security of the test workflow
 
