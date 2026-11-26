@@ -327,8 +327,8 @@ Options:
 
 ## What is proven and what is not
 
-Proven in live tests. All dates are UTC. All runs used a GitHub-hosted Ubuntu
-runner.
+Proven in live tests. All dates are UTC. Runs 1 to 3 used a GitHub-hosted
+Ubuntu runner. Run 4 used a self-hosted Linux runner.
 
 1. 2026-11-25, runs
    [45521842112](https://github.com/tenstorrent/.github/actions/runs/45521842112)
@@ -354,6 +354,19 @@ runner.
    set to that branch), with `workflow_dispatch`. The job got a token and read
    the same gated file. Without a token, the file gave HTTP 401. No token text
    was in the log. The branch and the ruleset were deleted after the test.
+4. 2026-11-26, run
+   [45733034318](https://github.com/tenstorrent/tt-metal/actions/runs/45733034318).
+   The workflow `models-t1-unit-tests.yaml` in `tenstorrent/tt-metal` ran on
+   `main` with `workflow_dispatch`. This was after tt-metal moved three
+   workflows to this action (tt-metal pull request
+   [67178](https://github.com/tenstorrent/tt-metal/pull/67178)). The action ran
+   at release `hf-oidc-token-v1.0.0`, in the CI container of a self-hosted
+   Linux runner (label `tt-ubuntu-2204-P150b-stable`). The job that called the
+   action is in a reusable workflow (`models-unit-tests-impl.yaml`). The step
+   got a read-only token. The log shows repository `tenstorrent/tt-metal`,
+   branch `main`, workflow `models-t1-unit-tests.yaml`. The next step got the
+   token masked. No token text was in the log. No `models` input was set, and
+   the tests of this run do not download from Hugging Face.
 
 What these runs proved:
 
@@ -370,6 +383,11 @@ What these runs proved:
 - A caller in another repository works.
 - A branch that only rulesets protect counts as protected
   (`GITHUB_REF_PROTECTED` is `true`).
+- The exchange works on one self-hosted Linux runner, inside a container
+  (run 4).
+- When a job in a reusable workflow calls the action, the OIDC token names the
+  top-level workflow file (claim `workflow_ref`), not the reusable workflow.
+  Hugging Face got the token with that file name (run 4).
 - No token text in the log.
 
 Proven offline (with a fake `curl`, on each pull request):
@@ -380,7 +398,10 @@ Proven offline (with a fake `curl`, on each pull request):
 
 Not proven:
 
-- Self-hosted runners, and macOS and Windows runners.
+- A read of a gated model on a self-hosted runner. Run 4 proves only the
+  exchange there.
+- macOS and Windows runners. Other self-hosted runner types, for example the
+  multihost or exabox runners.
 - A job longer than 60 minutes.
 - The answer 403 `GatedRepo` for a model whose licence the account has not
   accepted.
@@ -388,8 +409,10 @@ Not proven:
   example a wrong branch or workflow file), and the texts for HTTP 429 and 5xx.
 - An identity that names a `branch` claim.
 - That one service account can hold many CI/CD identities.
-- A reusable workflow as caller: how the `workflow` field matches it (the
-  action assumes the calling file, from `workflow_ref`).
+- A reusable workflow as caller: how an identity for one workflow file
+  matches it. Run 4 shows that Hugging Face gets the top-level file name. But
+  the identity of that test covered all workflows of the repository, so the
+  match on the `workflow` field is not proven.
 - Whether a custom GitHub Enterprise OIDC issuer would match the Hugging Face
   preset (`https://token.actions.githubusercontent.com`).
 
