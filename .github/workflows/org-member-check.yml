@@ -1,0 +1,243 @@
+name: Org member check
+
+# Reusable workflow. It tells a calling workflow if one GitHub account is a
+# member of the organization tenstorrent. The answer is the output `member`,
+# `true` or `false`. Documentation: workflows/org-member-check.md.
+#
+# Only this job holds the GitHub token. The caller gets only the answer.
+#
+# Rules of this workflow:
+# - Callers must be repositories of the organization tenstorrent.
+# - Each calling repository needs an OSPO setup for this workflow. Ask OSPO
+#   with a ticket in the OSPO Jira project.
+# - Callers pin this file to the full commit SHA of a release
+#   (org-member-check-vX.Y.Z) and put the tag in a comment.
+# - The caller gives the account in the secret `user-id` (preferred), the
+#   secret `login`, or both. They are secrets only so that the log of this
+#   job masks them.
+# - Only a member of tenstorrent is `true`. When ONE value is given: an
+#   outside collaborator, a pending invitation, a bot, an organization, an
+#   unknown login or id, or a value that is not a valid login or id is
+#   `false`. When BOTH are given, they must be valid and name the same user
+#   account, else the job fails.
+# - On any error (sign-in, network, an unexpected HTTP status) the job fails.
+#   It never answers `false` on an error. An empty output is an error.
+# - pull_request_target is not supported.
+# - The job prints no login, no id and no answer. Repository logs can be public.
+# - No checkout. The job runs no code of the caller.
+
+on:
+  workflow_call:
+    secrets:
+      login:
+        description: GitHub login of the account to check. Prefer user-id. A login that is part of the word true or false fails the job.
+        required: false
+      user-id:
+        description: Numeric GitHub user id of the account to check (preferred). If login is also given, both must name the same account.
+        required: false
+    outputs:
+      member:
+        description: "`true` if the account is a member of the organization tenstorrent, else `false`."
+        value: ${{ jobs.check.outputs.member }}
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check org membership
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+    # The answer never goes through env: or a log line (a step header prints
+    # its env: values). Only the guard step (invalid value: false) and the ask
+    # step write it, and each writes only true or false. If the job fails,
+    # the caller gets no answer.
+    # The runner drops a job output that contains a masked value. The login
+    # is masked (secret), so a login that is part of "true" or "false" would
+    # drop the answer. The guard step refuses such a login.
+    outputs:
+      member: ${{ steps.guard.outputs.member || steps.ask.outputs.member }}
+    steps:
+      # Checks the caller and the values before any sign-in. A value that does
+      # not match the GitHub form cannot be a member: the answer is false and
+      # no request is sent. Nothing here prints a value.
+      - name: Check caller and values
+        id: guard
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+          EVENT_NAME: ${{ github.event_name }}
+          LOGIN: ${{ secrets.login }}
+          USER_ID: ${{ secrets.user-id }}
+        run: |
+          set -euo pipefail
+          if [ "$OWNER" != tenstorrent ]; then
+            echo "::error title=org-member-check::Only repositories of the organization tenstorrent can call this workflow."
+            exit 1
+          fi
+          # Not supported, in every case.
+          if [ "$EVENT_NAME" = pull_request_target ]; then
+            echo "::error title=org-member-check::pull_request_target is not supported."
+            exit 1
+          fi
+          if [ -z "$LOGIN" ] && [ -z "$USER_ID" ]; then
+            echo "::error title=org-member-check::Give the secret login, the secret user-id, or both."
+            exit 1
+          fi
+          if [ -n "$LOGIN" ]; then
+            lower_login="$(printf '%s' "$LOGIN" | tr '[:upper:]' '[:lower:]')"
+            if [[ true == *"$lower_login"* ]] || [[ false == *"$lower_login"* ]]; then
+              echo "::error title=org-member-check::This login cannot be checked by login. Pass this account as the secret user-id only."
+              exit 1
+            fi
+          fi
+          # Same output rule for user-id. A valid id (digits) never matches;
+          # an invalid one such as "e" or "false" would drop the answer.
+          if [ -n "$USER_ID" ]; then
+            lower_id="$(printf '%s' "$USER_ID" | tr '[:upper:]' '[:lower:]')"
+            if [[ true == *"$lower_id"* ]] || [[ false == *"$lower_id"* ]]; then
+              echo "::error title=org-member-check::The secret user-id is not a numeric GitHub user id."
+              exit 1
+            fi
+          fi
+          valid=true
+          # GitHub login: letters, digits and '-', 1 to 39 characters, not
+          # starting with '-'. A bot login such as name[bot] does not match.
+          # No '_': tenstorrent is not an Enterprise Managed Users org, so a
+          # login with '_' is not one of its members (assumption).
+          if [ -n "$LOGIN" ] && ! [[ "$LOGIN" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then
+            valid=false
+          fi
+          # User id: digits only, no leading zero.
+          if [ -n "$USER_ID" ] && ! [[ "$USER_ID" =~ ^[1-9][0-9]{0,18}$ ]]; then
+            valid=false
+          fi
+          # Both values given: they must name the same account, so an
+          # invalid value is a caller error.
+          if [ "$valid" = false ] && [ -n "$LOGIN" ] && [ -n "$USER_ID" ]; then
+            echo "::error title=org-member-check::The secrets login and user-id do not name the same user account."
+            exit 1
+          fi
+          if [ "$valid" = true ]; then
+            if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+              echo "::error title=org-member-check::This run has no GitHub identity token. Give the calling job 'permissions: id-token: write'. A pull request from a fork never has one."
+              exit 1
+            fi
+          fi
+          echo "valid=$valid" >>"$GITHUB_OUTPUT"
+          if [ "$valid" = false ]; then
+            echo "member=false" >>"$GITHUB_OUTPUT"
+          fi
+          echo "Caller and values checked."
+
+      # Short names. The shared action makes the full names from the calling
+      # repository.
+      - name: Get token
+        id: vault
+        if: steps.guard.outputs.valid == 'true'
+        uses: tenstorrent/.github/actions/vault-secrets@8909e7247ace56b203bb0db68cc9dc8fd095c6bc # vault-secrets-v1.1.0
+        with:
+          role: org-member-check
+          github-token: org-member-check
+
+      - name: Ask GitHub
+        id: ask
+        if: steps.guard.outputs.valid == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.vault.outputs.token }}
+          LOGIN: ${{ secrets.login }}
+          USER_ID: ${{ secrets.user-id }}
+          ORG: tenstorrent
+        run: |
+          set -euo pipefail
+          fail() {
+            echo "::error title=org-member-check::$1"
+            exit 1
+          }
+          [ -n "$GH_TOKEN" ] || fail "The token is empty."
+          body="$(mktemp "$RUNNER_TEMP/omc.XXXXXX")"
+          trap 'rm -f "$body"' EXIT
+
+          # One GET request. Prints only the HTTP status (000 when no answer).
+          # The token goes in a header read from a pipe, never in argv.
+          # No -L: a redirect is an error here, not an answer.
+          # curl retries a timeout and HTTP 408, 429, 500, 502, 503, 504 two times.
+          get() {
+            local code rc=0
+            code="$(curl -sS --connect-timeout 5 --max-time 15 --retry 2 --retry-max-time 40 \
+              -o "$body" -w '%{http_code}' \
+              -H @<(printf 'Authorization: Bearer %s\n' "$GH_TOKEN") \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$GITHUB_API_URL$1")" || rc=$?
+            [ "$rc" -eq 0 ] || code=000
+            printf '%s' "$code"
+          }
+          answer() {
+            echo "member=$1" >>"$GITHUB_OUTPUT"
+            echo "Done."
+            exit 0
+          }
+
+          # With both values, an unknown id or a non-user account cannot name
+          # the same account as the login: a caller error, not false.
+          mismatch="The secrets login and user-id do not name the same user account."
+          login="$LOGIN"
+          if [ -n "$USER_ID" ]; then
+            code="$(get "/user/$USER_ID")"
+            case "$code" in
+              200) ;;
+              404) [ -z "$login" ] || fail "$mismatch"; answer false ;;
+              *) fail "GitHub answered HTTP $code to the user id lookup." ;;
+            esac
+            # id_login is not masked. Never print it.
+            id_login="$(jq -r '.login // empty' "$body")"
+            id_type="$(jq -r '.type // empty' "$body")"
+            [ -n "$id_login" ] || fail "The user id lookup gave no login."
+            if [ "$id_type" != User ]; then
+              [ -z "$login" ] || fail "$mismatch"
+              answer false
+            fi
+            if [ -n "$login" ]; then
+              lower_a="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
+              lower_b="$(printf '%s' "$id_login" | tr '[:upper:]' '[:lower:]')"
+              [ "$lower_a" = "$lower_b" ] || fail "$mismatch"
+            fi
+            login="$id_login"
+          fi
+
+          # 204: member (also a concealed member). 404: not a member.
+          # 302 means the token cannot see the members: an error.
+          code="$(get "/orgs/$ORG/members/$login")"
+          case "$code" in
+            204) answer true ;;
+            404) answer false ;;
+            *) fail "GitHub answered HTTP $code to the membership check." ;;
+          esac
+
+      # Revokes the token also when a step failed. A failed revoke is a
+      # warning only: the token expires on its own (GitHub App installation
+      # tokens last at most one hour). If the shared action fails after it got
+      # a token, its output is empty and this step cannot revoke it.
+      - name: Revoke token
+        if: always() && steps.vault.outputs.token != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.vault.outputs.token }}
+        run: |
+          set -uo pipefail
+          rc=0
+          code="$(curl -sS --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' \
+            -X DELETE \
+            -H @<(printf 'Authorization: Bearer %s\n' "$GH_TOKEN") \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$GITHUB_API_URL/installation/token")" || rc=$?
+          [ "$rc" -eq 0 ] || code=000
+          if [ "$code" = 204 ]; then
+            echo "Token revoked."
+          else
+            echo "::warning title=org-member-check::Token revoke answered HTTP $code."
+          fi

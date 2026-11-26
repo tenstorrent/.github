@@ -1,5 +1,14 @@
 # Workflows Documentation
 
+## Org member check (reusable workflow)
+
+**File:** `.github/workflows/org-member-check.yml`
+
+A reusable workflow that tells a caller if one GitHub account is a member of
+the organization `tenstorrent` (`true` or `false`). Callers pin a release by
+commit SHA, and each calling repository needs an OSPO setup. See
+[org-member-check.md](org-member-check.md).
+
 ## Set "Opened On" in Project
 
 **File:** `set-opened-on.yaml`
