@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031
+# (The tripwires run in a subshell that exports defaults for the inputs; the
+# rest of the script reads the inputs themselves.)
 # Pre-checks for the vault-secrets action. Fails early with a plain message.
 # Every input arrives through env (never through ${{ }} in shell text).
 #
