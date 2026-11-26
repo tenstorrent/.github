@@ -70,7 +70,7 @@ jobs:
           persist-credentials: false
 
       - id: hf
-        uses: tenstorrent/.github/actions/hf-oidc-token@<full-commit-sha> # hf-oidc-token-v1.0.0
+        uses: tenstorrent/.github/actions/hf-oidc-token@hf-oidc-token-v1.0.0
         with:
           resource: ${{ vars.HF_OIDC_RESOURCE }}
           models: |
@@ -85,11 +85,9 @@ jobs:
           python3 scripts/run_models.py
 ```
 
-Pin the action to a full commit SHA. The current release is
-`hf-oidc-token-v1.0.0`. The section [Releases](#releases) tells how to get
-its commit. Check that a commit is on `main` with
-`gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The
-status `identical` or `behind` means yes.
+Pin the action to its release tag. The current release is
+`hf-oidc-token-v1.0.0`. The section [Releases](#releases) tells why this is
+safe. Never pin a branch name such as `@main`.
 
 ### Rules for the calling workflow
 
@@ -125,24 +123,27 @@ Each release has a tag with the action name as prefix:
 `hf-oidc-token-vX.Y.Z`. The repository holds several actions, so the prefix is
 needed. There is no moving major tag such as `v1`.
 
-Pin the full commit SHA of a release. Put the tag in the comment. Do not pin a
-branch.
+Pin the release tag. Do not pin a branch name such as `@main`: a branch
+moves.
 
 ```yaml
-uses: tenstorrent/.github/actions/hf-oidc-token@<full-commit-sha> # hf-oidc-token-v1.0.0
+uses: tenstorrent/.github/actions/hf-oidc-token@hf-oidc-token-v1.0.0
 ```
+
+Pinning the tag is safe because releases of this repository are immutable. A
+release tag cannot be moved or deleted, so the tag always names the same code.
 
 Current release:
 [`hf-oidc-token-v1.0.0`](https://github.com/tenstorrent/.github/releases/tag/hf-oidc-token-v1.0.0).
 New releases are listed on the
 [Releases page](https://github.com/tenstorrent/.github/releases).
-To get the commit of a tag, run
+To see the commit of a release, run
 `gh api repos/tenstorrent/.github/commits/hf-oidc-token-v1.0.0 --jq .sha`.
 This gives the commit also when the tag is an annotated tag.
 
 | Release | Commit |
 | --- | --- |
-| `hf-oidc-token-v1.0.0` | The commit of the tag. Get it with the command above. |
+| `hf-oidc-token-v1.0.0` | `d31c308a8c85847acb5c6f5f0a48d58ecf962d33` |
 
 ## Inputs
 
