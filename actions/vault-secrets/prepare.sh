@@ -83,6 +83,7 @@ tripwire_fired=""
   exec "$tripwires_python" -I "$tripwires_here/../tripwires/tripwires.py" \
     --title vault-secrets --consequence "No request was sent to Vault."
 ) <<EOF || tripwire_fired=1
+# workflow_run is allowed on purpose (README, "Security notes")
 event          pull_request_target
 environment    curl jq tailscale bash
 $oidc_check

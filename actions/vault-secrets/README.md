@@ -367,6 +367,13 @@ one job.
   never reads it a second time. Each refused try is a `permission denied`
   entry in the Vault audit log. The role needs no access that it does not
   already have.
+- The action refuses `pull_request_target`. It does not refuse `workflow_run`:
+  workflows that run after another workflow read their secrets with it. A
+  `workflow_run` workflow runs on the default branch with the repository's
+  secrets, and a pull request from a fork can start the first workflow. So a
+  job that uses this action on `workflow_run` must not check out the head of
+  the first run, run its code, or run or trust its artifacts. The action
+  cannot see whether the job does.
 - Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
   Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
 

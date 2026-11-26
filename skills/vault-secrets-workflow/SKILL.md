@@ -111,6 +111,7 @@ The role in the grant decides. The claims of the run must match it.
 | `pull_request` from the same repository | Needs an environment | Add `environment:`. |
 | `pull_request` from a fork | No | A fork gets no OIDC token. |
 | `pull_request_target` | Never | The action refuses it. |
+| `workflow_run` | Only without the first run's code | The action allows it. Do not check out the head of the first run, run its code, or use its artifacts in the job. |
 | Publish or deploy job | Protected environment | Set required reviewers on the environment. |
 
 ## 5. Rules
