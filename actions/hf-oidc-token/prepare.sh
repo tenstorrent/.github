@@ -70,24 +70,39 @@ trim() {
 # The annotation is titled "hf-oidc-token: possible security compromise
 # attempt" and never shows the value. Also an error with if-no-token warn.
 # - The environment must not be prepared to run code in the action's scripts
-#   or to print their secrets (BASH_ENV, LD_PRELOAD, a shell function named
-#   curl, tracing), and the OIDC request must go to GitHub.
+#   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
+#   function, tracing, a PATH that finds curl or jq in the workspace), and the OIDC request must go to GitHub.
 # Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
 # nor the OIDC request token.
 command -v python3 >/dev/null 2>&1 || fail "this runner has no python3; the action needs bash, curl, jq and python3."
-env -u GITHUB_OUTPUT -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
-  ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}" \
-  GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" IN_BRANCH="${IN_BRANCH:-}" IN_RESOURCE="${IN_RESOURCE:-}" \
-  python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../tripwires/tripwires.py" \
-  --title "$TITLE" --consequence "No token was requested." <<'EOF' || exit 1
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+tripwire_fired=""
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+  export GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" IN_BRANCH="${IN_BRANCH:-}" IN_RESOURCE="${IN_RESOURCE:-}"
+  exec python3 -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title "$TITLE" --consequence "No token was requested."
+) <<'EOF' || tripwire_fired=1
 event
-environment
+environment curl jq
 oidc-url    ACTIONS_ID_TOKEN_REQUEST_URL
 no-option   IN_BRANCH=branch
 single-line IN_BRANCH=branch
 no-option   IN_RESOURCE=resource
 single-line IN_RESOURCE=resource
 EOF
+if [[ -n "$tripwire_fired" ]]; then
+  POSIXLY_CORRECT=1
+  exit 1
+fi
 
 # ── Inputs: check every value before use ───────────────────────────────────
 branch="$(trim "${IN_BRANCH:-main}")"

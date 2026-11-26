@@ -38,6 +38,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import urllib.parse
 import uuid
@@ -305,19 +306,20 @@ def oidc_claims(token, audience, repository, what="OIDC token", issuer=OIDC_ISSU
     return claims
 
 
-# Commands the actions here run from bash. An exported shell function of one of
-# these names replaces the command in every bash script of the job.
-SHELL_COMMANDS = frozenset(
-    "bash sh env command builtin exec eval source printf echo read test cat od tr sed awk grep date sleep "
-    "mktemp rm chmod dirname curl jq git node python3 python tailscale ssh base64 openssl".split()
-)
 FALSE_VALUES = ("0", "false", "no", "off")
 
 
-def environment_violations(environ):
+def environment_violations(environ, commands=(), posix=None):
     """Every Violation in an environment that an earlier, less trusted step of
-    the job can have prepared (GITHUB_ENV) to run code in a later step or to
-    make it print or leak its secrets. Names only: no value is reported."""
+    the job can have prepared (GITHUB_ENV, GITHUB_PATH) to run code in a later
+    step or to make it print or leak its secrets. Names only: no value is
+    reported.
+
+    commands names the programs that carry the caller's secrets (curl, jq): the
+    first of each on PATH must not be inside GITHUB_WORKSPACE, where a pull
+    request places files. posix (default: this system) says whether an empty
+    or relative PATH entry means the current directory, as it does to a POSIX
+    shell."""
     found = []
 
     def fire(message):
@@ -328,10 +330,10 @@ def environment_violations(environ):
     for name in ("LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES"):
         if environ.get(name):
             fire(f"{name} is set, so every program of the job first loads the library it names")
-    if any(
-        key.startswith("BASH_FUNC_") and key[len("BASH_FUNC_") :].rstrip("%()") in SHELL_COMMANDS for key in environ
-    ):
-        fire("an exported shell function replaces a command the action runs")
+    # Whatever its name: a script finds its own directory, a tool or its exit
+    # through commands, and any of them can be the function.
+    if any(key.startswith("BASH_FUNC_") for key in environ):
+        fire("an exported shell function can replace a command in every bash script of the job")
     if any(option in ("xtrace", "verbose") for option in environ.get("SHELLOPTS", "").split(":")):
         fire("SHELLOPTS turns on tracing in every bash script, which prints secrets before they are masked")
     if "$(" in environ.get("PS4", "") or "`" in environ.get("PS4", ""):
@@ -340,12 +342,27 @@ def environment_violations(environ):
         fire("GIT_TRACE_REDACT is off, so Git traces print credentials")
     if environ.get("NODE_TLS_REJECT_UNAUTHORIZED", "").strip() == "0":
         fire("NODE_TLS_REJECT_UNAUTHORIZED is 0, so Node sends secrets to servers it has not verified")
+    path = environ.get("PATH", "")
+    if (os.name == "posix" if posix is None else posix) and path:
+        if any(not entry or not entry.startswith("/") for entry in path.split(":")):
+            fire("PATH has an empty or relative entry, so commands are looked up in the current directory")
+    workspace = environ.get("GITHUB_WORKSPACE", "")
+    if workspace and path:
+        root = os.path.realpath(workspace)
+        for command in commands:
+            found_at = shutil.which(command, path=path)
+            if found_at and any(
+                os.path.commonpath([root, place]) == root
+                for place in (os.path.abspath(found_at), os.path.realpath(found_at))
+                if os.path.splitdrive(place)[0] == os.path.splitdrive(root)[0]
+            ):
+                fire(f"the first {command} on PATH is inside the workspace, where a pull request can place it")
     return found
 
 
-def hostile_environment(environ):
-    """Raise the first of environment_violations(environ), if any."""
-    for violation in environment_violations(environ):
+def hostile_environment(environ, commands=()):
+    """Raise the first of environment_violations(environ, commands), if any."""
+    for violation in environment_violations(environ, commands):
         raise violation
 
 
@@ -356,6 +373,9 @@ def hostile_environment(environ):
 INPUT_WHITESPACE = (
     "\t\n\v\f\r   " + "".join(map(chr, range(0x2000, 0x200B))) + "    　﻿"
 )
+
+
+COMMAND_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
 
 
 class SpecError(Exception):
@@ -427,7 +447,8 @@ def run_checks(spec, values, environ):
     (default: name), so `IN_REF=ref` reads the variable and reports `ref`. The
     value is trimmed as an action input is, and an empty value passes: the input
     was not given. `event [name ...]` takes no value and checks
-    GITHUB_EVENT_NAME; `environment` takes none and checks the whole environment."""
+    GITHUB_EVENT_NAME; `environment [command ...]` takes none and checks the
+    whole environment, and where PATH finds each named command."""
     violations = []
     for number, line in enumerate(spec.splitlines(), 1):
         words = line.split("#", 1)[0].split()
@@ -439,9 +460,9 @@ def run_checks(spec, values, environ):
                 untrusted_event(environ.get("GITHUB_EVENT_NAME", ""), tuple(arguments) or UNTRUSTED_EVENTS)
                 continue
             if check == "environment":
-                if arguments:
-                    raise SpecError("environment takes no argument")
-                violations.extend(environment_violations(environ))
+                if not all(COMMAND_NAME.fullmatch(argument) for argument in arguments):
+                    raise SpecError("environment takes command names, such as curl")
+                violations.extend(environment_violations(environ, arguments))
                 continue
             if check not in CHECKS:
                 raise SpecError(f"unknown check {check}")

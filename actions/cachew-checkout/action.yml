@@ -102,6 +102,56 @@ outputs:
 runs:
   using: composite
   steps:
+    # Tripwires (../tripwires/README.md), first, on every runner and whatever the
+    # cachew setting: the standard checkout below runs with the same token in
+    # the same environment.
+    # - The environment must not be prepared to run code in the steps below or
+    #   to print their credentials (BASH_ENV, LD_PRELOAD, any exported shell
+    #   function, tracing, a PATH entry that means the current directory, a git
+    #   that PATH finds inside the workspace).
+    # - The job's own token goes to the job's server only, written as a plain
+    #   origin. contains(), not ==: checkout trims the input, an expression
+    #   cannot.
+    # Nothing here depends on a command that an exported shell function can
+    # replace: in POSIX mode bash finds exec, unset, break and exit before any
+    # function, and exec runs a file from PATH. POSIXLY_CORRECT=1 is on a line
+    # of its own on purpose: bash reads the rest of that line before the mode
+    # changes. Without Python 3.9+ the environment is not checked (the cachew
+    # steps then do not run either); a github-server-url with the job's token is
+    # refused, since nothing can check where the token would go.
+    - name: Check for a possible security compromise attempt
+      id: tripwires
+      shell: bash
+      env:
+        IN_GITHUB_SERVER_URL: ${{ inputs.github-server-url }}
+        CACHEW_JOB_TOKEN: ${{ github.token != '' && contains(inputs.token, github.token) }}
+      run: |
+        POSIXLY_CORRECT=1
+        origin_check=""
+        if [[ "$CACHEW_JOB_TOKEN" == true && -n "$IN_GITHUB_SERVER_URL" ]]; then
+          origin_check="trusted-origin IN_GITHUB_SERVER_URL=github-server-url $GITHUB_SERVER_URL"
+        fi
+        python=""
+        for candidate in python3 python; do
+          # -I: PYTHONPATH and the user site cannot replace the modules of the check.
+          if (exec "$candidate" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))') 2>/dev/null; then
+            python="$candidate"
+            break
+          fi
+        done
+        if [[ -z "$python" ]]; then
+          if [[ -n "$origin_check" ]]; then
+            echo "::error title=cachew-checkout::github-server-url is set and the token is the job's own, but there is no Python 3.9+ to check where the token would go. The checkout was stopped."
+            exit 1
+          fi
+          exit 0
+        fi
+        unset GITHUB_OUTPUT
+        exec "$python" -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title cachew-checkout \
+          --consequence "The checkout was stopped without falling back to the standard checkout." <<EOF
+        environment git
+        $origin_check
+        EOF
     # Expressions cannot trim, so the cachew input and CACHEW_CHECKOUT are read
     # here, trimmed and lowercased as actions/checkout reads its inputs:
     # `cachew: "false\n"` opts out like `false`. Prints false, true or auto.
@@ -123,32 +173,6 @@ runs:
         [ "$(normalize "${CACHEW_CHECKOUT:-}")" = false ] && mode=false
         case "$mode" in false | true) ;; *) mode=auto ;; esac
         echo "cachew=$mode" >>"$GITHUB_OUTPUT"
-    # Tripwire (../tripwires/README.md), on every runner and whatever the cachew
-    # setting: the standard checkout below sends the token to github-server-url
-    # too. The job's own token goes to the job's server only, written as a plain
-    # origin. contains(), not ==: checkout trims the input, an expression cannot.
-    - name: Keep the job token on the job's server
-      if: inputs.github-server-url != '' && github.token != '' && contains(inputs.token, github.token)
-      shell: bash
-      env:
-        IN_GITHUB_SERVER_URL: ${{ inputs.github-server-url }}
-      run: |
-        # -I: PYTHONPATH and the user site cannot replace the modules of the check.
-        python=""
-        for candidate in python3 python; do
-          if "$candidate" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' 2>/dev/null; then
-            python="$candidate"
-            break
-          fi
-        done
-        if [ -z "$python" ]; then
-          echo "::error title=cachew-checkout::github-server-url is set and the token is the job's own, but there is no Python 3.9+ to check where the token would go. The checkout was stopped."
-          exit 1
-        fi
-        env -u GITHUB_OUTPUT "$python" -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title cachew-checkout \
-          --consequence "The checkout was stopped without falling back to the standard checkout." <<EOF
-        trusted-origin IN_GITHUB_SERVER_URL=github-server-url $GITHUB_SERVER_URL
-        EOF
     # The rest of the gate is evaluated by the runner. On GitHub-hosted runners
     # (no access to the CI VLAN) every cachew step is skipped and only the
     # official checkout below runs, exactly as before.
@@ -182,17 +206,21 @@ runs:
       # inherited value is used only when that session recorded it, in a file
       # of its directory in RUNNER_TEMP: a value that an earlier step wrote to
       # GITHUB_ENV names no such file, and must not choose what runs here. The
-      # later steps take the interpreter from this step's output.
+      # later steps take the interpreter from this step's output. cd and pwd are
+      # called as builtins; a function named builtin would still replace them,
+      # which is why the first step refuses every exported function.
+      # -I everywhere: PYTHONPATH and the user site cannot replace a module
+      # that the scripts import, before their own checks run.
       run: |
         python=python3
         session="${CACHEW_SESSION_DIR:-}"
-        temp="$(cd -P -- "$RUNNER_TEMP" 2>/dev/null && pwd -P)" || temp=""
+        temp="$(builtin cd -P -- "$RUNNER_TEMP" 2>/dev/null && builtin pwd -P)" || temp=""
         name="${session#"$temp"/cachew-}"
         if [ -n "${CACHEW_PYTHON:-}" ] && [ -n "$temp" ] && [ "$name" != "$session" ] && [[ "$name" != */* ]] &&
-          [ "$(cat -- "$session/python" 2>/dev/null)" = "$CACHEW_PYTHON" ]; then
+          [[ -f "$session/python" && "$(<"$session/python")" == "$CACHEW_PYTHON" ]]; then
           python="$CACHEW_PYTHON"
         fi
-        "$python" "$GITHUB_ACTION_PATH/session.py" prepare || {
+        "$python" -I "$GITHUB_ACTION_PATH/session.py" prepare || {
           echo "Python 3.10+ unavailable; using standard checkout only."
           echo "ready=false" >>"$GITHUB_OUTPUT"
         }
@@ -230,7 +258,7 @@ runs:
         CACHEW_TEST_ALLOW_LOOPBACK_HTTP: ''
         CACHEW_CACHEW_HEALTH_TIMEOUT: ${{ inputs.cachew-health-timeout }}
         CACHEW_CACHEW_FETCH_TIMEOUT: ${{ inputs.cachew-fetch-timeout }}
-      run: '"$CACHEW_PYTHON" "$CACHEW_ACTION_PATH/checkout.py" || echo "Cachew checkout unavailable; continuing with upstream checkout."'
+      run: '"$CACHEW_PYTHON" -I "$CACHEW_ACTION_PATH/checkout.py" || echo "Cachew checkout unavailable; continuing with upstream checkout."'
     # An input that only makes sense as an attack (injection, path traversal, an
     # untrusted token destination) has no fallback: the scripts above already
     # posted the error annotation, and the job stops before any checkout.
@@ -283,7 +311,7 @@ runs:
         CACHEW_PYTHON: ${{ steps.session.outputs.python }}
       # Without Python, later steps still get the job's file back.
       run: |
-        "$CACHEW_PYTHON" "$GITHUB_ACTION_PATH/session.py" restore ||
+        "$CACHEW_PYTHON" -I "$GITHUB_ACTION_PATH/session.py" restore ||
           printf 'GIT_CONFIG_GLOBAL=%s\n' "$CACHEW_RESTORE_GLOBAL" >>"$GITHUB_ENV"
     - name: Configure job-global cachew Git transport
       id: configure
@@ -308,4 +336,4 @@ runs:
         # A checkout that failed or was refused leaves no token for the cache.
         CACHEW_CHECKED_OUT: ${{ steps.cachew.outputs.checked-out == 'true' || steps.checkout.outcome == 'success' }}
         CACHEW_PYTHON: ${{ steps.session.outputs.python }}
-      run: '"$CACHEW_PYTHON" "$GITHUB_ACTION_PATH/session.py" activate'
+      run: '"$CACHEW_PYTHON" -I "$GITHUB_ACTION_PATH/session.py" activate'

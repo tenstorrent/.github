@@ -168,8 +168,17 @@ trips_with 'vault-url with a shell metacharacter in the host' \
 # The environment an earlier step can prepare, and the OIDC request URL.
 trips_with 'BASH_ENV' 'BASH_ENV is set, so every bash script of the job first runs the file it names' \
   BASH_ENV=/nonexistent/CANARY
-trips_with 'a shell function named curl' 'an exported shell function replaces a command the action runs' \
+trips_with 'a shell function named curl' 'an exported shell function can replace a command in every bash script of the job' \
   'BASH_FUNC_curl%%=() { echo CANARY; }'
+# Functions named like the commands that could start the check itself, or stop
+# the script after it: the check still runs, and the script still stops.
+trips_with 'shell functions named env, python3, exec and exit' \
+  'an exported shell function can replace a command in every bash script of the job' \
+  'BASH_FUNC_env%%=() { return 0; }' 'BASH_FUNC_python3%%=() { return 0; }' 'BASH_FUNC_exec%%=() { return 0; }' \
+  'BASH_FUNC_unset%%=() { return 0; }' 'BASH_FUNC_export%%=() { return 0; }' 'BASH_FUNC_exit%%=() { return 0; }' \
+  'BASH_FUNC_dirname%%=() { return 0; }' 'BASH_FUNC_pwd%%=() { return 0; }' 'BASH_FUNC_cd%%=() { return 0; }'
+trips_with 'a PATH entry that means the current directory' \
+  'PATH has an empty or relative entry, so commands are looked up in the current directory' "PATH=.:$PATH"
 trips_with 'GIT_TRACE_REDACT off' 'GIT_TRACE_REDACT is off, so Git traces print credentials' GIT_TRACE_REDACT=0
 trips_with 'Node without TLS verification' \
   'NODE_TLS_REJECT_UNAUTHORIZED is 0, so Node sends secrets to servers it has not verified' \

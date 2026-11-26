@@ -322,9 +322,13 @@ any checkout runs. They are:
   token;
 - an environment prepared to run code in the job's scripts or to print their
   credentials: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an
-  exported shell function named like a command (`git`, `curl`), `SHELLOPTS`
-  with `xtrace`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off or
-  `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+  exported shell function of any name, `SHELLOPTS` with `xtrace`, a `PS4`
+  that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`,
+  a `PATH` entry that is empty or relative, or a `git` that `PATH` finds first
+  inside the workspace (the first step checks these two; the cachew session's
+  own Git wrapper is in `RUNNER_TEMP` and passes). This check is the first step of the
+  action on every runner that has Python 3.9 or newer, also when cachew is off
+  and only the standard checkout runs.
 
 The checks that are not specific to cachew (the host, path, option and
 submodule URL checks, and the annotation) are the shared

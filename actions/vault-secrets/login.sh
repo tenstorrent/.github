@@ -177,10 +177,23 @@ fi
 # for: GitHub's issuer, the Vault URL as audience, this repository. Another
 # token was swapped in on the way and does not go to Vault. Python (-I) gets
 # neither the step outputs nor the OIDC request token.
-env -u GITHUB_OUTPUT -u ACTIONS_ID_TOKEN_REQUEST_TOKEN TRIPWIRE_JWT="$jwt" TRIPWIRE_REPOSITORY="$repository" \
-  python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../tripwires/tripwires.py" \
-  --title vault-secrets --consequence "The OIDC token was not sent to Vault." \
-  <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $url TRIPWIRE_REPOSITORY" || exit 1
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export TRIPWIRE_JWT="$jwt" TRIPWIRE_REPOSITORY="$repository"
+  exec python3 -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title vault-secrets --consequence "The OIDC token was not sent to Vault."
+) <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $url TRIPWIRE_REPOSITORY" || {
+  POSIXLY_CORRECT=1
+  exit 1
+}
 
 # ── Facts of this run, for messages only ────────────────────────────────────
 # From the OIDC token payload (claims are not secret), else from the runner env.

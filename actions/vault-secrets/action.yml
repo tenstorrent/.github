@@ -129,7 +129,14 @@ runs:
         IN_VAULT_TIMEOUT: ${{ inputs.vault-timeout-seconds }}
         EVENT_NAME: ${{ github.event_name }}
         REPOSITORY: ${{ github.repository }}
-      run: bash "$GITHUB_ACTION_PATH/prepare.sh"
+      # bash -p takes no shell function, BASH_ENV or SHELLOPTS from the
+      # environment, so nothing an earlier step exported runs in the script
+      # before its tripwires do. POSIX mode (on a line of its own: bash reads
+      # the rest of that line before the mode changes) finds exec before any
+      # function named exec or bash.
+      run: |
+        POSIXLY_CORRECT=1
+        exec bash -p "$GITHUB_ACTION_PATH/prepare.sh"
 
     # Do not pass `args: --accept-routes`: the action sets it, and a second copy fails.
     - name: Join tailnet
@@ -166,7 +173,10 @@ runs:
         PREFIX: ${{ steps.prepare.outputs.prefix }}
         REPOSITORY: ${{ github.repository }}
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
-      run: bash "$GITHUB_ACTION_PATH/login.sh"
+      # bash -p, POSIX mode: as for prepare.sh above.
+      run: |
+        POSIXLY_CORRECT=1
+        exec bash -p "$GITHUB_ACTION_PATH/login.sh"
 
     # Only for github-token without '/': finds the engine of the token set and
     # reads the token, 15 seconds for each request. A request that curl sent is

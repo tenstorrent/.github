@@ -30,6 +30,11 @@ runs:
   steps:
     # No fallback: without Python the step fails, and so does the job.
     # -I: PYTHONPATH and the user site cannot replace the modules the checks import.
+    # The launch must not depend on a command that an exported shell function
+    # can replace (python3, env): in POSIX mode bash finds exec before any
+    # function, and exec runs a file from PATH. POSIXLY_CORRECT=1 is on a line
+    # of its own on purpose: bash reads the rest of that line before the mode
+    # changes.
     - name: Check for a possible security compromise attempt
       id: tripwires
       shell: bash
@@ -37,4 +42,6 @@ runs:
         TRIPWIRES_CHECKS: ${{ inputs.checks }}
         TRIPWIRES_VALUES: ${{ inputs.values }}
         TRIPWIRES_TITLE: ${{ inputs.title }}
-      run: python3 -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES
+      run: |
+        POSIXLY_CORRECT=1
+        exec python3 -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES

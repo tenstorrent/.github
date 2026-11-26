@@ -249,7 +249,6 @@ class EnvironmentChecks(unittest.TestCase):
             "HTTPS_PROXY": "http://proxy.example.com:3128",
             "SHELLOPTS": "braceexpand:errexit:pipefail",
             "PS4": "+ ",
-            "BASH_FUNC_module%%": "() { eval x; }",
             "GIT_TRACE_REDACT": "1",
             "NODE_TLS_REJECT_UNAUTHORIZED": "1",
             "BASH_ENV": "",
@@ -265,6 +264,11 @@ class EnvironmentChecks(unittest.TestCase):
             "DYLD_INSERT_LIBRARIES": "/tmp/CANARY.dylib",
             "BASH_FUNC_curl%%": "() { CANARY; }",
             "BASH_FUNC_jq()": "() { CANARY; }",
+            "BASH_FUNC_env%%": "() { CANARY; }",
+            "BASH_FUNC_exit%%": "() { CANARY; }",
+            # A name no list would hold: any exported function fires.
+            "BASH_FUNC_pwd%%": "() { CANARY; }",
+            "BASH_FUNC_module%%": "() { CANARY; }",
             "SHELLOPTS": "braceexpand:xtrace",
             "PS4": "$(CANARY) ",
             "GIT_TRACE_REDACT": "false",
@@ -277,7 +281,63 @@ class EnvironmentChecks(unittest.TestCase):
                 self.assertNotIn("CANARY", str(found[0]))
                 with self.assertRaises(Violation):
                     tripwires.hostile_environment({name: value})
+        # One violation for the exported functions, however many there are.
         self.assertEqual(len(tripwires.environment_violations(cases)), 9)
+
+
+class PathTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.workspace = self.root / "work"
+        for directory in ("work/bin", "work/.venv/bin", "tools", "temp/cachew-x/bin"):
+            (self.root / directory).mkdir(parents=True)
+
+    def program(self, place):
+        file = self.root / place
+        file.write_text("#!/bin/sh\n")
+        file.chmod(0o755)
+        return file
+
+    def found(self, path, *commands, posix=True):
+        environ = {"PATH": path, "GITHUB_WORKSPACE": str(self.workspace)}
+        return [str(v) for v in tripwires.environment_violations(environ, commands, posix=posix)]
+
+    def test_an_empty_or_relative_entry_means_the_current_directory(self):
+        for path in (":/usr/bin", "/usr/bin:", "/usr/bin::/bin", ".:/usr/bin", "/usr/bin:bin", "/usr/bin:./CANARY"):
+            with self.subTest(path=path):
+                found = self.found(path)
+                self.assertEqual(found, ["PATH has an empty or relative entry, so commands are looked up in the current directory"])
+        self.assertEqual(self.found("/usr/bin:/bin"), [])
+        self.assertEqual(self.found(""), [])
+        # Not where the entries are not POSIX paths.
+        self.assertEqual(self.found(r"C:\tools;;D:\bin", posix=False), [])
+
+    def test_a_named_command_must_not_come_from_the_workspace(self):
+        self.program("work/bin/curl")
+        self.program("tools/curl")
+        inside, outside = str(self.workspace / "bin"), str(self.root / "tools")
+        message = "the first curl on PATH is inside the workspace, where a pull request can place it"
+        self.assertEqual(self.found(f"{inside}:{outside}", "curl", "jq"), [message])
+        self.assertNotIn(inside, message)
+        # The real one first, an absent command, and a command nobody named.
+        self.assertEqual(self.found(f"{outside}:{inside}", "curl", "jq"), [])
+        self.assertEqual(self.found(f"{inside}:{outside}", "jq"), [])
+        self.assertEqual(self.found(f"{inside}:{outside}"), [])
+        # A link outside the workspace to a file inside it.
+        (self.root / "tools" / "jq").symlink_to(self.program("work/bin/jq-real"))
+        self.assertEqual(len(self.found(outside, "jq")), 1)
+
+    def test_supported_additions_to_path_pass(self):
+        # A workspace virtual environment, whose python is not named; the cachew
+        # session's wrapper in RUNNER_TEMP; a tool cache.
+        self.program("work/.venv/bin/python3")
+        self.program("temp/cachew-x/bin/git")
+        self.program("tools/curl")
+        path = ":".join(str(self.root / d) for d in ("work/.venv/bin", "temp/cachew-x/bin", "tools"))
+        self.assertEqual(self.found(path, "curl", "jq", "git"), [])
+        self.assertEqual(len(self.found(path, "python3")), 1)
 
 
 def captured(function, *arguments, **keywords):
@@ -428,7 +488,7 @@ class CommandLine(unittest.TestCase):
                 code, text, _ = self.run_main(spec, environ=dict(environ, JWT=value))
                 self.assertEqual(code, 1)
                 self.assertIn("::OIDC-token is not a token that GitHub issues", text)
-        self.assertEqual(self.run_main("environment now", environ=environ)[0], 2)
+        self.assertEqual(self.run_main("environment ../curl", environ=environ)[0], 2)
         self.assertEqual(self.run_main("oidc-claims JWT", environ=environ)[0], 2)
         self.assertEqual(self.run_main("oidc-claims JWT aud MISSING", environ=environ)[0], 2)
 

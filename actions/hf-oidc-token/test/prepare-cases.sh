@@ -126,7 +126,24 @@ option="starts with '-' and would be read as a command-line option"
 line="contains a line break or control character and could inject a line or a command"
 expect_trip "resource $option" IN_RESOURCE=-CANARY
 expect_trip "BASH_ENV is set, so every bash script of the job first runs the file it names" BASH_ENV=/nonexistent/CANARY
-expect_trip "an exported shell function replaces a command the action runs" 'BASH_FUNC_jq%%=() { echo CANARY; }'
+expect_trip "an exported shell function can replace a command in every bash script of the job" 'BASH_FUNC_jq%%=() { echo CANARY; }'
+expect_trip "an exported shell function can replace a command in every bash script of the job" 'BASH_FUNC_module%%=() { echo CANARY; }'
+# Functions named like the commands that could start the check itself, or stop
+# the script after it: the check still runs, and the script still stops.
+expect_trip "an exported shell function can replace a command in every bash script of the job" \
+  'BASH_FUNC_env%%=() { return 0; }' 'BASH_FUNC_python3%%=() { return 0; }' 'BASH_FUNC_exec%%=() { return 0; }' \
+  'BASH_FUNC_unset%%=() { return 0; }' 'BASH_FUNC_export%%=() { return 0; }' 'BASH_FUNC_exit%%=() { return 0; }' \
+  'BASH_FUNC_dirname%%=() { return 0; }' 'BASH_FUNC_pwd%%=() { return 0; }' 'BASH_FUNC_cd%%=() { return 0; }'
+# PATH: an entry that means the current directory, and a curl that a pull
+# request could have placed. The same curl outside the workspace passes.
+expect_trip "PATH has an empty or relative entry, so commands are looked up in the current directory" "PATH=$PATH:"
+mkdir -p "$work/ws/bin"
+printf '#!/bin/sh\necho CANARY\n' >"$work/ws/bin/curl"
+chmod +x "$work/ws/bin/curl"
+expect_trip "the first curl on PATH is inside the workspace, where a pull request can place it" \
+  GITHUB_WORKSPACE="$work/ws" PATH="$work/ws/bin:$PATH"
+run GITHUB_WORKSPACE="$work/elsewhere" PATH="$work/ws/bin:$PATH"
+grep -q 'possible security compromise attempt' "$work/log" && bad "a curl outside the workspace must pass the tripwire" || ok
 expect_trip "GIT_TRACE_REDACT is off, so Git traces print credentials" GIT_TRACE_REDACT=false
 expect_trip "ACTIONS_ID_TOKEN_REQUEST_URL is not a GitHub OIDC endpoint and would have received the OIDC request token" \
   ACTIONS_ID_TOKEN_REQUEST_URL=https://CANARY.invalid/oidc

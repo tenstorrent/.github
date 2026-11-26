@@ -97,7 +97,14 @@ runs:
         IN_MODELS: ${{ inputs.models }}
         IN_IF_NO_TOKEN: ${{ inputs.if-no-token }}
         IN_BRANCH: ${{ inputs.branch }}
-      run: bash "$GITHUB_ACTION_PATH/prepare.sh"
+      # bash -p takes no shell function, BASH_ENV or SHELLOPTS from the
+      # environment, so nothing an earlier step exported runs in the script
+      # before its tripwires do. POSIX mode (on a line of its own: bash reads
+      # the rest of that line before the mode changes) finds exec before any
+      # function named exec or bash.
+      run: |
+        POSIXLY_CORRECT=1
+        exec bash -p "$GITHUB_ACTION_PATH/prepare.sh"
 
     # Masks the OIDC token and the Hugging Face token at once. The Hugging Face
     # token goes to the step output token, which only the models step and the
@@ -109,7 +116,10 @@ runs:
       env:
         RESOURCE: ${{ steps.prepare.outputs.resource }}
         MODE: ${{ steps.prepare.outputs.mode }}
-      run: bash "$GITHUB_ACTION_PATH/exchange.sh"
+      # bash -p, POSIX mode: as for prepare.sh above.
+      run: |
+        POSIXLY_CORRECT=1
+        exec bash -p "$GITHUB_ACTION_PATH/exchange.sh"
 
     - name: Check access to models
       id: models

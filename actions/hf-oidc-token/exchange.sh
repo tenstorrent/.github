@@ -130,10 +130,23 @@ fi
 # token was swapped in on the way and does not go to Hugging Face. Python
 # (-I, standard library only) gets neither the step outputs nor the OIDC
 # request token.
-env -u GITHUB_OUTPUT -u ACTIONS_ID_TOKEN_REQUEST_TOKEN TRIPWIRE_JWT="$jwt" \
-  python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../tripwires/tripwires.py" \
-  --title "$TITLE" --consequence "The OIDC token was not sent to Hugging Face." \
-  <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $AUDIENCE" || exit 1
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export TRIPWIRE_JWT="$jwt"
+  exec python3 -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title "$TITLE" --consequence "The OIDC token was not sent to Hugging Face."
+) <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $AUDIENCE" || {
+  POSIXLY_CORRECT=1
+  exit 1
+}
 
 # ── 2. The identity values of this run ─────────────────────────────────────
 # From the OIDC token payload (claims are not secret), else from the runner

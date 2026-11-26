@@ -35,8 +35,8 @@ done
 #   Tailscale setting.
 # The checks below still give each unsupported value its own message.
 # - The environment must not be prepared to run code in the action's scripts
-#   or to print their secrets (BASH_ENV, LD_PRELOAD, a shell function named
-#   curl, tracing), and the OIDC request must go to GitHub.
+#   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
+#   function, tracing, a PATH that finds curl or jq in the workspace), and the OIDC request must go to GitHub.
 # Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
 # nor the OIDC request token.
 #
@@ -44,22 +44,36 @@ done
 # the OIDC URL check is skipped for the one URL in a file that the fixture
 # writes into this action's own directory. A value in GITHUB_ENV cannot write
 # that file, and whoever can write there can change this script as well.
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+[[ "$tripwires_here" == /* ]] || tripwires_here="$PWD/$tripwires_here"
 oidc_check='oidc-url       ACTIONS_ID_TOKEN_REQUEST_URL'
-fixture_url="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test/proxy/oidc-request-url"
-if [ -f "$fixture_url" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] \
-  && [ "$(cat -- "$fixture_url")" = "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
-  echo "Test fixture: the OIDC request goes to the local endpoint of test/proxy/fixture.py."
-  oidc_check='# oidc-url: local test fixture'
+fixture_url="$tripwires_here/test/proxy/oidc-request-url"
+if [[ -f "$fixture_url" && -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+  IFS= read -r fixture_url <"$fixture_url" || true
+  if [[ "$fixture_url" == "$ACTIONS_ID_TOKEN_REQUEST_URL" ]]; then
+    echo "Test fixture: the OIDC request goes to the local endpoint of test/proxy/fixture.py."
+    oidc_check='# oidc-url: local test fixture'
+  fi
 fi
-env -u GITHUB_OUTPUT -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
-  GITHUB_EVENT_NAME="${EVENT_NAME:-}" \
-  IN_VAULT_URL="${IN_VAULT_URL:-}" IN_ROLE="${IN_ROLE:-}" IN_GITHUB_TOKEN="${IN_GITHUB_TOKEN:-}" \
-  ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}" \
-  IN_TS_CLIENT_ID="${IN_TS_CLIENT_ID:-}" IN_TS_AUDIENCE="${IN_TS_AUDIENCE:-}" IN_TS_TAGS="${IN_TS_TAGS:-}" \
-  python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../tripwires/tripwires.py" \
-  --title vault-secrets --consequence "No request was sent to Vault." <<EOF || exit 1
+tripwire_fired=""
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export GITHUB_EVENT_NAME="${EVENT_NAME:-}"
+  export IN_VAULT_URL="${IN_VAULT_URL:-}" IN_ROLE="${IN_ROLE:-}" IN_GITHUB_TOKEN="${IN_GITHUB_TOKEN:-}"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+  export IN_TS_CLIENT_ID="${IN_TS_CLIENT_ID:-}" IN_TS_AUDIENCE="${IN_TS_AUDIENCE:-}" IN_TS_TAGS="${IN_TS_TAGS:-}"
+  exec python3 -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title vault-secrets --consequence "No request was sent to Vault."
+) <<EOF || tripwire_fired=1
 event          pull_request_target
-environment
+environment    curl jq tailscale
 $oidc_check
 trusted-origin IN_VAULT_URL=vault-url https://vault-ospo.eng-svc.aws.tenstorrent.com https://vault-ospo-staging.eng-svc.aws.tenstorrent.com
 no-option      IN_ROLE=role
@@ -73,6 +87,10 @@ single-line    IN_TS_AUDIENCE=tailscale-audience
 no-option      IN_TS_TAGS=tailscale-tags
 single-line    IN_TS_TAGS=tailscale-tags
 EOF
+if [[ -n "$tripwire_fired" ]]; then
+  POSIXLY_CORRECT=1
+  exit 1
+fi
 
 if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
   fail "job needs permissions: id-token: write (not available on fork pull requests)"
@@ -269,7 +287,7 @@ case "$network_mode" in
     tailscaled_args="--tun=userspace-networking --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
     # hashicorp/vault-action has no proxy input. A step-local Node preload
     # gives its HTTP client (got, Node global agents) the Tailscale proxy.
-    preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"
+    preload="$tripwires_here/proxy-agent.cjs"
     # NODE_OPTIONS accepts double-quoted paths; escape quotes and backslashes.
     preload="${preload//\\/\\\\}"
     preload="${preload//\"/\\\"}"

@@ -31,7 +31,7 @@ supported configuration produces. When one fires:
 | `trusted-origin <name> <origin> ...` | `trusted_origin` | is not one of the listed HTTPS origins: another host, plain HTTP, or a spelling with userinfo or a path |
 | `oidc-url <name> [host ...]` | `oidc_request_url` | (normally `ACTIONS_ID_TOKEN_REQUEST_URL`) is not HTTPS on a GitHub Actions host, so another server would receive the OIDC request token. For GitHub Enterprise Server, list its host |
 | `oidc-claims <name> <audience> [VARIABLE]` | `oidc_claims` | is an OIDC token whose issuer, audience or repository (from `VARIABLE`, default `GITHUB_REPOSITORY`) is not what this job asked for, or that cannot be decoded: a token swapped in on the way |
-| `environment` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an exported shell function named like a command, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0` |
+| `environment [command ...]` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, any exported shell function, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`, a `PATH` entry that is empty or relative (the current directory), or a named command that `PATH` finds first inside `GITHUB_WORKSPACE` |
 | `event [event ...]` | `untrusted_event` | (no value) the run's event is `pull_request_target` or `workflow_run`, or one of the listed events |
 
 The first seven guard against code injection; `trusted-origin`, the two OIDC
@@ -78,11 +78,24 @@ would need a second.
     IN_REF: ${{ inputs.ref }}
     IN_PATH: ${{ inputs.path }}
   run: |
-    python3 "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title my-action <<'EOF'
+    POSIXLY_CORRECT=1
+    exec python3 -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title my-action <<'EOF'
+    environment
     no-option IN_REF=ref
     inside    IN_PATH=path
     EOF
 ```
+
+Start the command this way, as the first thing the step does. An earlier step
+can export a shell function named `python3` or `env`, which bash would run in
+place of the command, and the check would never start. In POSIX mode bash
+finds `exec` before any function, and `exec` runs a file from `PATH`. Keep
+`POSIXLY_CORRECT=1` on a line of its own: bash reads the rest of that line
+before the mode changes. `-I` keeps `PYTHONPATH` and the user site from
+replacing a module that the checks import. To go on after the check, run it
+in a subshell (`( POSIXLY_CORRECT=1`, a new line, `exec python3 ... )`); to run
+a whole script, start it with `exec bash -p`, which takes no function from
+the environment.
 
 Names are environment variables. `IN_REF=ref` reads the variable `IN_REF` and
 calls it `ref` in the annotation. `--consequence "No request was sent."` adds
@@ -161,6 +174,22 @@ gives a false alert, not a missed one.
   the job is compromised, it cannot undo what that file did. Run the command
   with `python3 -I`, so that `PYTHONPATH` and the user site cannot replace its
   modules.
+- `environment` fires on every exported shell function (`BASH_FUNC_...`),
+  whatever its name: a runner that exports one on purpose cannot use this
+  check. The scripts here still call builtins such as `cd` before or after the
+  check; a function named `builtin` or `cd` runs first in a script that bash
+  started with those functions, and the check then reports it. Only a script
+  started with `bash -p`, as the actions here start theirs, runs none of them.
+- `environment` checks `PATH` in two ways. An empty or relative entry fires,
+  because it makes every command lookup depend on the current directory (not
+  on Windows, where entries are not POSIX paths). For each command named after
+  `environment` (`environment curl jq`), the first match on `PATH` must not be
+  inside `GITHUB_WORKSPACE`, links followed, because a pull request places files
+  there. Name the commands that carry your secrets. A command that is not named
+  is not checked, so a virtual environment in the workspace stays a supported
+  configuration: do not name `python3` when the job uses one. A planted command
+  outside the workspace, in a directory an earlier step added to `PATH`, is
+  not detected.
 - `environment` fires on `LD_PRELOAD` whatever it loads. A runner that preloads
   a library on purpose (an allocator, say) cannot use this check.
 - `oidc-claims` compares claims; it verifies no signature. The receiver does.
