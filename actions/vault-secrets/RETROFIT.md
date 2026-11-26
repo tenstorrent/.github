@@ -22,13 +22,15 @@ Stop and go to section 4 if the job is on the list there.
 
 ## 2. Map old to new
 
-The current release is `vault-secrets-v1.1.0`. The section [Releases](README.md#releases) of the README gives its commit. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+The current release is `vault-secrets-v1.1.0`. Pin its release tag:
+`@vault-secrets-v1.1.0`. The section [Releases](README.md#releases) of the
+README tells why this is safe.
 
 | Old | New |
 |---|---|
 | Step `Join tailnet` (`tailscale/github-action`) | Removed. The action joins when needed. |
 | Step `Wait for Vault` (curl loop) | Removed. The action waits. |
-| Step with `hashicorp/vault-action` | One step with `uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>`. |
+| Step with `hashicorp/vault-action` | One step with `uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0`. |
 | `role: <org>--<repo>` (the default role) | Remove `role`. The action uses the default role of the repository that runs the workflow. `role: <org>--<repo>` still works. |
 | `role: <org>--<repo>--<name>` | `role: <name>` (the short name). The full name still works. Do not change the role itself. |
 | `url`, `method`, `path`, `jwtGithubAudience` | Removed. The action sets them. |
@@ -124,7 +126,7 @@ steps:
 
   - name: Get secrets
     id: vault
-    uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+    uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
     with:
       github-token: lib-read
       secrets: |
@@ -149,7 +151,7 @@ path. The action does not add `github/token/`.
 ```yaml
 steps:
   - id: vault
-    uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+    uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
     with:
       role: nightly
       secrets: |
@@ -168,10 +170,10 @@ steps:
 1. Keep `permissions: id-token: write` at job level. List the other
    permissions the job needs. A job-level `permissions` block replaces the
    workflow-level block.
-2. Pin the action by full commit SHA. The commit must be on `main` of
-   `tenstorrent/.github`. GitHub also resolves a SHA from a fork, so check it:
-   `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`.
-   The status must be `identical` or `behind`.
+2. Pin the action by its release tag, for example `@vault-secrets-v1.1.0`.
+   Releases of this repository are immutable: a release tag cannot be moved or
+   deleted. Do not pin a branch such as `@main`. A workflow that already pins
+   the commit of a release still works and does not need a change.
 3. Put values in step-level `env:` only. Do not put
    `${{ steps.<id>.outputs.* }}` in `run:` text. Do not use job-level or
    workflow-level `env:` for values.
@@ -193,12 +195,12 @@ steps:
    ```yaml
    steps:
      - id: vault
-       uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+       uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
        with:
          github-token: lib-read
 
      - id: vault_deploy
-       uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+       uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
        with:
          role: deploy
          secrets: |
@@ -281,7 +283,7 @@ Use this checklist in the pull request description:
 ## vault-secrets retrofit
 
 - [ ] Copied Tailscale, wait and `vault-action` steps replaced by one `vault-secrets` step
-- [ ] Action pinned by full commit SHA that is on `main`
+- [ ] Action pinned by its release tag (`@vault-secrets-vX.Y.Z`), not a branch
 - [ ] `permissions: id-token: write` kept at job level; other permissions listed
 - [ ] Role, token names and secret paths unchanged
 - [ ] Values only in step-level `env:`

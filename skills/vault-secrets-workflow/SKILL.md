@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
 
       - id: vault
-        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha> # vault-secrets-v1.1.0
+        uses: tenstorrent/.github/actions/vault-secrets@vault-secrets-v1.1.0
         with:
           role: <role-short-name>
           github-token: <token-key>
@@ -88,8 +88,12 @@ jobs:
         run: ./other/tools/call-service.sh
 ```
 
-Pin the action by the full SHA of a commit on `main` of `tenstorrent/.github`.
-The current release is `vault-secrets-v1.1.0`. The section [Releases](../../actions/vault-secrets/README.md#releases) of the README gives its commit. Check that a commit is on `main` with `gh api repos/tenstorrent/.github/compare/main...<sha> --jq .status`. The status `identical` or `behind` means yes.
+Pin the action by its release tag. The current release is
+`vault-secrets-v1.1.0`. Releases of this repository are immutable: a release
+tag cannot be moved or deleted. Never pin a branch such as `@main`. The section
+[Releases](../../actions/vault-secrets/README.md#releases) of the README gives
+the details. A workflow that already pins the commit of a release still works
+and does not need a change.
 Remove `secrets:` if there is no other secret. Remove `github-token:` if there
 is no token. Remove `role:` if OSPO gave the default role `<org>--<repo>` of
 this repository. For a named workflow entry, the short name is enough, for
@@ -117,7 +121,7 @@ The role in the grant decides. The claims of the run must match it.
 
 1. Keep `permissions: id-token: write` at job level. List the other
    permissions the job needs.
-2. Pin the action by full commit SHA that is on `main`.
+2. Pin the action by its release tag (`@vault-secrets-vX.Y.Z`), not a branch.
 3. Put values in step-level `env:` only. Never put
    `${{ steps.<id>.outputs.* }}` in `run:` text.
 4. Never print a value.
@@ -169,7 +173,7 @@ names to try other values.
 - [ ] Questions in section 1 answered
 - [ ] OSPO ticket gave the role, token name and secret paths
 - [ ] No placeholder left in the workflow
-- [ ] Action pinned by full commit SHA on `main`
+- [ ] Action pinned by its release tag, not a branch
 - [ ] `id-token: write` and the other permissions set at job level
 - [ ] Values only in step-level `env:`
 - [ ] No value printed
