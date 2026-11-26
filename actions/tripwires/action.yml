@@ -45,7 +45,9 @@ runs:
         tripwires_python_names=python3
         . "$GITHUB_ACTION_PATH/trusted-python.sh"
         if [[ -z "$tripwires_python" ]]; then
-          echo "::error title=$TRIPWIRES_TITLE::this runner has no Python 3.9+ on PATH outside the workspace, so the tripwires cannot run. The step was stopped."
+          # A fixed title: the title input is not escaped here, and one with a
+          # line break or "::" would print a workflow command of its own.
+          echo "::error title=tripwires::this runner has no Python 3.9+ on PATH outside the workspace, so the tripwires cannot run. The step was stopped."
           exit 1
         fi
         exec "$tripwires_python" -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES

@@ -414,6 +414,14 @@ class CompositeStepTests(unittest.TestCase):
         self.assertIn("no Python 3.9+ on PATH outside the workspace", text)
         self.assertFalse(self.canary.exists())
 
+    def test_without_an_interpreter_the_title_input_is_not_printed(self):
+        title = "x::forged\n::add-mask::swallowed\n::error title=y"
+        code, text = self.run_step("no-option HOSTILE", PATH="ROOT/work/bin", TRIPWIRES_TITLE=title)
+        self.assertEqual(code, 1)
+        self.assertIn("::error title=tripwires::this runner has no Python 3.9+", text)
+        self.assertNotIn("forged", text)
+        self.assertNotIn("add-mask", text)
+
 
 def captured(function, *arguments, **keywords):
     stream = io.StringIO()
