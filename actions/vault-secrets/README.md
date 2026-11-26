@@ -322,7 +322,7 @@ one job.
 | Message | Cause | Action |
 |---|---|---|
 | `job needs permissions: id-token: write (not available on fork pull requests)` | The job has no OIDC token. | Add `id-token: write` to the job permissions. Fork pull requests never get it. |
-| `this runner has no curl` / `no jq` / `no python3` | A self-hosted runner without these tools. | Install bash, curl, jq and python3 on the runner. |
+| `this runner has no curl` / `no jq` | A self-hosted runner without these tools. | Install bash, curl and jq on the runner. |
 | `vault-secrets: checks could not run` (annotation title) | No Python 3.9 or newer on `PATH` outside the workspace. The message says which case: no Python at all, only one inside the workspace (a virtual environment, for example) or on a relative `PATH` entry, or one that is too old or does not start. The checks never run on an interpreter from the workspace. | Install Python 3.9 or newer on the runner, outside the workspace. |
 | `vault-secrets: input not supported` (annotation title) | A [tripwire](../tripwires/README.md#the-checks): the event is `pull_request_target`; `vault-url` names a host other than OSPO Vault; `role`, `github-token` or a Tailscale input starts with `-` or has a line break; the environment can run code in the action's scripts or print their secrets; `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token has the wrong issuer, audience or repository. The annotation names the input, never the value. | Use another event, remove `vault-url`, or correct the input. If you did not set this value, treat the run as compromised. |
 | `Vault gave an empty value for <NAME>` | The value stored in Vault is an empty string. | Ask the owner of the secret to store it again. |

@@ -23,7 +23,8 @@ fail() {
   exit 1
 }
 
-for tool in curl jq python3; do
+# No test for python3 here: the search below reports a missing interpreter.
+for tool in curl jq; do
   command -v "$tool" >/dev/null 2>&1 || fail "this runner has no $tool; the action needs bash, curl, jq and python3."
 done
 

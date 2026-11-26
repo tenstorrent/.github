@@ -155,6 +155,15 @@ for spelled in "$work/pr/bin" "$work/pr-link/bin"; do
   expect_trip "resource $option" IN_RESOURCE=-CANARY GITHUB_WORKSPACE="$work/pr" PATH="$spelled:$PATH"
 done
 [ ! -e "$work/fake-python-ran" ] && ok || bad "a python3 from the workspace ran in place of the checks"
+# Without Python the checks cannot run: the pinned title, in both modes.
+mkdir -p "$work/no-python-bin"
+ln -s "$(command -v bash)" "$work/no-python-bin/bash"
+for mode in fail warn; do
+  run IN_IF_NO_TOKEN="$mode" PATH="$work/no-python-bin"
+  if [ "$rc" -ne 1 ] || ! grep -q -x -F -- '::error title=hf-oidc-token: checks could not run::There is no Python on PATH. The checks need Python 3.9 or newer on PATH, outside the workspace.' "$work/log"; then
+    bad "[$mode] runner without python3: expected the annotation 'hf-oidc-token: checks could not run' (exit $rc)"
+  else ok; fi
+done
 expect_trip "GIT_TRACE_REDACT is off, so Git traces print credentials" GIT_TRACE_REDACT=false
 # A bash that a pull request placed in the workspace, first on PATH. This one
 # hands over to the real bash, so the check runs and reports it.

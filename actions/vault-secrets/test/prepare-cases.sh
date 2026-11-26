@@ -417,7 +417,18 @@ refuses_without_tool() {
 }
 refuses_without_tool jq
 refuses_without_tool curl
-refuses_without_tool python3
+# Without Python the checks cannot run: the pinned title, not the tool message.
+mkdir -p "$work/bin-no-python3"
+for tool in bash env od tr curl jq; do ln -sf "$(command -v "$tool")" "$work/bin-no-python3/$tool"; done
+run_env PATH="$work/bin-no-python3"
+if [ "$rc" -ne 1 ] || [ -s "$work/out" ] \
+  || ! grep -q -x -F -- '::error title=vault-secrets: checks could not run::There is no Python on PATH. The checks need Python 3.9 or newer on PATH, outside the workspace.' "$work/log"; then
+  echo "::error::runner without python3: expected the annotation 'vault-secrets: checks could not run'"
+  cat "$work/log"
+  status=1
+else
+  echo "ok: runner without python3"
+fi
 
 # Fails unless prepare.sh, with IN_VAULT_TIMEOUT=$1, writes vault-timeout=$2.
 timeout_is() {

@@ -79,7 +79,6 @@ trim() {
 #   request must go to GitHub.
 # Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
 # nor the OIDC request token.
-command -v python3 >/dev/null 2>&1 || fail "this runner has no python3; the action needs bash, curl, jq and python3."
 # The launch itself must not depend on a command that an exported shell
 # function can replace (env, python3, dirname): in POSIX mode bash finds unset,
 # export, exec and exit before any function, and exec runs a file from PATH.
