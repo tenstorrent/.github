@@ -121,8 +121,8 @@ runs:
     # 3.9+ the environment is not checked (the cachew steps then do not run
     # either); a github-server-url with the job's token is refused, since
     # nothing can check where the token would go.
-    - name: Check for a possible security compromise attempt
-      id: tripwires
+    - name: Check inputs
+      id: check
       shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         IN_GITHUB_SERVER_URL: ${{ inputs.github-server-url }}
@@ -132,12 +132,12 @@ runs:
         if [[ "$CACHEW_JOB_TOKEN" == true && -n "$IN_GITHUB_SERVER_URL" ]]; then
           origin_check="trusted-origin IN_GITHUB_SERVER_URL=github-server-url $GITHUB_SERVER_URL"
         fi
-        tripwires_python_names="python3 python"
+        trusted_python_names="python3 python"
         . "$GITHUB_ACTION_PATH/../tripwires/trusted-python.sh"
-        python="$tripwires_python"
+        python="$trusted_python"
         if [[ -z "$python" ]]; then
           if [[ -n "$origin_check" ]]; then
-            echo "::error title=cachew-checkout: tripwires could not run::github-server-url is set and the token is the job's own, but there is no Python 3.9+ to check where the token would go. The checkout was stopped."
+            echo "::error title=cachew-checkout: checks could not run::github-server-url is set with the job's own token, so where the token goes must be checked. $trusted_python_problem The checkout was stopped."
             exit 1
           fi
           exit 0
@@ -207,9 +207,9 @@ runs:
       # that the scripts import, before their own checks run.
       run: |
         # Not from the workspace, where a pull request could place python3.
-        tripwires_python_names=python3
+        trusted_python_names=python3
         . "$GITHUB_ACTION_PATH/../tripwires/trusted-python.sh"
-        python="$tripwires_python"
+        python="$trusted_python"
         session="${CACHEW_SESSION_DIR:-}"
         temp="$(builtin cd -P -- "$RUNNER_TEMP" 2>/dev/null && builtin pwd -P)" || temp=""
         name="${session#"$temp"/cachew-}"
@@ -259,12 +259,12 @@ runs:
     # An input that only makes sense as an attack (injection, path traversal, an
     # untrusted token destination) has no fallback: the scripts above already
     # posted the error annotation, and the job stops before any checkout.
-    - name: Stop on a possible security compromise attempt
+    - name: Stop on a refused input
       id: violation
       if: steps.session.outputs.security-violation == 'true' || steps.cachew.outputs.security-violation == 'true'
       shell: bash --noprofile --norc -p -e -o pipefail {0}
       run: |
-        echo "cachew-checkout refused an input that looks like a security compromise attempt; see the error annotation."
+        echo "cachew-checkout refused an input; see the error annotation."
         exit 1
     # Only when cachew did not produce the complete checkout: skipped session,
     # unsupported mode, existing checkout, or any cache or local failure.

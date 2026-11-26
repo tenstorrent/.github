@@ -150,7 +150,7 @@ The README lists every message in
 | Message | Cause | See README |
 |---|---|---|
 | `job needs permissions: id-token: write` | No `id-token: write`, or a fork pull request. | Failures |
-| `vault-secrets: possible security compromise attempt` | A tripwire: `pull_request_target`, a `vault-url` on another host, or an input that starts with `-`. | Failures |
+| `vault-secrets: input not supported` | A tripwire: `pull_request_target`, a `vault-url` on another host, or an input that starts with `-`. | Failures |
 | `Vault has no role ...` | Wrong role, or the grant is not applied. | Failures |
 | `This repository has no default Vault role` | `role` is empty, and the grant has no default role. | Failures |
 | `input role '...' is not a role of <repo>` | `role` names a role of another repository. | Failures |

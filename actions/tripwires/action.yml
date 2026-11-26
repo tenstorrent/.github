@@ -24,7 +24,7 @@ inputs:
 outputs:
   security-violation:
     description: true when a check fired (the step also fails), otherwise false.
-    value: ${{ steps.tripwires.outputs.security-violation }}
+    value: ${{ steps.check.outputs.security-violation }}
 runs:
   using: composite
   steps:
@@ -34,21 +34,21 @@ runs:
     # before the checks. trusted-python.sh finds the interpreter outside the
     # workspace, where a pull request could place a file named python3.
     # -I: PYTHONPATH and the user site cannot replace the modules the checks import.
-    - name: Check for a possible security compromise attempt
-      id: tripwires
+    - name: Check inputs
+      id: check
       shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         TRIPWIRES_CHECKS: ${{ inputs.checks }}
         TRIPWIRES_VALUES: ${{ inputs.values }}
         TRIPWIRES_TITLE: ${{ inputs.title }}
       run: |
-        tripwires_python_names=python3
+        trusted_python_names=python3
         . "$GITHUB_ACTION_PATH/trusted-python.sh"
-        if [[ -z "$tripwires_python" ]]; then
+        if [[ -z "$trusted_python" ]]; then
           # A fixed title, with the suffix that README.md pins under Alerting: the
           # title input is not escaped here, and one with a
           # line break or "::" would print a workflow command of its own.
-          echo "::error title=tripwires: tripwires could not run::this runner has no Python 3.9+ on PATH outside the workspace, so the tripwires cannot run. The step was stopped."
+          echo "::error title=tripwires: checks could not run::$trusted_python_problem The step was stopped."
           exit 1
         fi
-        exec "$tripwires_python" -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES
+        exec "$trusted_python" -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES

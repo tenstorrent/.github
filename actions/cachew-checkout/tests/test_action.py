@@ -108,8 +108,8 @@ class RunnerGateTests(unittest.TestCase):
         started = []
         for step in self.steps:
             condition = step.get("if")
-            if step.get("id") == "tripwires":
-                # The tripwires run first, on every runner, whatever the setting.
+            if step.get("id") == "check":
+                # The checks run first, on every runner, whatever the setting.
                 self.assertIsNone(condition)
                 self.assertIs(step, self.steps[0])
                 continue

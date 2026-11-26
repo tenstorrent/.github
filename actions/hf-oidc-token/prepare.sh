@@ -70,8 +70,8 @@ trim() {
 # workflow file of the default branch, so they can match the CI/CD identity.
 # But code or data from outside (a pull request, another workflow run) controls
 # them. Never a token: use schedule or workflow_dispatch.
-# The annotation is titled "hf-oidc-token: possible security compromise
-# attempt" and never shows the value. Also an error with if-no-token warn.
+# The annotation is titled "hf-oidc-token: input not supported" and never
+# shows the value. Also an error with if-no-token warn.
 # - The environment must not be prepared to run code in the action's scripts
 #   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
 #   function, tracing, a PATH that finds curl, jq or bash in the workspace, a
@@ -89,17 +89,17 @@ tripwires_here="${BASH_SOURCE[0]%/*}"
 [[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
 # The interpreter of the checks, never one from the workspace (see the file).
 # shellcheck disable=SC2034
-tripwires_python_names=python3
+trusted_python_names=python3
 # shellcheck source=/dev/null
 . "$tripwires_here/../tripwires/trusted-python.sh"
-[[ -n "$tripwires_python" ]] || { printf '::error title=%s: tripwires could not run::%s\n' hf-oidc-token 'this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks.'; exit 1; }
+[[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' hf-oidc-token "$trusted_python_problem"; exit 1; }
 tripwire_fired=""
 (
   POSIXLY_CORRECT=1
   unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
   export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
   export GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" IN_BRANCH="${IN_BRANCH:-}" IN_RESOURCE="${IN_RESOURCE:-}"
-  exec "$tripwires_python" -I "$tripwires_here/../tripwires/tripwires.py" \
+  exec "$trusted_python" -I "$tripwires_here/../tripwires/tripwires.py" \
     --title "$TITLE" --consequence "No token was requested."
 ) <<'EOF' || tripwire_fired=1
 event

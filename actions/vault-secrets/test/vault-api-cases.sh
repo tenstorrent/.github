@@ -836,7 +836,7 @@ swapped() {
   local title="$1" other
   other="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$2").swappedsignature0123456789"
   run_login FAKE_JWT="$other"
-  if [ "$rc" -ne 1 ] || ! printf '%s\n' "$log" | grep -q -x -F -- '::error title=vault-secrets: possible security compromise attempt::OIDC-token does not have the issuer, audience and repository this job asked for. The OIDC token was not sent to Vault. If this input is intentional, it is not supported; otherwise treat the workflow run as hostile.'; then
+  if [ "$rc" -ne 1 ] || ! printf '%s\n' "$log" | grep -q -x -F -- '::error title=vault-secrets: input not supported::OIDC-token does not have the issuer, audience and repository this job asked for. The OIDC token was not sent to Vault.'; then
     bad "tripwire: $title: expected the OIDC claims tripwire (exit $rc)"
   elif [ "$(login_count)" -ne 0 ] || grep -q -F -- "$other" "$work/body"; then
     bad "tripwire: $title: the swapped token went to Vault"

@@ -259,9 +259,9 @@ run on Python 3.10 or newer from `PATH`. Without it the action falls back to the
 plain checkout without changing the job. Once a session exists, later steps use
 the same interpreter (`CACHEW_PYTHON`), which the Git wrapper already depends on.
 It is the base interpreter's real file, so removing a virtual environment later
-in the job, linked or copied, does not remove it. A later checkout uses an
-inherited `CACHEW_PYTHON` only when the session recorded that path in its own
-directory; a value that an earlier step wrote to `GITHUB_ENV` is ignored.
+in the job, linked or copied, does not remove it. A later checkout ignores a
+`CACHEW_PYTHON` that the session did not record, such as one an earlier step
+wrote to `GITHUB_ENV`.
 A later checkout in the job removes cachew's rewrite and headers from the job's
 global file, keeping the job's own settings, and gives the official checkout a
 flattened throwaway copy of it. If the file cannot be changed (for example it is
@@ -293,10 +293,9 @@ ignores the image's own global configuration and cannot write a global one.
 
 ## Refused inputs
 
-Most unsupported inputs fall back to the standard checkout. A few only make
-sense as an attack and have no fallback: the action posts an error annotation
-titled `cachew-checkout: possible security compromise attempt` and fails before
-any checkout runs. They are:
+Most unsupported inputs fall back to the standard checkout. The inputs below
+have no fallback: the action posts an error annotation titled
+`cachew-checkout: input not supported` and fails before any checkout runs.
 
 - a `github-server-url` (or `cachew-url`) whose host contains shell or Git
   configuration metacharacters, whatever else the URL holds: the standard
@@ -312,33 +311,17 @@ any checkout runs. They are:
   or anything else beyond `<owner>/<name>`;
 - a `CACHEW_SESSION_DIR` that points outside the action's own session in
   `RUNNER_TEMP`;
-- a `github-server-url` on another server than the job's while `token` is the
-  job's own `github.token`: that token works nowhere else, so the checkout
-  would only hand it over. With the job's token, write the job's server as a
-  plain origin (`https://github.com`): a path, userinfo or another port is
-  refused too. This check runs on every runner, also when cachew is off and
-  only the standard checkout runs; it needs Python 3.9 or newer when
-  `github-server-url` is set. A checkout from another server passes its own
-  token;
-- an environment prepared to run code in the job's scripts or to print their
-  credentials: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an
-  exported shell function of any name, `SHELLOPTS` with `xtrace`, a `PS4`
-  that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`,
-  a `PATH` entry that is empty or relative, a `git` or `bash` that `PATH` finds
-  first inside the workspace (the first step checks these; the cachew session's
-  own Git wrapper is in `RUNNER_TEMP` and passes), or a certificate
-  variable (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` and their kin)
-  that names a file inside the workspace. Certificates anywhere else are the
-  job's own and stay in effect. This check is the first step of the
-  action on every runner that has Python 3.9 or newer, also when cachew is off
-  and only the standard checkout runs. Every step of the action starts bash in
-  privileged mode (`-p`), so a `BASH_ENV` file or an exported function does
-  not run in it before the check, and the check never runs on a `python3`
-  from the workspace.
+- a `github-server-url` other than the job's server while `token` is the
+  job's `github.token`, which works nowhere else. Write the job's server as a
+  plain origin (`https://github.com`). Another token may go to another server;
+- an environment that can run code in the job's scripts or print their
+  credentials (the `environment` check of the
+  [tripwires](../tripwires/README.md#the-checks), for `git` and `bash`).
 
-The checks that are not specific to cachew (the host, path, option and
-submodule URL checks, and the annotation) are the shared
-[tripwires](../tripwires/README.md), which other actions can use too.
+The last two checks run first, on every runner, even when cachew is off. They
+need Python 3.9 or newer. Without it the environment is not checked, and a
+`github-server-url` with the job's token is refused. The other checks are
+shared [tripwires](../tripwires/README.md) too.
 
 The annotation names the check, never the offending value. These checks run only
 where cachew runs (self-hosted Linux, or `cachew: true`) and, for every later
@@ -439,12 +422,12 @@ re-checking the cachew path against the new version's inputs, outputs and
 refusals (such as `allow-unsafe-pr-checkout`), and updating the version named
 at the top of this document.
 
-Everything runs from this action's own directory and from
-[`actions/tripwires`](../tripwires/README.md) next to it, which the same
-download of this repository holds, so a consumer's pin to this action is the
-only pin. Pin a full commit SHA of this repository. Everything
-except `README.md` and `tests/` reaches consumers only through their pin: the
-action's files and the tripwires run from the pinned commit, and consumers fetch `migrate.py` at
+Everything runs from this action's directory and from
+[`actions/tripwires`](../tripwires/README.md), which come in the same
+download, so a consumer's pin to this action is the only pin. Pin a full
+commit SHA of this repository. Everything except `README.md` and `tests/`
+reaches consumers only through their pin: these files run from the pinned
+commit, and consumers fetch `migrate.py` at
 that commit too. To release a change, merge it here, then re-pin consumers to a
 commit that contains it.
 

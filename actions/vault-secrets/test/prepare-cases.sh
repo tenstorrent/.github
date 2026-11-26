@@ -93,7 +93,7 @@ trips_with() {
     cat "$work/log"
     status=1
   elif [ "$(wc -l <"$work/log" | tr -d ' ')" -ne 1 ] \
-    || ! grep -q -x -F -- "::error title=vault-secrets: possible security compromise attempt::$want. No request was sent to Vault. If this input is intentional, it is not supported; otherwise treat the workflow run as hostile." "$work/log"; then
+    || ! grep -q -x -F -- "::error title=vault-secrets: input not supported::$want. No request was sent to Vault." "$work/log"; then
     echo "::error::$title: expected one tripwire annotation with '$want'"
     cat "$work/log"
     status=1
@@ -245,7 +245,7 @@ for url in https://VAULT-OSPO.eng-svc.aws.tenstorrent.com https://vault-ospo.eng
 done
 # Two tripwires give two annotations.
 run_env EVENT_NAME=pull_request_target IN_ROLE=-x
-if [ "$rc" -ne 1 ] || [ "$(grep -c -F -- '::error title=vault-secrets: possible security compromise attempt::' "$work/log")" -ne 2 ]; then
+if [ "$rc" -ne 1 ] || [ "$(grep -c -F -- '::error title=vault-secrets: input not supported::' "$work/log")" -ne 2 ]; then
   echo "::error::two tripwires: expected exit 1 and two annotations"
   cat "$work/log"
   status=1

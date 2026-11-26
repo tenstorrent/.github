@@ -28,8 +28,8 @@ for tool in curl jq python3; do
 done
 
 # Tripwires (../tripwires/README.md): values that only make sense as an attack.
-# No fallback and no hint: the annotation is titled "vault-secrets: possible
-# security compromise attempt" and never shows the value.
+# No fallback: the annotation is titled "vault-secrets: input not supported"
+# and never shows the value.
 # - pull_request_target runs with base-branch rights on untrusted pull request
 #   code. Use pull_request, push, workflow_dispatch or schedule.
 # - The action sends the OIDC token of the job to vault-url. Only OSPO Vault
@@ -58,10 +58,10 @@ tripwires_here="${BASH_SOURCE[0]%/*}"
 [[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
 # The interpreter of the checks, never one from the workspace (see the file).
 # shellcheck disable=SC2034
-tripwires_python_names=python3
+trusted_python_names=python3
 # shellcheck source=/dev/null
 . "$tripwires_here/../tripwires/trusted-python.sh"
-[[ -n "$tripwires_python" ]] || { printf '::error title=%s: tripwires could not run::%s\n' vault-secrets 'this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks.'; exit 1; }
+[[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' vault-secrets "$trusted_python_problem"; exit 1; }
 [[ "$tripwires_here" == /* ]] || tripwires_here="$PWD/$tripwires_here"
 oidc_check='oidc-url       ACTIONS_ID_TOKEN_REQUEST_URL'
 fixture_url="$tripwires_here/test/proxy/oidc-request-url"
@@ -80,7 +80,7 @@ tripwire_fired=""
   export IN_VAULT_URL="${IN_VAULT_URL:-}" IN_ROLE="${IN_ROLE:-}" IN_GITHUB_TOKEN="${IN_GITHUB_TOKEN:-}"
   export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
   export IN_TS_CLIENT_ID="${IN_TS_CLIENT_ID:-}" IN_TS_AUDIENCE="${IN_TS_AUDIENCE:-}" IN_TS_TAGS="${IN_TS_TAGS:-}"
-  exec "$tripwires_python" -I "$tripwires_here/../tripwires/tripwires.py" \
+  exec "$trusted_python" -I "$tripwires_here/../tripwires/tripwires.py" \
     --title vault-secrets --consequence "No request was sent to Vault."
 ) <<EOF || tripwire_fired=1
 # workflow_run is allowed on purpose (README, "Security notes")

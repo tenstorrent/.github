@@ -477,7 +477,7 @@ class CompositeStepTests(unittest.TestCase):
 
     ACTION = Path(tripwires.__file__).resolve().parent / "action.yml"
 
-    def run_step(self, checks, **environ):
+    def run_step(self, checks, prepare=None, **environ):
         text = self.ACTION.read_text()
         shell = re.search(r"^      shell: (.+)$", text, re.M)[1]
         body = text.split("      run: |\n", 1)[1]
@@ -493,6 +493,8 @@ class CompositeStepTests(unittest.TestCase):
         fake.write_text(f"#!/bin/sh\necho python >>'{self.canary}'\nexit 0\n")
         fake.chmod(0o755)
         (self.root / "alias").symlink_to(self.root / "work")
+        if prepare:
+            prepare(self.root)
         environment = {
             "PATH": os.environ["PATH"],
             "GITHUB_ACTION_PATH": str(self.ACTION.parent),
@@ -531,14 +533,34 @@ class CompositeStepTests(unittest.TestCase):
     def test_without_another_interpreter_the_step_fails(self):
         code, text = self.run_step("no-option HOSTILE", PATH="ROOT/work/bin")
         self.assertEqual(code, 1)
-        self.assertIn("no Python 3.9+ on PATH outside the workspace", text)
+        self.assertIn("The only Python on PATH is inside the workspace. The checks need Python 3.9 or newer", text)
         self.assertFalse(self.canary.exists())
+
+    def test_the_message_names_why_no_interpreter_was_found(self):
+        def prepare(root):
+            for directory, status in (("old/bin", 1), ("rel/bin", 0)):
+                path = root / directory / "python3"
+                path.parent.mkdir(parents=True)
+                path.write_text(f"#!/bin/sh\nexit {status}\n")
+                path.chmod(0o755)
+
+        older = "Python on PATH outside the workspace is older than 3.9 or does not start."
+        for path, reason in (
+            ("ROOT/missing", "There is no Python on PATH."),
+            ("ROOT/old/bin", older),
+            ("ROOT/work/bin:ROOT/old/bin", older),
+            ("../rel/bin", "The only Python on PATH is in a relative PATH entry."),
+        ):
+            with self.subTest(path=path):
+                code, text = self.run_step("no-option HOSTILE", prepare, PATH=path)
+                self.assertEqual(code, 1)
+                self.assertIn(f"checks could not run::{reason} The checks need Python 3.9 or newer", text)
 
     def test_without_an_interpreter_the_title_input_is_not_printed(self):
         title = "x::forged\n::add-mask::swallowed\n::error title=y"
         code, text = self.run_step("no-option HOSTILE", PATH="ROOT/work/bin", TRIPWIRES_TITLE=title)
         self.assertEqual(code, 1)
-        self.assertIn("::error title=tripwires: tripwires could not run::this runner has no Python 3.9+", text)
+        self.assertIn("::error title=tripwires: checks could not run::The only Python on PATH is inside the workspace.", text)
         self.assertNotIn("forged", text)
         self.assertNotIn("add-mask", text)
 
@@ -555,20 +577,19 @@ class Reporting(unittest.TestCase):
         _, text = captured(tripwires.report, "my-action", Violation("ref starts with '-'"), "Nothing ran.")
         self.assertEqual(
             text,
-            "::error title=my-action: possible security compromise attempt::ref starts with '-'. Nothing ran. "
-            "If this input is intentional, it is not supported; otherwise treat the workflow run as hostile.\n",
+            "::error title=my-action: input not supported::ref starts with '-'. Nothing ran.\n",
         )
         _, text = captured(tripwires.report, "a,b::c\n::warning::x", Violation("50%\r\n::add-mask::x"))
         self.assertEqual(text.count("\n"), 1)
-        self.assertTrue(text.startswith("::error title=a%2Cb%3A%3Ac%0A%3A%3Awarning%3A%3Ax: possible"))
+        self.assertTrue(text.startswith("::error title=a%2Cb%3A%3Ac%0A%3A%3Awarning%3A%3Ax: input not supported::"))
         self.assertIn("50%25%0D%0A::add-mask::x. ", text)
 
     def test_the_title_suffix_is_the_alerting_contract(self):
         # Receivers outside the job match this text (README.md, "Alerting").
-        self.assertEqual(tripwires.ANNOTATION_SUFFIX, ": possible security compromise attempt")
+        self.assertEqual(tripwires.ANNOTATION_SUFFIX, ": input not supported")
         # A title cannot forge or split the suffix: its own ':' is escaped.
-        _, text = captured(tripwires.report, "x: possible security compromise attempt", Violation("m"))
-        self.assertEqual(text.count(": possible security compromise attempt::"), 1)
+        _, text = captured(tripwires.report, "x: input not supported", Violation("m"))
+        self.assertEqual(text.count(": input not supported::"), 1)
 
     def test_mask_escapes_line_breaks_and_skips_nothing(self):
         self.assertEqual(captured(tripwires.mask, "a%b\nc")[1], "::add-mask::a%25b%0Ac\n")
@@ -631,7 +652,7 @@ class CommandLine(unittest.TestCase):
         lines = text.splitlines()
         self.assertEqual(len(lines), 5)
         for line, start in zip(lines, ("ref starts with '-'", "ref contains shell", "path is outside", "url is not a trusted", "the workflow runs on pull_request_target")):
-            self.assertTrue(line.startswith("::error title=my-action: possible security compromise attempt::" + start), line)
+            self.assertTrue(line.startswith("::error title=my-action: input not supported::" + start), line)
         self.assertNotIn("CANARY", text)
         self.assertRegex(output, r"^security-violation<<(\S+)\ntrue\n\1\n$")
 
@@ -665,7 +686,7 @@ class CommandLine(unittest.TestCase):
                 tripwires.main, ["--checks-env", "CHECKS", "--consequence", "Nothing was sent."], environ
             )
         self.assertEqual(code, 1)
-        self.assertIn("as a command-line option. Nothing was sent. If this input", text)
+        self.assertIn("as a command-line option. Nothing was sent.\n", text)
 
     def test_the_environment_and_oidc_checks_run_from_the_command(self):
         good = token({"iss": tripwires.OIDC_ISSUER, "aud": "https://hf.example", "repository": "o/n"})
@@ -718,7 +739,7 @@ class CommandLine(unittest.TestCase):
             with self.subTest(name):
                 code, text, output = self.run_main(spec, values, environ)
                 self.assertEqual(code, 2)
-                self.assertTrue(text.startswith("::error title=unit: tripwires could not run::"), text)
+                self.assertTrue(text.startswith("::error title=unit: checks could not run::"), text)
                 self.assertEqual(output, "")
 
     def test_an_error_in_a_check_fails_closed_without_its_message(self):
@@ -728,7 +749,7 @@ class CommandLine(unittest.TestCase):
         with mock.patch.dict(tripwires.CHECKS, {"no-option": (broken, False)}):
             code, text, output = self.run_main("no-option ref", {"ref": "main"})
         self.assertEqual(code, 2)
-        self.assertTrue(text.startswith("::error title=unit: tripwires could not run::internal error"), text)
+        self.assertTrue(text.startswith("::error title=unit: checks could not run::internal error"), text)
         self.assertIn("RuntimeError", text)
         self.assertNotIn("secret-value", text)
         self.assertEqual(output, "")

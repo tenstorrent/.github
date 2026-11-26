@@ -76,7 +76,7 @@ expect_trip() {
     run IN_IF_NO_TOKEN="$m" "$@"
     if [ "$rc" -ne 1 ]; then bad "[$m] tripwire $want: expected exit 1, got $rc"; continue; fi
     [ "$(wc -l <"$work/log" | tr -d ' ')" -eq 1 ] || { bad "[$m] tripwire $want: expected one line"; continue; }
-    grep -q -x -F -- "::error title=hf-oidc-token: possible security compromise attempt::$want. No token was requested. If this input is intentional, it is not supported; otherwise treat the workflow run as hostile." "$work/log" \
+    grep -q -x -F -- "::error title=hf-oidc-token: input not supported::$want. No token was requested." "$work/log" \
       || { bad "[$m] tripwire $want: annotation is not as expected"; continue; }
     ! grep -q CANARY "$work/log" || { bad "[$m] tripwire $want: the annotation shows the value"; continue; }
     [ ! -s "$work/out" ] || { bad "[$m] tripwire $want: outputs after a tripwire"; continue; }
@@ -143,7 +143,7 @@ chmod +x "$work/ws/bin/curl"
 expect_trip "the first curl on PATH is inside the workspace, where a pull request can place it" \
   GITHUB_WORKSPACE="$work/ws" PATH="$work/ws/bin:$PATH"
 run GITHUB_WORKSPACE="$work/elsewhere" PATH="$work/ws/bin:$PATH"
-grep -q 'possible security compromise attempt' "$work/log" && bad "a curl outside the workspace must pass the tripwire" || ok
+grep -q ': input not supported::' "$work/log" && bad "a curl outside the workspace must pass the tripwire" || ok
 # A python3 that a pull request placed in the workspace, first on PATH, must
 # not stand in for the checks: it never runs, and the real checks still fire.
 # The same for another spelling of the workspace (a link to it).

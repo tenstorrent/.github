@@ -1303,7 +1303,7 @@ class SessionTests(unittest.TestCase):
                 outputs = fixtures.runner_file(self.fixture.root / "output")
                 self.assertEqual(outputs["ready"], "false")
                 self.assertEqual(outputs.get("security-violation"), "true")
-                self.assertIn("::error title=cachew-checkout: possible security", result.stdout)
+                self.assertIn("::error title=cachew-checkout: input not supported::", result.stdout)
 
     def test_an_untrusted_https_cache_origin_is_reported_as_a_security_violation(self):
         for url, violation in (("https://evil.example", "true"), ("http://10.43.0.100:8080", None)):
@@ -1313,7 +1313,7 @@ class SessionTests(unittest.TestCase):
                 outputs = fixtures.runner_file(self.fixture.root / "output")
                 self.assertEqual(outputs["ready"], "false")
                 self.assertEqual(outputs.get("security-violation"), violation)
-                self.assertEqual("::error title=cachew-checkout: possible security" in result.stdout, bool(violation))
+                self.assertEqual("::error title=cachew-checkout: input not supported::" in result.stdout, bool(violation))
                 self.assertEqual(list(self.fixture.runtime.glob("cachew-*")), [])
 
     def test_a_redirected_session_directory_is_reported_as_a_security_violation(self):
@@ -1325,7 +1325,7 @@ class SessionTests(unittest.TestCase):
         outputs = fixtures.runner_file(self.fixture.root / "output")
         self.assertEqual(outputs["security-violation"], "true")
         self.assertEqual(outputs["ready"], "false")
-        self.assertIn("::error title=cachew-checkout: possible security", result.stdout)
+        self.assertIn("::error title=cachew-checkout: input not supported::", result.stdout)
         self.assertEqual(list(elsewhere.iterdir()), [])
         self.finish()
 

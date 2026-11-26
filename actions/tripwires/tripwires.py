@@ -75,11 +75,11 @@ def mask(value):
 # The end of every tripwire annotation's title. It is a contract: alerting
 # outside the job (README.md, "Alerting") finds a tripped tripwire by it, so it
 # never changes and nothing else uses it.
-ANNOTATION_SUFFIX = ": possible security compromise attempt"
+ANNOTATION_SUFFIX = ": input not supported"
 # The title suffix when the checks could not run at all (no interpreter, a
 # check line that is wrong, an error in this file). Also a contract: the shell
 # fallbacks of the actions print it as text, since they have no Python.
-CANNOT_RUN_SUFFIX = ": tripwires could not run"
+CANNOT_RUN_SUFFIX = ": checks could not run"
 
 
 def report(title, error, consequence="The step was stopped."):
@@ -87,10 +87,7 @@ def report(title, error, consequence="The step was stopped."):
     consequence says what did not happen (for example, that there was no fallback)."""
     print(
         f"::error title={escape_property(title)}{ANNOTATION_SUFFIX}::"
-        + escape_data(
-            f"{error}. {consequence} "
-            "If this input is intentional, it is not supported; otherwise treat the workflow run as hostile."
-        ),
+        + escape_data(f"{error}. {consequence}"),
         flush=True,
     )
 

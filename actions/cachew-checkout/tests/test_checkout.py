@@ -837,7 +837,7 @@ class CheckoutTests(unittest.TestCase):
             cachew_checkout.main()
         outputs = runner_file(self.root / "output")
         reported = outputs["security-violation"] == "true"
-        annotated = "::error title=cachew-checkout: possible security compromise attempt::" in capture.getvalue()
+        annotated = "::error title=cachew-checkout: input not supported::" in capture.getvalue()
         self.assertEqual(reported, annotated)
         if reported:
             self.assertEqual(outputs["checked-out"], "false")

@@ -323,8 +323,8 @@ one job.
 |---|---|---|
 | `job needs permissions: id-token: write (not available on fork pull requests)` | The job has no OIDC token. | Add `id-token: write` to the job permissions. Fork pull requests never get it. |
 | `this runner has no curl` / `no jq` / `no python3` | A self-hosted runner without these tools. | Install bash, curl, jq and python3 on the runner. |
-| `this runner has python3 only inside the workspace` | The only `python3` on `PATH` is in the checked-out repository (a virtual environment there, for example). The checks never run on an interpreter from the workspace, where a pull request can place one. | Install Python 3.9 or newer on the runner, outside the workspace. |
-| `vault-secrets: possible security compromise attempt` (annotation title) | A [tripwire](../tripwires/README.md): the workflow runs on `pull_request_target`; or `vault-url` names another host than OSPO Vault, which would have received the OIDC token of the job; or `role`, `github-token` or a Tailscale input starts with `-` or holds a line break; or the environment is prepared to run code in the action's scripts or print their secrets (`BASH_ENV`, `LD_PRELOAD`, any exported shell function, a `PATH` entry that is empty or relative, a `curl`, `jq`, `tailscale` or `bash` that `PATH` finds first inside the workspace, a certificate variable such as `CURL_CA_BUNDLE` that names a file inside the workspace, `SHELLOPTS` with `xtrace`, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`); or `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token that came back has another issuer, audience or repository than this job asked for, or is not in the form of a JWT. The annotation names the input, never the value. | Use another event (Vault never accepts `pull_request_target`), remove `vault-url`, or correct the input. If you did not write this value, treat the run as hostile. |
+| `vault-secrets: checks could not run` (annotation title) | No Python 3.9 or newer on `PATH` outside the workspace. The message says which case: no Python at all, only one inside the workspace (a virtual environment, for example) or on a relative `PATH` entry, or one that is too old or does not start. The checks never run on an interpreter from the workspace. | Install Python 3.9 or newer on the runner, outside the workspace. |
+| `vault-secrets: input not supported` (annotation title) | A [tripwire](../tripwires/README.md#the-checks): the event is `pull_request_target`; `vault-url` names a host other than OSPO Vault; `role`, `github-token` or a Tailscale input starts with `-` or has a line break; the environment can run code in the action's scripts or print their secrets; `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token has the wrong issuer, audience or repository. The annotation names the input, never the value. | Use another event, remove `vault-url`, or correct the input. If you did not set this value, treat the run as compromised. |
 | `Vault gave an empty value for <NAME>` | The value stored in Vault is an empty string. | Ask the owner of the secret to store it again. |
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role has characters ...` / `input role '...' is not a role of <repo>` | `role` is not valid, or it is a role of another repository. | Use the short name of your workflow entry, or leave `role` empty for the default role. |
@@ -339,7 +339,7 @@ one job.
 | `input github-token '...' is not a token of <repo>` | `github-token` is the name of a token of another repository. A role gets only tokens of its own repository. | Use the key of a token in your grant. |
 | `Role ... has no grant for GitHub token set ...` | Vault refused the token set in every place where a token can be. The role has no grant for it, the key is wrong, or the grant is not applied yet. | Check the key in `github_tokens` of your workflow entry in your grant. |
 | `Vault did not answer the read of GitHub token set ...` / `Vault refused the read of GitHub token set ...` | A stalled network connection, or a Vault error other than "permission denied". | Run the job again. If it occurs again, report it to OSPO. |
-| `input vault-url is not an OSPO Vault URL` | `vault-url` names OSPO Vault in a spelling the action does not use (upper case, a port). Another host is a tripwire, above. | Remove `vault-url` to use the default. |
+| `input vault-url is not an OSPO Vault URL` | `vault-url` spells the OSPO Vault host in a form the action does not accept, such as upper case or a port. Any other host is a tripwire (above). | Remove `vault-url` to use the default. |
 | `input join-tailnet must be auto, true or false` | Wrong value. | Use `auto`, `true` or `false`. |
 | `input network-mode must be kernel or userspace` | Wrong value (release 1.2). | Use `kernel` or `userspace`, in lower case, or remove the input. |
 | `input network-mode userspace needs a Linux runner` | `userspace` on a macOS or Windows runner. | Remove `network-mode`. |
@@ -354,10 +354,9 @@ one job.
 
 ## Security notes
 
-- The action protects its own requests. It cannot protect a job that also runs
-  untrusted code: every step of a job with `id-token: write` can ask for the
-  OIDC token and log in to Vault itself. Read secrets in a job that runs no
-  code from a pull request. See
+- The action cannot protect a job that also runs untrusted code: any step of
+  a job with `id-token: write` can request the OIDC token and log in to Vault.
+  Read secrets only in a job that runs no code from a pull request. See
   [Keep untrusted code and secrets in different jobs](../tripwires/README.md#keep-untrusted-code-and-secrets-in-different-jobs).
 - Inputs reach the shell only through `env:`.
 - The action does not export values to the job environment (`exportEnv: false`).
@@ -372,13 +371,10 @@ one job.
   never reads it a second time. Each refused try is a `permission denied`
   entry in the Vault audit log. The role needs no access that it does not
   already have.
-- The action refuses `pull_request_target`. It does not refuse `workflow_run`:
-  workflows that run after another workflow read their secrets with it. A
-  `workflow_run` workflow runs on the default branch with the repository's
-  secrets, and a pull request from a fork can start the first workflow. So a
-  job that uses this action on `workflow_run` must not check out the head of
-  the first run, run its code, or run or trust its artifacts. The action
-  cannot see whether the job does.
+- The action refuses `pull_request_target` but allows `workflow_run`, which
+  runs with the repository's secrets and can follow a fork's pull request. A
+  `workflow_run` job that uses this action must not check out, run or trust
+  anything from the first run. The action cannot check this.
 - Pin this action by full commit SHA from `main` of `tenstorrent/.github`.
   Check that the commit is on `main`: GitHub also resolves a SHA from a fork.
 

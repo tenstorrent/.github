@@ -194,13 +194,13 @@ Checks before the exchange (step `prepare`):
 | `the action gives a token only for the events schedule and workflow_dispatch.` | The run came from another event, for example `pull_request` or `push`. | Run it from a schedule or by "Run workflow". |
 | `the action gives a token only on branch <branch> (input branch).` | The run is on another branch or a tag. | Run it on the branch of the identity. |
 | `branch <branch> has no branch protection or ruleset (GITHUB_REF_PROTECTED is '<value>').` | No branch protection and no ruleset applies to the branch. An empty value counts as not protected. | Run the workflow on a protected branch (normally `main`), or ask the repository admins to protect the branch. The identity must name a protected branch. |
-| `hf-oidc-token: possible security compromise attempt` (annotation title) | A [tripwire](../tripwires/README.md): the run is on `pull_request_target` or `workflow_run`, which outside code can start; or `branch` or `resource` starts with `-` or holds a line break; or the environment is prepared to run code in the action's scripts or print their secrets (`BASH_ENV`, `LD_PRELOAD`, any exported shell function, a `PATH` entry that is empty or relative, a `curl`, `jq` or `bash` that `PATH` finds first inside the workspace, a certificate variable such as `CURL_CA_BUNDLE` that names a file inside the workspace, `SHELLOPTS` with `xtrace`, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`); or `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token that came back has another issuer, audience or repository than this job asked for, or is not in the form of a JWT. The annotation names the input, never the value. Always an error. | Remove the trigger, or correct the input. If you did not write this value, treat the run as hostile. |
+| `hf-oidc-token: input not supported` (annotation title) | A [tripwire](../tripwires/README.md#the-checks): the event is `pull_request_target` or `workflow_run`; `branch` or `resource` starts with `-` or has a line break; the environment can run code in the action's scripts or print their secrets; `ACTIONS_ID_TOKEN_REQUEST_URL` is not a GitHub host; or the OIDC token has the wrong issuer, audience or repository. The annotation names the input, never the value. | Remove the trigger or correct the input. If you did not set this value, treat the run as compromised. |
 | `the job has no OIDC token.` | No `id-token: write` on the job. | Add it to the job's `permissions:`. |
 | `input resource '<value>' has a '/'.` / `input resource is not a valid Hugging Face user name.` | `resource` is a repository name or has other characters. Always an error. | Pass `vars.HF_OIDC_RESOURCE`. |
 | `input models: '<value>' is not a Hugging Face repository name.` / `input models has more than 50 repositories.` | A bad entry in `models`. Always an error. | Use `<owner>/<name>` or `datasets/<owner>/<name>`. |
 | `input branch is not a valid branch name.` / `input if-no-token must be fail or warn.` | A bad input value. Always an error. | Correct the value. |
 | `this runner has no curl` / `this runner has no jq` / `this runner has no python3` | The runner lacks a tool. Always an error. | Install it, or use another runner. |
-| `this runner has python3 only inside the workspace` | The only `python3` on `PATH` is in the checked-out repository (a virtual environment there, for example). The checks never run on an interpreter from the workspace, where a pull request can place one. | Install Python 3.9 or newer on the runner, outside the workspace. |
+| `hf-oidc-token: checks could not run` (annotation title) | No Python 3.9 or newer on `PATH` outside the workspace. The message says which case: no Python at all, only one inside the workspace (a virtual environment, for example) or on a relative `PATH` entry, or one that is too old or does not start. The checks never run on an interpreter from the workspace. | Install Python 3.9 or newer on the runner, outside the workspace. |
 
 Exchange (step `exchange`):
 
@@ -225,12 +225,11 @@ Never paste a token into a ticket. In the log, a token shows as `***`.
 
 ## How the exchange works
 
-The exchange uses `curl` and `jq` only. The action does not install Python
-packages: no package code runs while the OIDC request variables are in the
-step. The first step runs the shared [tripwires](../tripwires/README.md) with
-`python3 -I` (standard library only, from the same pinned commit), without the
-OIDC request token in its environment. The exchange step runs them once more,
-on the claims of the OIDC token, before it sends the token.
+The exchange uses only `curl` and `jq`. The action installs no Python
+packages, so no package code runs while the OIDC request variables are set.
+The first step runs the [tripwires](../tripwires/README.md) with `python3 -I`
+and without the OIDC request token. The exchange step checks the OIDC token's
+claims before it sends the token.
 
 1. `GET $ACTIONS_ID_TOKEN_REQUEST_URL&audience=https%3A%2F%2Fhuggingface.co`
    with header `Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN`.
@@ -268,9 +267,8 @@ Each `curl` call starts with `-q`, so curl reads no `.curlrc` (a file on the
 runner could trace headers or change the target). curl still uses the proxy
 variables of the runner (`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`) and its CA
 settings (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`): whoever controls the runner
-environment controls these. One case is refused: a CA setting that names a
-file inside the workspace, where a pull request can place it (a
-[tripwire](../tripwires/README.md)). The action never asks curl to read `.netrc`.
+environment controls these. A CA setting that names a file inside the
+workspace is refused. The action never asks curl to read `.netrc`.
 
 The action gives a token only on a protected branch (`GITHUB_REF_PROTECTED`
 is `true`). GitHub sets it for branch protection and for rulesets. The
@@ -322,10 +320,9 @@ Options:
 
 ## Limits
 
-- The action protects its own requests. It cannot protect a job that also runs
-  untrusted code: every step of a job with `id-token: write` can ask for the
-  OIDC token and exchange it itself. Use the action in a job that runs no code
-  from a pull request. See
+- The action cannot protect a job that also runs untrusted code: any step of
+  a job with `id-token: write` can request the OIDC token and exchange it.
+  Use the action only in a job that runs no code from a pull request. See
   [Keep untrusted code and secrets in different jobs](../tripwires/README.md#keep-untrusted-code-and-secrets-in-different-jobs).
 - Token life: 60 minutes from the exchange. No refresh.
 - Read-only. Gated public repositories only. No private repositories. No
