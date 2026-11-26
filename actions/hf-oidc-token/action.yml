@@ -102,7 +102,12 @@ runs:
       # function or SHELLOPTS from the environment, so nothing an earlier step
       # of the job exported runs before the tripwires do. Plain `shell: bash`
       # reads BASH_ENV before the first line of the step.
-      run: bash -p "$GITHUB_ACTION_PATH/prepare.sh"
+      # "$BASH" is the shell that the runner started for this step. A plain
+      # `bash` would be looked up again, on a PATH that an earlier step can set
+      # through GITHUB_ENV, and the runner does not use that PATH for its own
+      # lookup: a file named bash in the workspace would run in place of the
+      # script, before any check.
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/prepare.sh"'
 
     # Masks the OIDC token and the Hugging Face token at once. The Hugging Face
     # token goes to the step output token, which only the models step and the
@@ -114,7 +119,7 @@ runs:
       env:
         RESOURCE: ${{ steps.prepare.outputs.resource }}
         MODE: ${{ steps.prepare.outputs.mode }}
-      run: bash -p "$GITHUB_ACTION_PATH/exchange.sh"
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/exchange.sh"'
 
     - name: Check access to models
       id: models
@@ -125,4 +130,4 @@ runs:
         MODELS: ${{ steps.prepare.outputs.models }}
         MODE: ${{ steps.prepare.outputs.mode }}
         RESOURCE: ${{ steps.prepare.outputs.resource }}
-      run: bash -p "$GITHUB_ACTION_PATH/check-models.sh"
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/check-models.sh"'

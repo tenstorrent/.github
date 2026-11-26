@@ -108,7 +108,8 @@ runs:
     # - The environment must not be prepared to run code in the steps below or
     #   to print their credentials (BASH_ENV, LD_PRELOAD, any exported shell
     #   function, tracing, a PATH entry that means the current directory, a git
-    #   that PATH finds inside the workspace).
+    #   or bash that PATH finds inside the workspace, a library of theirs or a
+    #   certificate file inside the workspace).
     # - The job's own token goes to the job's server only, written as a plain
     #   origin. contains(), not ==: checkout trims the input, an expression
     #   cannot.
@@ -144,7 +145,7 @@ runs:
         unset GITHUB_OUTPUT
         exec "$python" -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title cachew-checkout \
           --consequence "The checkout was stopped without falling back to the standard checkout." <<EOF
-        environment git
+        environment git bash
         $origin_check
         EOF
     # Expressions cannot trim, so the cachew input and CACHEW_CHECKOUT are read

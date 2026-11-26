@@ -39,6 +39,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
+import subprocess
 import sys
 import urllib.parse
 import uuid
@@ -308,6 +310,103 @@ def oidc_claims(token, audience, repository, what="OIDC token", issuer=OIDC_ISSU
 
 FALSE_VALUES = ("0", "false", "no", "off")
 
+# Variables that name the certificates a client trusts: curl, OpenSSL (and with
+# it Python and Git), Git, Node, Python requests.
+TRUST_STORES = (
+    "CURL_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "GIT_SSL_CAINFO",
+    "GIT_SSL_CAPATH",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+)
+
+
+def below(root, place):
+    """Whether place is root or below it. root has every link followed; place
+    is read as written, with every link followed, and in its directory with
+    every link followed: another spelling of root (/proc/self/cwd, a link) is
+    still root. A relative place is read from root."""
+    place = os.path.join(root, place)
+    return any(
+        os.path.splitdrive(spelling)[0] == os.path.splitdrive(root)[0] and os.path.commonpath([root, spelling]) == root
+        for spelling in (
+            os.path.abspath(place),
+            os.path.realpath(place),
+            os.path.join(os.path.realpath(os.path.dirname(place)), os.path.basename(place)),
+        )
+    )
+
+
+def elf_interpreter(program):
+    """The dynamic loader an ELF program names (PT_INTERP), or None for a
+    script, a static program or a file that cannot be read."""
+    try:
+        with open(program, "rb") as stream:
+            head = stream.read(64)
+            if len(head) < 52 or head[:4] != b"\x7fELF" or head[4] not in (1, 2) or head[5] not in (1, 2):
+                return None
+            wide, order = head[4] == 2, "<" if head[5] == 1 else ">"
+            (offset,) = struct.unpack_from(order + ("Q" if wide else "I"), head, 32 if wide else 28)
+            size, count = struct.unpack_from(order + "HH", head, 54 if wide else 42)
+            for index in range(min(count, 128)):
+                stream.seek(offset + index * size)
+                entry = stream.read(size)
+                if len(entry) < (56 if wide else 32) or struct.unpack_from(order + "I", entry)[0] != 3:
+                    continue
+                if wide:
+                    at, length = struct.unpack_from(order + "Q", entry, 8)[0], struct.unpack_from(order + "Q", entry, 32)[0]
+                else:
+                    at, length = struct.unpack_from(order + "I", entry, 4)[0], struct.unpack_from(order + "I", entry, 16)[0]
+                stream.seek(at)
+                return stream.read(min(length, 4096)).split(b"\0", 1)[0].decode("utf-8", "replace") or None
+    except (OSError, struct.error):
+        pass
+    return None
+
+
+def loaded_libraries(program, library_path, directory):
+    """The files the dynamic loader would load for program with library_path
+    as LD_LIBRARY_PATH and directory as the current directory. Linux only;
+    elsewhere, and for a script or a static program, none.
+
+    The program's own loader lists them (`ld.so --list`, as ldd does) in an
+    environment that holds nothing but the variable: it finds each library and
+    stops, so no code of the program or of a library runs. A loader that is
+    itself below directory is not run, and is the one entry of the result."""
+    if not sys.platform.startswith("linux"):
+        return []
+    loader = elf_interpreter(program)
+    if not loader or not os.path.isabs(loader) or not os.path.isfile(loader):
+        return []
+    if below(directory, loader):
+        return [loader]
+    try:
+        listed = subprocess.run(
+            [loader, "--list", program],
+            env={"LD_LIBRARY_PATH": library_path},
+            cwd=directory,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=20,
+        ).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        return []
+    libraries = []
+    for line in listed.splitlines():
+        # "libcurl.so.4 => /usr/lib/libcurl.so.4 (0x...)", "/lib/ld.so (0x...)",
+        # "libx.so => not found". With no arrow and no directory the name is
+        # the kernel's own object ("linux-vdso.so.1 (0x...)") or a file that an
+        # empty entry found in the current directory ("libz.so.1 (0x...)").
+        name, arrow, place = line.strip().partition(" => ")
+        place = (place if arrow else name).rsplit(" (", 1)[0]
+        if not place or (arrow and place == "not found"):
+            continue
+        if arrow or place.startswith("/") or os.path.exists(os.path.join(directory, place)):
+            libraries.append(os.path.join(directory, place))
+    return libraries
+
 
 def environment_violations(environ, commands=(), posix=None):
     """Every Violation in an environment that an earlier, less trusted step of
@@ -317,8 +416,9 @@ def environment_violations(environ, commands=(), posix=None):
 
     commands names the programs that carry the caller's secrets (curl, jq): the
     first of each on PATH must not be inside GITHUB_WORKSPACE, where a pull
-    request places files. posix (default: this system) says whether an empty
-    or relative PATH entry means the current directory, as it does to a POSIX
+    request places files, and must not load a library from there through
+    LD_LIBRARY_PATH. posix (default: this system) says whether an empty or
+    relative PATH entry means the current directory, as it does to a POSIX
     shell."""
     found = []
 
@@ -347,23 +447,37 @@ def environment_violations(environ, commands=(), posix=None):
         if any(not entry or not entry.startswith("/") for entry in path.split(":")):
             fire("PATH has an empty or relative entry, so commands are looked up in the current directory")
     workspace = environ.get("GITHUB_WORKSPACE", "")
-    if workspace and path:
-        root = os.path.realpath(workspace)
-        for command in commands:
-            found_at = shutil.which(command, path=path)
-            if found_at and any(
-                os.path.commonpath([root, place]) == root
-                # As written, with every link followed, and in its directory with
-                # every link followed: another spelling of the workspace
-                # (/proc/self/cwd, a link) is still the workspace.
-                for place in (
-                    os.path.abspath(found_at),
-                    os.path.realpath(found_at),
-                    os.path.join(os.path.realpath(os.path.dirname(found_at)), os.path.basename(found_at)),
+    if not workspace:
+        return found
+    root = os.path.realpath(workspace)
+    # A certificate file in the workspace makes every client trust the server
+    # of whoever wrote the file. One anywhere else (a runner behind a proxy
+    # that inspects TLS) is the runner's own and passes.
+    for name in TRUST_STORES:
+        if any(place and below(root, place) for place in environ.get(name, "").split(os.pathsep)):
+            fire(
+                f"{name} names certificates inside the workspace, where a pull request can place them, "
+                "so a request that carries a secret would trust any server"
+            )
+    programs = {}
+    for command in commands if path else ():
+        programs[command] = shutil.which(command, path=path)
+        if programs[command] and below(root, programs[command]):
+            programs[command] = None
+            fire(f"the first {command} on PATH is inside the workspace, where a pull request can place it")
+    # A build directory of the workspace on LD_LIBRARY_PATH is a supported
+    # configuration, so the variable alone does not fire. What fires is a named
+    # command that would take one of its libraries from there. The loader is
+    # asked only when an entry can lead into the workspace: an empty or
+    # relative one (the current directory) or one inside it.
+    library_path = environ.get("LD_LIBRARY_PATH", "")
+    if library_path and any(not os.path.isabs(entry) or below(root, entry) for entry in re.split("[:;]", library_path)):
+        for command, program in programs.items():
+            if program and any(below(root, library) for library in loaded_libraries(program, library_path, root)):
+                fire(
+                    f"{command} would load a library from inside the workspace through LD_LIBRARY_PATH, "
+                    "where a pull request can place it"
                 )
-                if os.path.splitdrive(place)[0] == os.path.splitdrive(root)[0]
-            ):
-                fire(f"the first {command} on PATH is inside the workspace, where a pull request can place it")
     return found
 
 

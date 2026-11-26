@@ -324,9 +324,14 @@ any checkout runs. They are:
   credentials: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an
   exported shell function of any name, `SHELLOPTS` with `xtrace`, a `PS4`
   that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`,
-  a `PATH` entry that is empty or relative, or a `git` that `PATH` finds first
-  inside the workspace (the first step checks these two; the cachew session's
-  own Git wrapper is in `RUNNER_TEMP` and passes). This check is the first step of the
+  a `PATH` entry that is empty or relative, a `git` or `bash` that `PATH` finds
+  first inside the workspace (the first step checks these; the cachew session's
+  own Git wrapper is in `RUNNER_TEMP` and passes), a library that `git` or
+  `bash` would load from the workspace through `LD_LIBRARY_PATH` (a build
+  directory there that holds none of their libraries passes), or a certificate
+  variable (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` and their kin)
+  that names a file inside the workspace. Certificates anywhere else are the
+  job's own and stay in effect. This check is the first step of the
   action on every runner that has Python 3.9 or newer, also when cachew is off
   and only the standard checkout runs. Every step of the action starts bash in
   privileged mode (`-p`), so a `BASH_ENV` file or an exported function does

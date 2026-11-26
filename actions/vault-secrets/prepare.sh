@@ -39,7 +39,9 @@ done
 # The checks below still give each unsupported value its own message.
 # - The environment must not be prepared to run code in the action's scripts
 #   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
-#   function, tracing, a PATH that finds curl or jq in the workspace), and the OIDC request must go to GitHub.
+#   function, tracing, a PATH that finds curl, jq or bash in the workspace, a
+#   library of theirs or a certificate file in the workspace), and the OIDC
+#   request must go to GitHub.
 # Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
 # nor the OIDC request token.
 #
@@ -82,7 +84,7 @@ tripwire_fired=""
     --title vault-secrets --consequence "No request was sent to Vault."
 ) <<EOF || tripwire_fired=1
 event          pull_request_target
-environment    curl jq tailscale
+environment    curl jq tailscale bash
 $oidc_check
 trusted-origin IN_VAULT_URL=vault-url https://vault-ospo.eng-svc.aws.tenstorrent.com https://vault-ospo-staging.eng-svc.aws.tenstorrent.com
 no-option      IN_ROLE=role

@@ -142,6 +142,16 @@ trips_with 'pull_request_target' \
   EVENT_NAME=pull_request_target
 trips_with 'pull_request_target without an OIDC token' 'the workflow runs on pull_request_target, where code from outside the repository can reach the job'"'"'s secrets' \
   EVENT_NAME=pull_request_target ACTIONS_ID_TOKEN_REQUEST_URL=
+# workflow_run is not refused here: workflows that run after another workflow
+# read their secrets with this action (../../tripwires/README.md, limits).
+run_env EVENT_NAME=workflow_run
+if [ "$rc" -ne 0 ]; then
+  echo "::error::workflow_run: prepare.sh failed (exit $rc), expected exit 0"
+  cat "$work/log"
+  status=1
+else
+  echo "OK: accepted: workflow_run"
+fi
 option="starts with '-' and would be read as a command-line option"
 line='contains a line break or control character and could inject a line or a command'
 trips_with 'role that starts with -' "role $option" IN_ROLE=-CANARY
@@ -198,6 +208,31 @@ trips_with 'GIT_TRACE_REDACT off' 'GIT_TRACE_REDACT is off, so Git traces print 
 trips_with 'Node without TLS verification' \
   'NODE_TLS_REJECT_UNAUTHORIZED is 0, so Node sends secrets to servers it has not verified' \
   NODE_TLS_REJECT_UNAUTHORIZED=0
+# A bash that a pull request placed in the workspace, first on PATH. This one
+# hands over to the real bash, so the check runs and reports it.
+mkdir -p "$work/shell/bin"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v bash)" >"$work/shell/bin/bash"
+chmod +x "$work/shell/bin/bash"
+trips_with 'a bash from the workspace first on PATH' \
+  'the first bash on PATH is inside the workspace, where a pull request can place it' \
+  GITHUB_WORKSPACE="$work/shell" PATH="$work/shell/bin:$PATH"
+# Certificates that a pull request placed in the workspace: with a proxy
+# variable they would let another server read the requests of the action.
+# The runner's own certificates (here: outside the workspace) pass.
+for name in CURL_CA_BUNDLE SSL_CERT_FILE NODE_EXTRA_CA_CERTS; do
+  trips_with "$name in the workspace" \
+    "$name names certificates inside the workspace, where a pull request can place them, so a request that carries a secret would trust any server" \
+    GITHUB_WORKSPACE="$work/pr" "$name=$work/pr/CANARY.pem" HTTPS_PROXY=http://CANARY.invalid:3128
+done
+run_env GITHUB_WORKSPACE="$work/pr" CURL_CA_BUNDLE="$work/runner-ca.pem" NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem \
+  HTTPS_PROXY=http://proxy.invalid:3128
+if [ "$rc" -ne 0 ]; then
+  echo "::error::certificates outside the workspace: prepare.sh failed (exit $rc), expected exit 0"
+  cat "$work/log"
+  status=1
+else
+  echo "OK: accepted: certificates outside the workspace, behind a proxy"
+fi
 for oidc in https://CANARY.invalid/oidc http://test.actions.githubusercontent.com/oidc \
   https://test.actions.githubusercontent.com.CANARY.invalid/oidc; do
   trips_with "OIDC request URL $oidc" \

@@ -2,19 +2,22 @@ name: Test tripwires
 
 # Unit tests for actions/tripwires, and the step itself on clean and on hostile
 # values. actions/cachew-checkout imports the module: its own workflow runs on
-# changes here too.
+# changes here too. The unit tests also start every step of the other actions
+# that runs a script, so a change to an action.yml runs them.
 
 on:
   pull_request:
     paths:
       - "actions/tripwires/**"
       - "!actions/tripwires/**/*.md"
+      - "actions/*/action.yml"
       - ".github/workflows/tripwires-test.yml"
   push:
     branches: [main]
     paths:
       - "actions/tripwires/**"
       - "!actions/tripwires/**/*.md"
+      - "actions/*/action.yml"
       - ".github/workflows/tripwires-test.yml"
   workflow_dispatch:
 

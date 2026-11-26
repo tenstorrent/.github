@@ -31,8 +31,8 @@ supported configuration produces. When one fires:
 | `trusted-origin <name> <origin> ...` | `trusted_origin` | is not one of the listed HTTPS origins: another host, plain HTTP, or a spelling with userinfo or a path |
 | `oidc-url <name> [host ...]` | `oidc_request_url` | (normally `ACTIONS_ID_TOKEN_REQUEST_URL`) is not HTTPS on a GitHub Actions host, so another server would receive the OIDC request token. For GitHub Enterprise Server, list its host |
 | `oidc-claims <name> <audience> [VARIABLE]` | `oidc_claims` | is an OIDC token whose issuer, audience or repository (from `VARIABLE`, default `GITHUB_REPOSITORY`) is not what this job asked for, or that cannot be decoded: a token swapped in on the way |
-| `environment [command ...]` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, any exported shell function, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`, a `PATH` entry that is empty or relative (the current directory), or a named command that `PATH` finds first inside `GITHUB_WORKSPACE` |
-| `event [event ...]` | `untrusted_event` | (no value) the run's event is `pull_request_target` or `workflow_run`, or one of the listed events |
+| `environment [command ...]` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, any exported shell function, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`, a `PATH` entry that is empty or relative (the current directory), a named command that `PATH` finds first inside `GITHUB_WORKSPACE` or that would load a library from there through `LD_LIBRARY_PATH`, or a certificate variable (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`) that names a place inside `GITHUB_WORKSPACE` |
+| `event [event ...]` | `untrusted_event` | (no value) the run's event is `pull_request_target` or `workflow_run`. With events listed, the run's event is one of those, and the two defaults apply only when listed too |
 
 The first seven guard against code injection; `trusted-origin`, the two OIDC
 checks and `event` against secret exfiltration; `environment` against both. Three helpers cover the output side: `mask` (hide a value in the
@@ -95,7 +95,12 @@ before the checks run:
   with one option added. Bash then reads no `BASH_ENV` file and takes no shell
   function or `SHELLOPTS` from the environment. Plain `shell: bash` reads the
   `BASH_ENV` file before the first line of the step. A script that the step
-  starts needs the same: `bash -p script.sh`.
+  starts needs the same, from the same shell: `"$BASH" -p script.sh`. `$BASH`
+  is the shell that the runner started. A plain `bash` is looked up again on
+  the step's `PATH`, which an earlier step can set through `GITHUB_ENV`. The
+  runner does not use that `PATH` to find the shell of the step, so a file
+  named `bash` in the workspace would run only there, in place of the script
+  and before any check.
 - **`trusted-python.sh`.** It sets `tripwires_python` to the first interpreter
   on `PATH` whose directory, with every link followed, is outside
   `GITHUB_WORKSPACE`, where a pull request could place a file named `python3`.
@@ -188,6 +193,17 @@ gives a false alert, not a missed one.
   it is not detected; making one takes code that already runs on the runner.
 - On Windows the shell line starts the same Git Bash as `shell: bash` does;
   this was not tested there.
+- The runner finds the `bash` of the `shell:` line itself, before any line of
+  the action runs. It looks in the directories that earlier steps added
+  through `GITHUB_PATH` first, then on its own `PATH`. A file named `bash` in
+  a directory that an earlier step added runs in place of the shell, and no
+  check inside the step can see that or stop it. An absolute path in `shell:`
+  would avoid the lookup, but no single path is right on Linux, macOS, Windows
+  and in container jobs, so the actions do not use one. What the actions do:
+  they start their scripts with `"$BASH"`, and they name `bash` after
+  `environment`, which reports a `bash` that `PATH` finds first in the
+  workspace when that shell still runs the script. Checking `$BASH` against
+  the workspace would add nothing: a planted shell decides what `$BASH` says.
 - `environment` fires on every exported shell function (`BASH_FUNC_...`),
   whatever its name: a runner that exports one on purpose cannot use this
   check. The scripts here still call builtins such as `cd` before or after the
@@ -206,12 +222,67 @@ gives a false alert, not a missed one.
   not detected.
 - `environment` fires on `LD_PRELOAD` whatever it loads. A runner that preloads
   a library on purpose (an allocator, say) cannot use this check.
+- `LD_LIBRARY_PATH` alone does not fire. `actions/setup-python` sets it to a
+  tool cache directory, and jobs set it to a build directory of the workspace.
+  For each command named after `environment`, the check asks the dynamic
+  loader which libraries the command would load (`ld.so --list`, as `ldd`
+  does, with no other variable set; no code of the command or of a library
+  runs). It fires when one of them is inside `GITHUB_WORKSPACE`. It asks only
+  when an entry of the variable is empty, relative or inside the workspace.
+  Limits of this rule:
+  - Linux only. On macOS, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH` and
+    `DYLD_FALLBACK_LIBRARY_PATH` are not checked. macOS removes them for the
+    system's own programs (`/bin/bash`, `/usr/bin/curl`); a program from
+    Homebrew or a tool cache still reads them.
+  - A command that is not named is not checked. A static program or a script
+    has no loader to ask.
+  - The loader has already used the variable for the step's own shell and for
+    the interpreter of the checks. A planted library that those load ran
+    before the check. Name `bash` so that the check reports it; it cannot undo
+    it.
+  - A library that a program loads later by name (`dlopen`) is not listed.
+- A certificate variable fires only when it names a file or directory inside
+  `GITHUB_WORKSPACE` (a relative value counts as inside). Certificates
+  anywhere else pass: a self-hosted runner behind a proxy that inspects TLS
+  sets them on purpose. A job that creates its own certificate authority in
+  the workspace and exports it cannot use this check; write the file to
+  `RUNNER_TEMP`.
+- `environment` does not fire on proxy variables (`HTTPS_PROXY`, `ALL_PROXY`).
+  Runners behind a proxy set them. A proxy alone sees the name of the server
+  and not the request: the action's requests are HTTPS, and the certificate
+  checks above and `NODE_TLS_REJECT_UNAUTHORIZED` cover the ways to make a
+  client trust the proxy itself.
+- `environment` does not fire on `GIT_SSL_NO_VERIFY`. `cachew-checkout` treats
+  it as the job's own setting and keeps its tokens off unverified requests
+  (see its README).
+- `oidc-url` is a second line of defense. On a job with `id-token: write` the
+  runner sets `ACTIONS_ID_TOKEN_REQUEST_URL` and the request token again for
+  every step, after the values from `GITHUB_ENV`, so an earlier step cannot
+  change the URL that a later step reads. `GITHUB_*` and `RUNNER_*` variables
+  are set the same way. The host is matched after parsing: lower case, no
+  userinfo, port 443 or none, an exact name or a suffix that starts with a
+  dot. A trailing dot does not match. For GitHub Enterprise Server, the
+  caller lists the host; a listed suffix such as `.example.com` trusts every
+  host below it, so list the one name.
 - `oidc-claims` compares claims; it verifies no signature. The receiver does.
   The command refuses a token that it cannot decode; the function `oidc_claims`
   returns `None` for one, and the caller decides.
-- `event` covers the events that give outside code the base repository's
-  secrets. It does not judge who may trigger a `workflow_dispatch` or which
-  branch runs.
+- `event` reads `GITHUB_EVENT_NAME`, which the runner sets for every step and
+  `GITHUB_ENV` cannot change. In a reusable workflow it is the event of the
+  calling workflow.
+- `event` covers the two events where GitHub itself pairs the base
+  repository's secrets with content from outside: `pull_request_target` (the
+  pull request of a fork) and `workflow_run` (the artifacts and the head of
+  another run). It does not judge who may trigger a `workflow_dispatch` or
+  which branch runs. Other events also run with secrets and can be started
+  from outside, such as `issue_comment`, `issues` and `discussion`. They
+  carry text, not code: they are safe until the workflow itself checks out
+  and runs the pull request, and the check cannot see that. A caller that
+  wants them refused lists them, together with the two defaults.
+- Events listed after `event` replace the defaults. `vault-secrets` lists
+  only `pull_request_target`, so it runs on `workflow_run`: workflows that
+  run after another workflow read their secrets with it. Such a workflow must
+  not run code or artifacts of the first run. `hf-oidc-token` refuses both.
 
 ## Tests
 

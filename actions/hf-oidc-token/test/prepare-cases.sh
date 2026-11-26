@@ -156,6 +156,22 @@ for spelled in "$work/pr/bin" "$work/pr-link/bin"; do
 done
 [ ! -e "$work/fake-python-ran" ] && ok || bad "a python3 from the workspace ran in place of the checks"
 expect_trip "GIT_TRACE_REDACT is off, so Git traces print credentials" GIT_TRACE_REDACT=false
+# A bash that a pull request placed in the workspace, first on PATH. This one
+# hands over to the real bash, so the check runs and reports it.
+mkdir -p "$work/shell/bin"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v bash)" >"$work/shell/bin/bash"
+chmod +x "$work/shell/bin/bash"
+expect_trip "the first bash on PATH is inside the workspace, where a pull request can place it" \
+  GITHUB_WORKSPACE="$work/shell" PATH="$work/shell/bin:$PATH"
+# Certificates that a pull request placed in the workspace: with a proxy
+# variable they would let another server read the requests of the action.
+# The runner's own certificates (here: outside the workspace) pass.
+for name in CURL_CA_BUNDLE SSL_CERT_FILE; do
+  expect_trip "$name names certificates inside the workspace, where a pull request can place them, so a request that carries a secret would trust any server" \
+    GITHUB_WORKSPACE="$work/pr" "$name=$work/pr/CANARY.pem" HTTPS_PROXY=http://CANARY.invalid:3128
+done
+run GITHUB_WORKSPACE="$work/pr" CURL_CA_BUNDLE="$work/runner-ca.pem" SSL_CERT_FILE=/etc/ssl/cert.pem HTTPS_PROXY=http://proxy.invalid:3128
+{ [ "$rc" -eq 0 ] && [ "$(output go)" = true ]; } && ok || bad "certificates outside the workspace must pass"
 expect_trip "ACTIONS_ID_TOKEN_REQUEST_URL is not a GitHub OIDC endpoint and would have received the OIDC request token" \
   ACTIONS_ID_TOKEN_REQUEST_URL=https://CANARY.invalid/oidc
 expect_trip "resource $option" 'IN_RESOURCE=  --CANARY'

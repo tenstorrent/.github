@@ -74,7 +74,9 @@ trim() {
 # attempt" and never shows the value. Also an error with if-no-token warn.
 # - The environment must not be prepared to run code in the action's scripts
 #   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
-#   function, tracing, a PATH that finds curl or jq in the workspace), and the OIDC request must go to GitHub.
+#   function, tracing, a PATH that finds curl, jq or bash in the workspace, a
+#   library of theirs or a certificate file in the workspace), and the OIDC
+#   request must go to GitHub.
 # Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
 # nor the OIDC request token.
 command -v python3 >/dev/null 2>&1 || fail "this runner has no python3; the action needs bash, curl, jq and python3."
@@ -101,7 +103,7 @@ tripwire_fired=""
     --title "$TITLE" --consequence "No token was requested."
 ) <<'EOF' || tripwire_fired=1
 event
-environment curl jq
+environment curl jq bash
 oidc-url    ACTIONS_ID_TOKEN_REQUEST_URL
 no-option   IN_BRANCH=branch
 single-line IN_BRANCH=branch

@@ -134,7 +134,12 @@ runs:
       # function or SHELLOPTS from the environment, so nothing an earlier step
       # of the job exported runs before the tripwires do. Plain `shell: bash`
       # reads BASH_ENV before the first line of the step.
-      run: bash -p "$GITHUB_ACTION_PATH/prepare.sh"
+      # "$BASH" is the shell that the runner started for this step. A plain
+      # `bash` would be looked up again, on a PATH that an earlier step can set
+      # through GITHUB_ENV, and the runner does not use that PATH for its own
+      # lookup: a file named bash in the workspace would run in place of the
+      # script, before any check.
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/prepare.sh"'
 
     # Do not pass `args: --accept-routes`: the action sets it, and a second copy fails.
     - name: Join tailnet
@@ -153,7 +158,7 @@ runs:
       env:
         VAULT_URL: ${{ steps.prepare.outputs.url }}
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
-      run: bash -p "$GITHUB_ACTION_PATH/wait-for-vault.sh"
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/wait-for-vault.sh"'
 
     # login.sh masks the OIDC JWT and the Vault token at once. The Vault token
     # goes to the step output vault-token, which only the token and read steps below use.
@@ -171,7 +176,7 @@ runs:
         PREFIX: ${{ steps.prepare.outputs.prefix }}
         REPOSITORY: ${{ github.repository }}
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
-      run: bash -p "$GITHUB_ACTION_PATH/login.sh"
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/login.sh"'
 
     # Only for github-token without '/': finds the engine of the token set and
     # reads the token, 15 seconds for each request. A request that curl sent is
@@ -191,7 +196,7 @@ runs:
         ROLE: ${{ steps.prepare.outputs.role }}
         REPOSITORY: ${{ github.repository }}
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
-      run: bash -p "$GITHUB_ACTION_PATH/read-token.sh"
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/read-token.sh"'
 
     # Composite steps cannot have timeout-minutes, and vault-action has no
     # request timeout. A background watchdog stops the Vault step at the limit.
@@ -203,7 +208,7 @@ runs:
       shell: bash --noprofile --norc -p -e -o pipefail {0}
       env:
         VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
-      run: bash -p "$GITHUB_ACTION_PATH/watchdog.sh" start
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/watchdog.sh" start'
 
     # vault-action masks every value it reads (core.setSecret, per line).
     # It uses the Vault token from the login step as is (method token: no login,
@@ -238,7 +243,7 @@ runs:
         WATCHDOG_ID: ${{ steps.watchdog.outputs.id }}
         VAULT_OUTCOME: ${{ steps.vault.outcome }}
         VAULT_TIMEOUT: ${{ steps.prepare.outputs.vault-timeout }}
-      run: bash -p "$GITHUB_ACTION_PATH/watchdog.sh" stop
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/watchdog.sh" stop'
 
     # Vault can hold an empty string, and vault-action passes it on without an
     # error. An empty value is always an error here. Names only in the log.
@@ -250,4 +255,4 @@ runs:
       env:
         VAULT_OUTPUTS: ${{ toJSON(steps.vault.outputs) }}
         TOKEN_VALUE: ${{ steps.token.outputs.token }}
-      run: bash -p "$GITHUB_ACTION_PATH/check-values.sh"
+      run: '"$BASH" -p "$GITHUB_ACTION_PATH/check-values.sh"'

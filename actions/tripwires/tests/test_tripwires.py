@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ACTION = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ACTION))
@@ -348,6 +349,211 @@ class PathTests(unittest.TestCase):
         path = ":".join(str(self.root / d) for d in ("work/.venv/bin", "temp/cachew-x/bin", "tools"))
         self.assertEqual(self.found(path, "curl", "jq", "git"), [])
         self.assertEqual(len(self.found(path, "python3")), 1)
+
+
+class TrustStoreTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.workspace = self.root / "work"
+        (self.workspace / "certs").mkdir(parents=True)
+        (self.root / "temp").mkdir()
+
+    def found(self, **environ):
+        environ = {"PATH": "/usr/bin", "GITHUB_WORKSPACE": str(self.workspace), **environ}
+        return [str(v) for v in tripwires.environment_violations(environ, ("curl",))]
+
+    def test_certificates_from_the_workspace_fire_without_their_path(self):
+        (self.root / "alias").symlink_to(self.workspace)
+        (self.root / "temp" / "linked.pem").symlink_to(self.workspace / "certs" / "CANARY.pem")
+        places = (
+            str(self.workspace / "certs" / "CANARY.pem"),
+            str(self.root / "alias" / "certs" / "CANARY.pem"),
+            str(self.root / "temp" / "linked.pem"),
+            # Read from the current directory, which is the workspace.
+            "certs/CANARY.pem",
+            # One entry of a list.
+            os.pathsep.join(("/etc/ssl/certs", str(self.workspace / "certs"))),
+        )
+        for name in tripwires.TRUST_STORES:
+            for place in places:
+                with self.subTest(name=name, place=place):
+                    found = self.found(**{name: place})
+                    self.assertEqual(
+                        found,
+                        [
+                            f"{name} names certificates inside the workspace, where a pull request can place them, "
+                            "so a request that carries a secret would trust any server"
+                        ],
+                    )
+                    self.assertNotIn("CANARY", found[0])
+        self.assertEqual(len(tripwires.TRUST_STORES), 7)
+
+    def test_the_certificates_of_the_runner_pass(self):
+        # A runner behind a proxy that inspects TLS, and the fixture of
+        # vault-secrets, which writes its certificate to RUNNER_TEMP.
+        for place in ("/etc/ssl/certs/ca-certificates.crt", "/usr/local/share/ca-certificates/proxy.crt", str(self.root / "temp" / "cert.pem"), ""):
+            for name in tripwires.TRUST_STORES:
+                with self.subTest(name=name, place=place):
+                    self.assertEqual(self.found(**{name: place, "HTTPS_PROXY": "http://proxy.example.com:3128"}), [])
+        # Without a workspace there is nothing to compare with.
+        environ = {"PATH": "/usr/bin", "CURL_CA_BUNDLE": "certs/ca.pem"}
+        self.assertEqual(tripwires.environment_violations(environ, ("curl",)), [])
+
+
+class LibraryPathTests(unittest.TestCase):
+    """LD_LIBRARY_PATH: the decision, with the dynamic loader's answer given."""
+
+    MESSAGE = "curl would load a library from inside the workspace through LD_LIBRARY_PATH, where a pull request can place it"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.workspace = self.root / "work"
+        for directory in ("work/build/lib", "tools", "toolcache/lib"):
+            (self.root / directory).mkdir(parents=True)
+        for name in ("curl", "jq"):
+            (self.root / "tools" / name).write_text("#!/bin/sh\n")
+            (self.root / "tools" / name).chmod(0o755)
+        self.asked = []
+
+    def found(self, library_path, *commands, loads=()):
+        def loaded(program, path, directory):
+            self.asked.append((Path(program).name, path, directory))
+            return ["/usr/lib/libc.so.6", *loads]
+
+        environ = {"PATH": str(self.root / "tools"), "GITHUB_WORKSPACE": str(self.workspace), "LD_LIBRARY_PATH": library_path}
+        with mock.patch.object(tripwires, "loaded_libraries", loaded):
+            return [str(v) for v in tripwires.environment_violations(environ, commands)]
+
+    def test_a_named_command_must_not_load_a_library_from_the_workspace(self):
+        inside = str(self.workspace / "build" / "lib")
+        planted = str(self.workspace / "build" / "lib" / "libcurl.so.4")
+        self.assertEqual(self.found(inside, "curl", loads=[planted]), [self.MESSAGE])
+        self.assertEqual(self.asked, [("curl", inside, str(self.workspace))])
+        # Each named command is asked about; one that PATH does not find is not.
+        self.assertEqual(len(self.found(inside, "curl", "jq", "tailscale", loads=[planted])), 2)
+        # An entry that means the current directory, and another spelling of
+        # the workspace.
+        (self.root / "alias").symlink_to(self.workspace)
+        for library_path in (f"/usr/lib:{inside}", "/usr/lib:", "build/lib", f"{self.root / 'alias'}/build/lib", f"/usr/lib;{inside}"):
+            with self.subTest(library_path=library_path):
+                self.assertEqual(self.found(library_path, "curl", loads=["build/lib/libcurl.so.4"]), [self.MESSAGE])
+                self.assertEqual(self.found(library_path, "curl", loads=[f"{self.root / 'alias'}/build/lib/libz.so.1"]), [self.MESSAGE])
+
+    def test_a_build_directory_of_the_workspace_is_supported(self):
+        # The job's own libraries are on the path, and curl loads none of them.
+        inside = str(self.workspace / "build" / "lib")
+        self.assertEqual(self.found(inside, "curl", "jq"), [])
+        self.assertEqual(len(self.asked), 2)
+
+    def test_the_loader_is_not_asked_without_a_reason(self):
+        # actions/setup-python: a tool cache directory. No named command. No
+        # variable.
+        planted = [str(self.workspace / "build" / "lib" / "libcurl.so.4")]
+        self.assertEqual(self.found(str(self.root / "toolcache" / "lib"), "curl", loads=planted), [])
+        self.assertEqual(self.found(str(self.workspace / "build" / "lib"), loads=planted), [])
+        self.assertEqual(self.found("", "curl", loads=planted), [])
+        self.assertEqual(self.asked, [])
+
+    def test_a_file_that_is_no_dynamic_program_has_no_loader(self):
+        script = self.root / "tools" / "curl"
+        self.assertIsNone(tripwires.elf_interpreter(script))
+        self.assertIsNone(tripwires.elf_interpreter(self.root / "absent"))
+        (self.root / "tools" / "short").write_bytes(b"\x7fELF\x02\x01")
+        self.assertIsNone(tripwires.elf_interpreter(self.root / "tools" / "short"))
+        self.assertEqual(tripwires.loaded_libraries(str(script), "/usr/lib", str(self.workspace)), [])
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "the dynamic loader is asked on Linux only")
+class DynamicLoaderTests(unittest.TestCase):
+    """LD_LIBRARY_PATH, with the real loader and a real library: a copy of one
+    that the program loads, placed in the workspace as a pull request would."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.workspace = self.root / "work"
+        (self.workspace / "build" / "lib").mkdir(parents=True)
+        self.name = next((name for name in ("curl", "git", "bash", "sh") if self.libraries(name)), None)
+        if self.name is None:
+            self.skipTest("no dynamically linked program to test with")
+
+    def libraries(self, name):
+        program = shutil.which(name)
+        if not program:
+            return []
+        loader = tripwires.elf_interpreter(program)
+        found = tripwires.loaded_libraries(program, "", str(self.workspace))
+        return [place for place in found if loader and os.path.realpath(place) != os.path.realpath(loader)]
+
+    def found(self, library_path):
+        environ = {"PATH": os.environ["PATH"], "GITHUB_WORKSPACE": str(self.workspace), "LD_LIBRARY_PATH": library_path}
+        return [str(v) for v in tripwires.environment_violations(environ, (self.name,))]
+
+    def test_a_planted_library_fires_and_the_jobs_own_libraries_pass(self):
+        inside = self.workspace / "build" / "lib"
+        message = f"{self.name} would load a library from inside the workspace through LD_LIBRARY_PATH, where a pull request can place it"
+        self.assertTrue(os.path.isabs(tripwires.elf_interpreter(shutil.which(self.name))))
+        # The job's own library, which the program does not load.
+        (inside / "libtt_CANARY.so").write_bytes(b"")
+        self.assertEqual(self.found(str(inside)), [])
+        original = self.libraries(self.name)[0]
+        shutil.copy(original, inside / Path(original).name)
+        for library_path in (str(inside), f"/nonexistent:{inside}", "build/lib", "build/lib:"):
+            with self.subTest(library_path=library_path):
+                self.assertEqual(self.found(library_path), [message])
+        # In the workspace itself, for an entry that means the current directory.
+        shutil.copy(original, self.workspace / Path(original).name)
+        self.assertEqual(self.found("/nonexistent:"), [message])
+        # The same directory when it is not the workspace.
+        environ = {"PATH": os.environ["PATH"], "GITHUB_WORKSPACE": str(self.root / "elsewhere"), "LD_LIBRARY_PATH": str(inside)}
+        self.assertEqual(tripwires.environment_violations(environ, (self.name,)), [])
+
+
+@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "needs bash")
+class ScriptLaunchTests(unittest.TestCase):
+    """Every step that starts a script of its action, started as the runner
+    starts it, on a PATH whose first bash is one a pull request placed. The
+    runner looks its shell up on its own PATH; a PATH that an earlier step
+    wrote to GITHUB_ENV reaches only the lookups inside the step."""
+
+    ACTIONS = Path(tripwires.__file__).resolve().parent.parent
+
+    def test_a_bash_from_path_does_not_start_the_scripts(self):
+        steps = []
+        for action in sorted(self.ACTIONS.glob("*/action.yml")):
+            text = action.read_text()
+            shell = re.search(r"^      shell: (.+)$", text, re.M)
+            for line in re.findall(r"^      run: (.*\$GITHUB_ACTION_PATH/[\w-]+\.sh.*)$", text, re.M):
+                if line[0] == line[-1] == "'":
+                    line = line[1:-1].replace("''", "'")
+                steps.append((action.parent.name, shell[1], line))
+        self.assertGreaterEqual(len(steps), 10)
+        for action, shell, line in steps:
+            with self.subTest(action=action, line=line), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve()
+                canary = root / "canary"
+                for directory in ("action", "work/bin"):
+                    (root / directory).mkdir(parents=True)
+                for script in re.findall(r"\$GITHUB_ACTION_PATH/([\w-]+\.sh)", line):
+                    (root / "action" / script).write_text(f"echo script >>'{canary}'\n")
+                planted = root / "work" / "bin" / "bash"
+                planted.write_text(f"#!/bin/sh\necho planted >>'{canary}'\n")
+                planted.chmod(0o755)
+                (root / "step.sh").write_text(line + "\n")
+                command = shlex.split(shell.replace("{0}", shlex.quote(str(root / "step.sh"))))
+                command[0] = shutil.which(command[0])
+                environ = {
+                    "PATH": f"{root / 'work' / 'bin'}:{os.environ['PATH']}",
+                    "GITHUB_ACTION_PATH": str(root / "action"),
+                    "GITHUB_WORKSPACE": str(root / "work"),
+                }
+                subprocess.run(command, env=environ, capture_output=True, text=True, cwd=root / "work")
+                self.assertEqual(canary.read_text() if canary.exists() else "", "script\n")
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "needs bash")
