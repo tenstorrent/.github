@@ -559,14 +559,8 @@ def refuse_job_token_elsewhere(environ):
     except SecurityViolation:
         raise
     except (Bypass, ValueError):
-        # A spelling cachew does not use (a path, userinfo): the standard checkout
-        # reads its origin, so only the same HTTPS host is still the job's server.
-        written = as_parsed(value)
-        authority = tripwires.AUTHORITY.match(written)
-        host = authority[1].rpartition("@")[2] if authority else ""
-        host = host[: host.index("]") + 1] if host.startswith("[") and "]" in host else host.partition(":")[0]
-        if written.lower().startswith("https:") and host.lower().rstrip(".") == urllib.parse.urlsplit(home).netloc:
-            return
+        # Any spelling beyond a plain origin (a path, userinfo, a port that is
+        # no port) hides where the token ends up. The job's server needs none.
         raise violation from None
     if server != home:
         raise violation

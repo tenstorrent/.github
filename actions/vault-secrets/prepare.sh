@@ -39,16 +39,28 @@ done
 #   curl, tracing), and the OIDC request must go to GitHub.
 # Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
 # nor the OIDC request token.
+#
+# Test fixture only (test/proxy/fixture.py, which serves a local OIDC endpoint):
+# the OIDC URL check is skipped for the one URL in a file that the fixture
+# writes into this action's own directory. A value in GITHUB_ENV cannot write
+# that file, and whoever can write there can change this script as well.
+oidc_check='oidc-url       ACTIONS_ID_TOKEN_REQUEST_URL'
+fixture_url="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/test/proxy/oidc-request-url"
+if [ -f "$fixture_url" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] \
+  && [ "$(cat -- "$fixture_url")" = "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+  echo "Test fixture: the OIDC request goes to the local endpoint of test/proxy/fixture.py."
+  oidc_check='# oidc-url: local test fixture'
+fi
 env -u GITHUB_OUTPUT -u ACTIONS_ID_TOKEN_REQUEST_TOKEN \
   GITHUB_EVENT_NAME="${EVENT_NAME:-}" \
   IN_VAULT_URL="${IN_VAULT_URL:-}" IN_ROLE="${IN_ROLE:-}" IN_GITHUB_TOKEN="${IN_GITHUB_TOKEN:-}" \
   ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}" \
   IN_TS_CLIENT_ID="${IN_TS_CLIENT_ID:-}" IN_TS_AUDIENCE="${IN_TS_AUDIENCE:-}" IN_TS_TAGS="${IN_TS_TAGS:-}" \
   python3 -I "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../tripwires/tripwires.py" \
-  --title vault-secrets --consequence "No request was sent to Vault." <<'EOF' || exit 1
+  --title vault-secrets --consequence "No request was sent to Vault." <<EOF || exit 1
 event          pull_request_target
 environment
-oidc-url       ACTIONS_ID_TOKEN_REQUEST_URL
+$oidc_check
 trusted-origin IN_VAULT_URL=vault-url https://vault-ospo.eng-svc.aws.tenstorrent.com https://vault-ospo-staging.eng-svc.aws.tenstorrent.com
 no-option      IN_ROLE=role
 single-line    IN_ROLE=role

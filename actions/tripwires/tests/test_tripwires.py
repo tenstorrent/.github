@@ -422,6 +422,12 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(text.count("::error "), 4)
         self.assertIn("::OIDC-token does not have the issuer", text)
         self.assertNotIn(good, text)
+        # A token that cannot be decoded does not pass the command.
+        for value in ("opaque", "a.b.c", "a.!!.c", token([1])):
+            with self.subTest(value=value):
+                code, text, _ = self.run_main(spec, environ=dict(environ, JWT=value))
+                self.assertEqual(code, 1)
+                self.assertIn("::OIDC-token is not a token that GitHub issues", text)
         self.assertEqual(self.run_main("environment now", environ=environ)[0], 2)
         self.assertEqual(self.run_main("oidc-claims JWT", environ=environ)[0], 2)
         self.assertEqual(self.run_main("oidc-claims JWT aud MISSING", environ=environ)[0], 2)

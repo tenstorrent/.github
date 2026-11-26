@@ -721,6 +721,8 @@ def prepare(environ):
             write_private(session / "global.config", base + render(PERFORMANCE))
         write_checkout_config(session, state, settings, environ)
         write_state(session, state)
+        # action.yml uses an inherited CACHEW_PYTHON only when it is this record.
+        write_private(session / "python", interpreter())
     except BaseException:
         if not existing:
             shutil.rmtree(session, ignore_errors=True)
@@ -1041,6 +1043,10 @@ def restore(environ):
 
 def main(phase):
     environ = dict(os.environ)
+    if phase == "prepare":
+        # The later steps of this action run this interpreter, from this output:
+        # not from CACHEW_PYTHON, which an earlier step of the job can set.
+        output("python", interpreter())
     if phase == "restore":
         restore(environ)
         return

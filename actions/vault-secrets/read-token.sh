@@ -141,14 +141,15 @@ vault_said() {
   printf 'Vault said: %s.' "${err:0:300}"
 }
 
-# Masks a value, one '::add-mask::' line per line of the value. A value with a
-# newline cannot then start a workflow command of its own.
+# Masks a value, one '::add-mask::' line per line of the value. The runner
+# ends a line at a carriage return too, and decodes '%' in command data: each
+# piece between line ends is masked, with '%' written as '%25'. A value cannot
+# then start a workflow command of its own.
 mask() {
   local l
   while IFS= read -r l || [ -n "$l" ]; do
-    l="${l%$'\r'}"
-    [ -z "$l" ] || printf '::add-mask::%s\n' "$l"
-  done <<<"$1"
+    [ -z "$l" ] || printf '::add-mask::%s\n' "${l//%/%25}"
+  done <<<"${1//$'\r'/$'\n'}"
 }
 
 from=""

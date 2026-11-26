@@ -390,7 +390,10 @@ def _oidc_claims(value, label, arguments, environ):
     repository_name = arguments[1] if len(arguments) > 1 else "GITHUB_REPOSITORY"
     if not environ.get(repository_name):
         raise SpecError(f"oidc-claims needs the environment variable {repository_name}")
-    oidc_claims(value, arguments[0], environ[repository_name], label)
+    # A token that cannot be decoded names no job. The command has no later
+    # step to refuse it, so it does not pass here.
+    if oidc_claims(value, arguments[0], environ[repository_name], label) is None:
+        raise Violation(f"{label} is not a token that GitHub issues and must not be sent on")
 
 
 def _origin(value, label, arguments, environ):

@@ -259,7 +259,9 @@ run on Python 3.10 or newer from `PATH`. Without it the action falls back to the
 plain checkout without changing the job. Once a session exists, later steps use
 the same interpreter (`CACHEW_PYTHON`), which the Git wrapper already depends on.
 It is the base interpreter's real file, so removing a virtual environment later
-in the job, linked or copied, does not remove it.
+in the job, linked or copied, does not remove it. A later checkout uses an
+inherited `CACHEW_PYTHON` only when the session recorded that path in its own
+directory; a value that an earlier step wrote to `GITHUB_ENV` is ignored.
 A later checkout in the job removes cachew's rewrite and headers from the job's
 global file, keeping the job's own settings, and gives the official checkout a
 flattened throwaway copy of it. If the file cannot be changed (for example it is
@@ -312,7 +314,12 @@ any checkout runs. They are:
   `RUNNER_TEMP`;
 - a `github-server-url` on another server than the job's while `token` is the
   job's own `github.token`: that token works nowhere else, so the checkout
-  would only hand it over. A checkout from another server passes its own token;
+  would only hand it over. With the job's token, write the job's server as a
+  plain origin (`https://github.com`): a path, userinfo or another port is
+  refused too. This check runs on every runner, also when cachew is off and
+  only the standard checkout runs; it needs Python 3.9 or newer when
+  `github-server-url` is set. A checkout from another server passes its own
+  token;
 - an environment prepared to run code in the job's scripts or to print their
   credentials: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an
   exported shell function named like a command (`git`, `curl`), `SHELLOPTS`

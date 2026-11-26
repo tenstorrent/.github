@@ -89,6 +89,7 @@ case "$target" in
       noexpiry) answer 200 "{\"access_token\":\"$FAKE_HF_TOKEN\"}" ;;
       notoken) answer 200 '{"token_type":"bearer"}' ;;
       multiline) answer 200 "{\"access_token\":\"$FAKE_HF_TOKEN\\n::set-env name=EVIL::1\"}" ;;
+      carriage) answer 200 "{\"access_token\":\"$FAKE_HF_TOKEN\\r::set-env name=EVIL::1%0A::set-env name=EVIL::2\"}" ;;
       objtoken) answer 200 "{\"access_token\":{\"a\":\"$FAKE_HF_TOKEN\"}}" ;;
       badtoken) answer 200 '{"access_token":"has space"}' ;;
       grant) answer 400 '{"error":"invalid_grant","error_description":"No matching ::error:: publisher\nsecond"}' 'X-Request-Id: Root=1-abc-123' ;;
@@ -285,13 +286,17 @@ for c in notoken badtoken; do
 done
 
 # A multi-line token: every line is masked on its own, and no line can be a
-# workflow command. A non-string token is not a token. Both fail in mode warn too.
-for c in multiline objtoken; do
+# workflow command. The runner ends a line at a carriage return too, and decodes
+# '%0A' in command data. A non-string token is not a token. All fail in mode
+# warn too.
+for c in multiline carriage objtoken; do
   run_script "$exchange" MODE=warn FAKE_EXCHANGE="$c"
   if [ "$rc" -ne 1 ] || [ -n "$(output token)" ]; then
     bad "exchange $c: expected exit 1 and no token output"
-  elif printf '%s\n' "$log" | grep -q '^::set-env'; then
+  elif printf '%s\n' "$log" | tr '\r' '\n' | grep -q '^::set-env'; then
     bad "exchange $c: server text became a workflow command"
+  elif printf '%s\n' "$log" | grep '^::add-mask::' | grep -q '%0A'; then
+    bad "exchange $c: a mask line holds an encoded line break"
   elif printf '%s\n' "$log" | grep -v '^::add-mask::' | grep -qF -- "$hf_token"; then
     bad "exchange $c: the token is in the log outside an ::add-mask:: line"
   else ok; fi

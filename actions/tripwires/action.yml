@@ -29,6 +29,7 @@ runs:
   using: composite
   steps:
     # No fallback: without Python the step fails, and so does the job.
+    # -I: PYTHONPATH and the user site cannot replace the modules the checks import.
     - name: Check for a possible security compromise attempt
       id: tripwires
       shell: bash
@@ -36,4 +37,4 @@ runs:
         TRIPWIRES_CHECKS: ${{ inputs.checks }}
         TRIPWIRES_VALUES: ${{ inputs.values }}
         TRIPWIRES_TITLE: ${{ inputs.title }}
-      run: python3 "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES
+      run: python3 -I "$GITHUB_ACTION_PATH/tripwires.py" --title "$TRIPWIRES_TITLE" --checks-env TRIPWIRES_CHECKS --values-env TRIPWIRES_VALUES

@@ -30,7 +30,7 @@ supported configuration produces. When one fires:
 | `url-host <name>` | `origin` | is a URL whose host, as written or as parsed, has characters no DNS name or IP literal has |
 | `trusted-origin <name> <origin> ...` | `trusted_origin` | is not one of the listed HTTPS origins: another host, plain HTTP, or a spelling with userinfo or a path |
 | `oidc-url <name> [host ...]` | `oidc_request_url` | (normally `ACTIONS_ID_TOKEN_REQUEST_URL`) is not HTTPS on a GitHub Actions host, so another server would receive the OIDC request token. For GitHub Enterprise Server, list its host |
-| `oidc-claims <name> <audience> [VARIABLE]` | `oidc_claims` | is an OIDC token whose issuer, audience or repository (from `VARIABLE`, default `GITHUB_REPOSITORY`) is not what this job asked for: a token swapped in on the way |
+| `oidc-claims <name> <audience> [VARIABLE]` | `oidc_claims` | is an OIDC token whose issuer, audience or repository (from `VARIABLE`, default `GITHUB_REPOSITORY`) is not what this job asked for, or that cannot be decoded: a token swapped in on the way |
 | `environment` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, an exported shell function named like a command, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0` |
 | `event [event ...]` | `untrusted_event` | (no value) the run's event is `pull_request_target` or `workflow_run`, or one of the listed events |
 
@@ -164,6 +164,8 @@ gives a false alert, not a missed one.
 - `environment` fires on `LD_PRELOAD` whatever it loads. A runner that preloads
   a library on purpose (an allocator, say) cannot use this check.
 - `oidc-claims` compares claims; it verifies no signature. The receiver does.
+  The command refuses a token that it cannot decode; the function `oidc_claims`
+  returns `None` for one, and the caller decides.
 - `event` covers the events that give outside code the base repository's
   secrets. It does not judge who may trigger a `workflow_dispatch` or which
   branch runs.

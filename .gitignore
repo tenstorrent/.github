@@ -1,1 +1,3 @@
 __pycache__/
+# Written by actions/vault-secrets/test/proxy/fixture.py while it runs.
+actions/vault-secrets/test/proxy/oidc-request-url

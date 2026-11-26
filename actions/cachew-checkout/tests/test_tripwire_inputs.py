@@ -24,13 +24,16 @@ class JobTokenAndEnvironment(unittest.TestCase):
             checkout.refuse_attack_inputs(environ)
 
     def test_the_job_token_stays_on_the_job_server(self):
-        for url in ("", "https://github.com", "https://GitHub.com:443/", "https://github.com/owner", " https://github.com "):
+        for url in ("", "https://github.com", "https://GitHub.com:443/", " https://github.com "):
             with self.subTest(url=url):
                 self.refuse(CACHEW_GITHUB_SERVER_URL=url)
         for url in (
             "https://ghe.example.com",
             "https://github.com.evil.test",
             "https://github.com:8443",
+            "https://github.com:99999",
+            "https://github.com:99999/owner",
+            "https://github.com/owner",
             "http://github.com",
             "https://evil.test/github.com",
             "https://github.com@evil.test/",
