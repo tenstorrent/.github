@@ -172,6 +172,9 @@ if [ -n "$claims" ]; then
   IFS=$'\x1f' read -r c_repo c_ref c_env c_event c_workflow <<<"$claims" || true
 else
   c_repo="$repository" c_ref="${GITHUB_REF:-}" c_env="unknown" c_event="${GITHUB_EVENT_NAME:-}" c_workflow="${GITHUB_WORKFLOW_REF:-}"
+  # The same as for the claims above: control characters become blanks.
+  c_repo="${c_repo//[[:cntrl:]]/ }" c_ref="${c_ref//[[:cntrl:]]/ }"
+  c_event="${c_event//[[:cntrl:]]/ }" c_workflow="${c_workflow//[[:cntrl:]]/ }"
 fi
 run_facts="This run: repository=${c_repo:-?}, ref=${c_ref:-?}, environment=${c_env:-none}, event=${c_event:-?}, workflow=${c_workflow:-?}."
 
@@ -231,6 +234,10 @@ if [ -z "$vault_token" ]; then
   said="Vault said: ${err:-(no error text)}."
   repo_file="grants/repos/${repository}.yaml"
   claim_re='claim "([A-Za-z0-9_.-]+)"'
+  file_note=""
+  if [ "$role_source" = workflow-file ]; then
+    file_note=" The action made the role name $role from the name of the workflow file that started the run (role-from: workflow-file). In a called reusable workflow, this is the file of the caller."
+  fi
   if [ "$code" = 200 ]; then
     fail "Vault answered the login with role $role without a token. Report this to OSPO. $run_facts"
   elif [ "$code" = 429 ]; then
@@ -242,6 +249,9 @@ if [ -z "$vault_token" ]; then
         ;;
       short)
         fail "Vault has no role $role (from role: ${ROLE_INPUT:-}). Check the name of the workflow entry in $repo_file. If you added it just now, OSPO may not have applied the grant yet. $said $run_facts"
+        ;;
+      workflow-file)
+        fail "Vault has no role $role.$file_note Check that $repo_file has a workflow entry with the name '${role#"$prefix--"}', or remove role-from and set role. $said $run_facts"
         ;;
       *)
         suffix="${role#"$prefix"}"
@@ -256,7 +266,11 @@ if [ -z "$vault_token" ]; then
     esac
   elif [[ "$err" =~ $claim_re ]]; then
     claim="${BASH_REMATCH[1]}"
-    fail "This run does not match role $role: Vault refused claim $claim. $run_facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. $said"
+    reusable_note=""
+    if [ "$role_source" = workflow-file ] && [ "$claim" = job_workflow_ref ]; then
+      reusable_note=" If this job is in a called reusable workflow: the role of the caller file must bind the called workflow (grant keys for reusable workflows, not workflow_files alone). Ask OSPO."
+    fi
+    fail "This run does not match role $role: Vault refused claim $claim. $run_facts Run from the bound branch, environment or workflow file, or ask OSPO to change the grant. $said$file_note$reusable_note"
   else
     fail "Vault refused the login with role $role (HTTP ${code:-?}). $said $run_facts"
   fi

@@ -12,6 +12,15 @@ inputs:
       A full name `<org>--<repo>--<name>` is used as is (lower case).
     required: false
     default: ""
+  role-from:
+    description: >-
+      Since release 1.2. Where the Vault role name comes from. `input` (default):
+      from input `role`, as above. `workflow-file`: `<org>--<repo>--<stem>`, where
+      `<stem>` is the file name of the workflow that started the run, without
+      `.yml` or `.yaml` (lower case). In a called reusable workflow, this is the
+      file of the caller. Then `role` must be empty.
+    required: false
+    default: input
   github-token:
     description: >-
       Key of a GitHub token in the grant of this repository, for example
@@ -117,6 +126,7 @@ runs:
       shell: bash
       env:
         IN_ROLE: ${{ inputs.role }}
+        IN_ROLE_FROM: ${{ inputs.role-from }}
         IN_GITHUB_TOKEN: ${{ inputs.github-token }}
         IN_SECRETS: ${{ inputs.secrets }}
         IN_VAULT_URL: ${{ inputs.vault-url }}

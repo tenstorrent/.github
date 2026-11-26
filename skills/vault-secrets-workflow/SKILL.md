@@ -94,6 +94,13 @@ Remove `secrets:` if there is no other secret. Remove `github-token:` if there
 is no token. Remove `role:` if OSPO gave the default role `<org>--<repo>` of
 this repository. For a named workflow entry, the short name is enough, for
 example `role: nightly`. A full role name also works.
+If the grant has one role for each workflow file, named after the file (for
+example role `<org>--<repo>--create-repo` for `create-repo.yml`), you can use
+`role-from: workflow-file` (release 1.2) instead of `role:`. Then do not set
+`role:`. The action uses the file that started the run. In a called reusable
+workflow, this is the caller file, and the login works only if OSPO made the
+grant of that role for the reusable workflow (not with `workflow_files`
+alone). See the action README.
 `github-token` takes the key of the token in the grant, not a Vault path. The
 action finds where Vault keeps it. A full name `<org>--<repo>--<key>` or a full
 path with `/` also works, but do not write new workflows with them.
@@ -154,6 +161,7 @@ The README lists every message in
 | `This repository has no default Vault role` | `role` is empty, and the grant has no default role. | Failures |
 | `input role '...' is not a role of <repo>` | `role` names a role of another repository. | Failures |
 | `This run does not match role ...` | Wrong branch, environment, workflow file or event. | Failures |
+| `input role-from ...` | `role-from` has a wrong value, `role` is also set, or the workflow file name does not give a valid role name. | Failures |
 | `input github-token '...' is not a token of <repo>` | `github-token` names a token of another repository. | Failures |
 | `Role ... has no grant for GitHub token set ...` | Wrong token key, no grant for it, or the grant is not applied. | Failures |
 | `permission denied` on a token or `kv` path | Wrong name or path, or no access. | Failures |

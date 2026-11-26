@@ -136,6 +136,7 @@ messages in [Failures](#failures).
 | Input | Required | Default | Meaning |
 |---|---|---|---|
 | `role` | no | | Vault role of the workflow. Empty: the default role `<org>--<repo>` of the repository that runs the workflow. A short name, for example `nightly`: the role `<org>--<repo>--nightly` of a named workflow entry. A full name `<org>--<repo>--<name>` is used as is. The action uses lower case. A role of another repository is refused. |
+| `role-from` | no | `input` | Since release 1.2. `input`: the role comes from `role`, as in 1.1. `workflow-file`: the role is `<org>--<repo>--<stem>`, made from the name of the workflow file that started the run. Then `role` must be empty. See [Role from the workflow file name](#role-from-the-workflow-file-name-release-12). |
 | `github-token` | no | | Key of the token in the grant of this repository, for example `lib-read`. The action reads token set `<org>--<repo>--<key>` and finds where Vault keeps it. Still accepted: the full name `<org>--<repo>--<key>`, and (1.0 form) a full Vault path with `/`, which the action reads as is. A name of another repository is refused. |
 | `secrets` | no | | Secrets in [hashicorp/vault-action](https://github.com/hashicorp/vault-action) `secrets` syntax: `<path> <field> \| <NAME> ;` per line. |
 | `vault-url` | no | `https://vault-ospo.eng-svc.aws.tenstorrent.com` | Vault URL. Only the OSPO Vault production URL (default) and the staging URL are allowed. The JWT audience is always this URL. |
@@ -157,6 +158,70 @@ holds a copy. If an org variable changes, pass the new value:
           tailscale-client-id: ${{ vars.TS_VAULT_OSPO_CLIENT_ID }}
           tailscale-audience: ${{ vars.TS_VAULT_OSPO_AUDIENCE }}
 ```
+
+## Role from the workflow file name (release 1.2)
+
+`role-from` comes with release 1.2. Release 1.1 does not have it.
+
+Some grants have one role for each workflow file. Each role has the name of
+its file, and Vault binds it to that file (claims `workflow_ref` and
+`job_workflow_ref`). Example in `tenstorrent/internal-requests`: the file
+`.github/workflows/create-repo.yml` uses the role
+`tenstorrent--internal-requests--create-repo`. With `role-from:
+workflow-file`, each workflow file can have the same lines:
+
+```yaml
+        with:
+          role-from: workflow-file
+          github-token: <token-key>
+```
+
+Rules:
+
+- The role is `<org>--<repo>--<stem>`. `<stem>` is the file name of the
+  workflow without `.yml` or `.yaml`, in lower case. `Create-Repo.yml` gives
+  `create-repo`.
+- The action reads the file name from the runner variable
+  `GITHUB_WORKFLOW_REF` (`<owner>/<repo>/.github/workflows/<file>@<ref>`).
+- In a job of a called reusable workflow, `GITHUB_WORKFLOW_REF` names the
+  file of the caller, not the called file. The runner has no variable for the
+  called file. So the role name always comes from the CALLER file. See
+  [Reusable workflows](#reusable-workflows-and-role-from-workflow-file).
+- `role` must be empty. The action refuses `role-from: workflow-file` with a
+  `role`.
+- The stem must be a valid short role name, with the same rule as a short
+  `role`: only letters, digits, `.`, `_` and `-`; it starts and ends with a
+  letter, digit or `_`; it has no `--`. Otherwise the action refuses it. Then
+  remove `role-from` and set `role`.
+- The repository in `GITHUB_WORKFLOW_REF` must be the repository that runs the
+  workflow. Otherwise the action refuses it.
+- Other values of `role-from` are refused. `input` (the default) and an empty
+  value do the same as release 1.1.
+
+The action does not try a second role. Vault needs the role name at the login.
+A login with a wrong role is a refused login, an entry in the audit log, and
+counts against the rate limit of the logins. So the action sends one login
+with the one role, as for `role`, and has no fallback to the default role.
+The log shows `Logged in to Vault with role <role> (workflow-file).`
+
+### Reusable workflows and role-from workflow-file
+
+In a job of a called reusable workflow, the OIDC claims are:
+
+- `workflow_ref`: the caller file (the file that started the run).
+- `job_workflow_ref`: the called file (the file that holds the job).
+
+The action uses the role of the caller file. Vault accepts the login only if
+the grant of that role binds the called workflow as the job's workflow. The
+grant keys for this are `reusable_job_workflow_refs` (or `job_workflow_refs`
+for a reusable file of the same repository) with `callers` or
+`workflow_refs` for the caller files. A role that is pinned to the caller file
+alone with `workflow_files` binds both claims to the caller file, so Vault
+refuses a job in a called reusable workflow (claim `job_workflow_ref`). Ask
+OSPO to set up the grant for a reusable workflow.
+
+A login through a reusable workflow with `role-from: workflow-file` is not
+proven live yet.
 
 ## Linux runner pods without TUN (release 1.2)
 
@@ -328,8 +393,12 @@ one job.
 | `nothing to get` | `github-token` and `secrets` are both empty. | Set one or both. |
 | `input role has characters ...` / `input role '...' is not a role of <repo>` | `role` is not valid, or it is a role of another repository. | Use the short name of your workflow entry, or leave `role` empty for the default role. |
 | `This repository has no default Vault role` | `role` is empty, and every workflow entry in the grant has a name. | Set `role` to the name of your entry, for example `role: nightly`. |
-| `Vault has no role ...` | Wrong `role`, or the grant is not applied yet. | Check the name of the workflow entry in your grant file. |
-| `This run does not match role ...: Vault refused claim ...` | The run does not match the role: wrong branch, wrong `environment:`, wrong workflow file, or an event the role does not allow. The message shows the facts of the run. | Run from the bound ref, environment or workflow file, or ask OSPO to change the grant. |
+| `Vault has no role ...` | Wrong `role`, or the grant is not applied yet. With `role-from: workflow-file`, the message also says that the action made the role name from the workflow file name: the grant has no entry with the name of this file. | Check the name of the workflow entry in your grant file. |
+| `This run does not match role ...: Vault refused claim ...` | The run does not match the role: wrong branch, wrong `environment:`, wrong workflow file, or an event the role does not allow. The message shows the facts of the run. With `role-from: workflow-file`, it also says that the role name came from the workflow file name. | Run from the bound ref, environment or workflow file, or ask OSPO to change the grant. |
+| `input role-from must be input or workflow-file` | Wrong value (release 1.2). | Use `input` or `workflow-file`, in lower case, or remove the input. |
+| `input role-from workflow-file makes the role name from the workflow file name, so input role must be empty` | `role-from: workflow-file` and `role` are both set. | Remove one of them. |
+| `input role-from workflow-file: the name of the workflow file ... does not give a valid short role name` / `... does not end with .yml or .yaml` | The file name has characters that a role name cannot have, or has `--`. | Remove `role-from` and set `role`. |
+| `input role-from workflow-file needs the runner variable GITHUB_WORKFLOW_REF` / `GITHUB_WORKFLOW_REF '...' is not in the form ...` / `the workflow file ... is not in <repo>` | The runner did not give a usable workflow file name. | Remove `role-from` and set `role`. Report it to OSPO. |
 | `Vault refused the login: too many logins (rate limit)` | Too many logins in a short time. | Run the job again in a minute. |
 | `Vault did not answer the login within 15 seconds` | The action sent the login, and Vault did not answer in time. A stalled network connection. The action does not send the login again. | Run the job again. |
 | `the action could not reach Vault ... in 3 tries (<cause>, curl exit N). Vault did not get the login.` / `... for the read of GitHub token set ...` | Since release 1.2. The name lookup or the connection to Vault failed or timed out 3 times, or the Tailscale proxy could not connect to Vault. The cause is in the message. Vault did not get the request. | Run the job again. If it occurs again, read the "Join tailnet" and "Wait for Vault" step logs. |
