@@ -50,9 +50,11 @@ gh_token='ghs_dummyGitHubToken0123456789abcdef'
 b64url() {
   printf '%s' "$1" | base64 | tr -d '\n=' | tr '+/' '-_'
 }
-claims='{"repository":"tenstorrent/.github","ref":"refs/pull/7/merge","environment":"vault-action-test","event_name":"pull_request","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/pull/7/merge","aud":"x"}'
+claims='{"repository":"tenstorrent/.github","ref":"refs/pull/7/merge","environment":"vault-action-test","event_name":"pull_request","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/pull/7/merge","iss":"https://token.actions.githubusercontent.com","aud":"https://vault-ospo.eng-svc.aws.tenstorrent.com"}'
 jwt="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims").dummysignature0123456789"
-claims_noenv='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"push","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/heads/main"}'
+claims_noenv='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"push","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/heads/main","iss":"https://token.actions.githubusercontent.com","aud":"https://vault-ospo.eng-svc.aws.tenstorrent.com"}'
+# The audience is the Vault URL of the login, and no other.
+jwt_staging="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "${claims/vault-ospo.eng-svc/vault-ospo-staging.eng-svc}").dummysignature0123456789"
 jwt_noenv="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims_noenv").dummysignature9876543210"
 
 # ── Fake curl ───────────────────────────────────────────────────────────────
@@ -367,7 +369,7 @@ for other in https://vault-ospo.invalid http://vault-ospo.eng-svc.aws.tenstorren
     bad "vault URL '$other': login.sh sent a request"
   fi
 done
-run_login VAULT_URL=https://vault-ospo-staging.eng-svc.aws.tenstorrent.com
+run_login VAULT_URL=https://vault-ospo-staging.eng-svc.aws.tenstorrent.com FAKE_JWT="$jwt_staging"
 if [ "$rc" -ne 0 ] || ! grep -q -F -- 'https://vault-ospo-staging.eng-svc.aws.tenstorrent.com/v1/auth/jwt-github/login' "$work/argv"; then
   bad "staging URL: login.sh did not log in to the staging URL"
 else
@@ -824,5 +826,62 @@ for script in "$login" "$read_token" "$check"; do
     status=1
   fi
 done
+
+# ── Tripwires and token forms ────────────────────────────────────────────────
+# An OIDC token of another repository, issuer or audience was swapped in on the
+# way: it does not go to Vault.
+iss='"iss":"https://token.actions.githubusercontent.com"'
+aud="\"aud\":\"$url\""
+swapped() {
+  local title="$1" other
+  other="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$2").swappedsignature0123456789"
+  run_login FAKE_JWT="$other"
+  if [ "$rc" -ne 1 ] || ! printf '%s\n' "$log" | grep -q -x -F -- '::error title=vault-secrets: input not supported::OIDC-token does not have the issuer, audience and repository this job asked for. The OIDC token was not sent to Vault.'; then
+    bad "tripwire: $title: expected the OIDC claims tripwire (exit $rc)"
+  elif [ "$(login_count)" -ne 0 ] || grep -q -F -- "$other" "$work/body"; then
+    bad "tripwire: $title: the swapped token went to Vault"
+  elif [ "$(printf '%s\n' "$log" | grep -c -F -- "$other")" -ne 1 ]; then
+    bad "tripwire: $title: the token appears in more than its ::add-mask:: line"
+  else
+    echo "OK: tripwire: $title: not sent to Vault"
+  fi
+}
+login_count() { grep -c -F -- '/v1/auth/jwt-github/login' "$work/argv" || true; }
+swapped 'token of another repository' "{\"repository\":\"tenstorrent/other\",$iss,$aud}"
+swapped 'token of another issuer' "{\"repository\":\"tenstorrent/.github\",\"iss\":\"https://token.invalid\",$aud}"
+swapped 'token for another audience' "{\"repository\":\"tenstorrent/.github\",$iss,\"aud\":\"https://huggingface.co\"}"
+swapped 'token without an issuer' "{\"repository\":\"tenstorrent/.github\",$aud}"
+
+# A Vault token with a line break cannot start a workflow command of its own,
+# and is not passed on.
+run_login 'FAKE_VAULT_TOKEN=hvs.dummy\n::add-mask::EVIL'
+if [ "$rc" -ne 1 ] || ! printf '%s\n' "$log" | grep -q -F -- 'Vault gave a token in a form that the action does not expect'; then
+  bad "token form: a Vault token with a line break was accepted (exit $rc)"
+elif printf '%s\n' "$log" | grep -q -x -F -- '::add-mask::EVIL' || printf '%s\n' "$log" | grep -q '^vault-token<<'; then
+  bad "token form: the second line ran as a command, or the token was passed on"
+else
+  echo "OK: token form: a Vault token with a line break is masked per line and refused"
+fi
+
+# SHELLOPTS=xtrace from the caller: no trace line shows a secret.
+run_login SHELLOPTS=braceexpand:errexit:hashall:interactive-comments:nounset:pipefail:xtrace
+for value in "$jwt" "$vault_token" "$request_token"; do
+  if printf '%s\n' "$log" | grep -v -x -F -- "::add-mask::$value" | grep -v -e '^vault-token<<' -e '^vault_secrets_' -e "^$vault_token\$" | grep -q -F -- "$value"; then
+    bad "xtrace: a secret is in a trace line"
+  fi
+done
+if [ "$rc" -eq 0 ]; then
+  echo "OK: xtrace: login succeeds and no trace line shows a secret"
+else
+  bad "xtrace: login failed (exit $rc)"
+fi
+
+# No curl call reads a .curlrc.
+run_login
+if grep -v -e '^-q ' "$work/argv" | grep -q .; then
+  bad "curl: a call does not start with -q"
+else
+  echo "OK: curl: every call starts with -q"
+fi
 
 exit "$status"

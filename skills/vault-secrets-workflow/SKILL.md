@@ -111,6 +111,7 @@ The role in the grant decides. The claims of the run must match it.
 | `pull_request` from the same repository | Needs an environment | Add `environment:`. |
 | `pull_request` from a fork | No | A fork gets no OIDC token. |
 | `pull_request_target` | Never | The action refuses it. |
+| `workflow_run` | Only without the first run's code | The action allows it. Do not check out the head of the first run, run its code, or use its artifacts in the job. |
 | Publish or deploy job | Protected environment | Set required reviewers on the environment. |
 
 ## 5. Rules
@@ -149,7 +150,7 @@ The README lists every message in
 | Message | Cause | See README |
 |---|---|---|
 | `job needs permissions: id-token: write` | No `id-token: write`, or a fork pull request. | Failures |
-| `refused on pull_request_target` | Wrong event. | Failures |
+| `vault-secrets: input not supported` | A tripwire: `pull_request_target`, a `vault-url` on another host, or an input that starts with `-`. | Failures |
 | `Vault has no role ...` | Wrong role, or the grant is not applied. | Failures |
 | `This repository has no default Vault role` | `role` is empty, and the grant has no default role. | Failures |
 | `input role '...' is not a role of <repo>` | `role` names a role of another repository. | Failures |

@@ -52,6 +52,9 @@ on:
     paths:
       - "actions/hf-oidc-token/**"
       - "!actions/hf-oidc-token/**/*.md"
+      # prepare.sh runs the shared tripwires.
+      - "actions/tripwires/**"
+      - "!actions/tripwires/**/*.md"
       - ".github/workflows/hf-oidc-token-test.yml"
   workflow_dispatch:
 

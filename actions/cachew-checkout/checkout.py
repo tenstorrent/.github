@@ -17,12 +17,19 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
 import uuid
 
 ACTION = Path(__file__).resolve().parent
+# The shared tripwires, from the same checkout of this repository as the action:
+# the consumer's pin to this action covers them too.
+sys.path.insert(0, str(ACTION.parent / "tripwires"))
+import tripwires  # noqa: E402
+from tripwires import as_parsed, mask  # noqa: E402,F401
+
 TRUSTED_CACHES = tuple(json.loads((ACTION / "trusted_caches.json").read_text())["origins"])
 STAGE_PREFIX = ".cachew-checkout-"
 # Git messages that mean the cache endpoint itself is unusable, as opposed to a
@@ -94,10 +101,13 @@ class SecurityViolation(Bypass):
     somewhere untrusted. Unlike a Bypass there is no fallback: the action fails."""
 
 
-def mask(value):
-    """A GitHub workflow command that hides value wherever the log would show it."""
-    if value:
-        print("::add-mask::" + value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"), flush=True)
+def tripwire(check, *arguments, **keywords):
+    """Run a shared tripwire (../tripwires); when it fires, as this action's
+    SecurityViolation, so every handler that tells it from a Bypass still does."""
+    try:
+        return check(*arguments, **keywords)
+    except tripwires.Violation as error:
+        raise SecurityViolation(str(error)) from None
 
 
 def mask_token(environ):
@@ -110,12 +120,11 @@ def mask_token(environ):
 
 
 def report_violation(error):
-    """A GitHub error annotation. The message is one of this module's fixed
-    strings, never the offending value, which could itself carry workflow commands."""
-    print(
-        "::error title=cachew-checkout: possible security compromise attempt::"
-        f"{error}. The checkout was stopped without falling back to the standard checkout. "
-        "If this input is intentional, it is not supported; otherwise treat the workflow run as hostile."
+    """A GitHub error annotation. The message is a fixed string of this module
+    or of the shared tripwires, never the offending value, which could itself
+    carry workflow commands."""
+    tripwires.report(
+        "cachew-checkout", error, "The checkout was stopped without falling back to the standard checkout."
     )
 
 
@@ -125,10 +134,6 @@ def loopback_http_allowed(environ):
     return environ.get("CACHEW_TEST_ALLOW_LOOPBACK_HTTP") == "1"
 
 
-# A server origin ends up in Git configuration keys, cache URL paths and the
-# shell command of `git submodule foreach`, so its host is limited to DNS names
-# and IP literals: no quotes, spaces or shell metacharacters.
-HOST = re.compile(r"(?P<name>[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])(?::(?P<port>[0-9]{1,5}))?")
 # Never handed to child processes as such. Git still receives the token as an
 # Authorization header in command-scoped configuration (GIT_CONFIG_VALUE_n),
 # which every process Git starts inherits: the job's hooks, filter drivers and
@@ -141,66 +146,20 @@ SECRET_ENVIRONMENT = ("CACHEW_TOKEN",)
 TLS_OVERRIDES = ("GIT_SSL_NO_VERIFY",)
 
 
-def as_parsed(value):
-    """A URL as every parser reads it: tabs and line breaks dropped, then C0
-    controls and spaces trimmed from both ends."""
-    return re.sub(r"[\t\n\r]", "", value).strip("".join(map(chr, range(0x21))))
-
-
-# The authority of a URL as written: after the scheme and its slashes, up to the
-# first character that ends it for any of Python, Git or a WHATWG parser.
-AUTHORITY = re.compile(r"[^:/?#\\]*:[/\\]*([^/?#\\]*)")
-METACHARACTER_FREE_HOST = re.compile(r"[A-Za-z0-9.:\[\]-]*")
-
-
 def origin(value, environ):
-    # First, whatever else the URL holds: the standard checkout this would fall
-    # back to reads only the URL's origin, so a path, query, fragment, userinfo
-    # or scheme that cachew does not support does not keep the host from its
-    # `git submodule foreach` shell commands. The host is read as written, as
-    # well as as parsed, so a URL Python's parser rejects (a malformed IPv6
-    # literal, a character NFKC maps to a delimiter) is still refused. Tabs and
-    # line breaks are dropped and the ends trimmed first, as every parser does.
-    written = as_parsed(value)
-    authority = AUTHORITY.match(written)
-    hosts = [authority[1].rpartition("@")[2]] if authority else []
+    """A server origin as actions/checkout reads it (URL.origin): the host in
+    lower case and no default port, so `https://GitHub.com:443` is the same
+    server, and a trusted cache spelled that way is still the trusted cache.
+
+    The origin ends up in Git configuration keys, cache URL paths and the shell
+    command of `git submodule foreach`. The standard checkout this would fall
+    back to reads only the URL's origin, so a host with metacharacters is a
+    violation whatever else the URL holds; every other unusable URL (a path,
+    userinfo, plain HTTP outside the test fixtures) is only unsupported."""
     try:
-        url = urllib.parse.urlsplit(value)
-    except ValueError:
-        url = None
-    else:
-        hosts.append(url.netloc.rpartition("@")[2])
-    if any(not METACHARACTER_FREE_HOST.fullmatch(host) for host in hosts):
-        raise SecurityViolation("server URL host contains shell or configuration metacharacters")
-    if url is None:
-        raise Bypass("unsupported server URL")
-    # Never weaken TLS for cachew or upstream outside the test fixtures.
-    local_http = (
-        loopback_http_allowed(environ) and url.scheme == "http" and url.hostname in ("127.0.0.1", "localhost", "::1")
-    )
-    if (
-        (url.scheme != "https" and not local_http)
-        or not url.netloc
-        or url.username
-        or url.password
-        or url.path not in ("", "/")
-        or url.query
-        or url.fragment
-    ):
-        raise Bypass("unsupported server URL")
-    host = HOST.fullmatch(url.netloc)
-    if not host:
-        raise Bypass("unsupported server URL")
-    # The origin as actions/checkout reads it (URL.origin): the host in lower case
-    # and no default port, so `https://GitHub.com:443` is the same server, and a
-    # trusted cache spelled that way is still the trusted cache.
-    name, port = host["name"].lower(), host["port"]
-    if port is not None:
-        if int(port) > 65535:
-            raise Bypass("unsupported server URL")
-        if int(port) != (443 if url.scheme == "https" else 80):
-            name = f"{name}:{int(port)}"
-    return f"{url.scheme}://{name}"
+        return tripwire(tripwires.origin, value, "server URL", loopback_http=loopback_http_allowed(environ))
+    except tripwires.Unsupported:
+        raise Bypass("unsupported server URL") from None
 
 
 # The whitespace JavaScript's String.prototype.trim strips, as core.getInput does.
@@ -297,13 +256,11 @@ def unsafe_pr_checkout(environ, repository, ref, commit):
 
 
 def relative_path(value):
-    path = PurePosixPath(value)
+    tripwire(tripwires.relative_path, value, "repository or submodule path", forbidden=(".git",))
     parts = value.split("/")
-    if path.is_absolute() or ".." in parts or ".git" in parts or "\\" in value or any(ord(c) < 32 for c in value):
-        raise SecurityViolation("repository or submodule path escapes its directory or contains control characters")
     if not value or "" in parts or "." in parts:
         raise Bypass("unsafe repository or submodule path")
-    return path
+    return PurePosixPath(value)
 
 
 def container_path(*parts):
@@ -557,8 +514,7 @@ def submodule_repository(child_url, url, upstream):
         raise Bypass("submodule uses another upstream")
     # Exactly owner/name: no query, fragment or encoded segments in the cache request path.
     child_path = child_url[len(upstream) + 1 :]
-    if not re.fullmatch(r"[\w./-]*", child_path, re.ASCII):
-        raise SecurityViolation("submodule URL carries a query, encoded segment or other request smuggling")
+    tripwire(tripwires.plain_path, child_path, "submodule URL")
     return repository_name(child_path)
 
 
@@ -584,6 +540,32 @@ def remove_stale_stages(target):
             shutil.rmtree(entry, ignore_errors=True)
 
 
+def refuse_job_token_elsewhere(environ):
+    """The job's own token (github.token, which action.yml reports in
+    CACHEW_JOB_TOKEN) is only good on the job's server. A github-server-url
+    that names another server would only hand it over: checkout sends the token
+    to that URL's origin. A checkout from another server passes its own token."""
+    if environ.get("CACHEW_JOB_TOKEN") != "true":
+        return
+    value = checkout_input(environ, "CACHEW_GITHUB_SERVER_URL")
+    if not value:
+        return
+    home = origin(environ["GITHUB_SERVER_URL"], environ)
+    violation = SecurityViolation(
+        "github-server-url is not the job's GitHub server and would have received the job's GitHub token"
+    )
+    try:
+        server = origin(value, environ)
+    except SecurityViolation:
+        raise
+    except (Bypass, ValueError):
+        # Any spelling beyond a plain origin (a path, userinfo, a port that is
+        # no port) hides where the token ends up. The job's server needs none.
+        raise violation from None
+    if server != home:
+        raise violation
+
+
 def refuse_attack_inputs(environ):
     """The checks that have no fallback, before anything can choose the standard
     checkout: an unsupported mode (LFS, an SSH key), an old Git or a cache turned
@@ -599,13 +581,16 @@ def refuse_attack_inputs(environ):
             pass
 
     def path():
-        workspace = Path(environ["GITHUB_WORKSPACE"]).resolve()
-        if not (workspace / checkout_input(environ, "CACHEW_PATH")).resolve().is_relative_to(workspace):
-            raise SecurityViolation("checkout path is outside the workspace")
+        tripwire(
+            tripwires.inside,
+            environ["GITHUB_WORKSPACE"],
+            checkout_input(environ, "CACHEW_PATH"),
+            "checkout path",
+            "the workspace",
+        )
 
     def ref():
-        if checkout_input(environ, "CACHEW_REF").startswith("-"):
-            raise SecurityViolation("ref starts with '-' and would be read as a Git option")
+        tripwire(tripwires.no_option, checkout_input(environ, "CACHEW_REF"), "ref", "a Git option")
 
     def cache():
         # Whatever the server URL: one cachew cannot use still leaves the cache
@@ -618,6 +603,8 @@ def refuse_attack_inputs(environ):
             upstream = None
         cache_candidates(checkout_input(environ, "CACHEW_CACHEW_URL", "auto"), upstream, environ)
 
+    check(lambda: tripwire(tripwires.hostile_environment, environ))
+    check(lambda: refuse_job_token_elsewhere(environ))
     check(path)
     check(ref)
     check(lambda: repository_name(checkout_input(environ, "CACHEW_REPOSITORY") or environ["GITHUB_REPOSITORY"]))
@@ -681,8 +668,7 @@ class Checkout:
         if self.commit and not SHA.fullmatch(self.commit):
             raise Bypass("unsupported checkout commit")
         self.commit = self.commit.lower()
-        if self.ref.startswith("-"):
-            raise SecurityViolation("ref starts with '-' and would be read as a Git option")
+        tripwire(tripwires.no_option, self.ref, "ref", "a Git option")
         if self.ref.startswith("+") or any(c.isspace() or c in ":*?[^~\\" for c in self.ref):
             raise Bypass("unsupported checkout ref")
         self.depth = fetch_depth(checkout_input(environ, "CACHEW_FETCH_DEPTH", "1"))
@@ -707,12 +693,8 @@ class Checkout:
         self.workspace_path = os.path.abspath(environ["GITHUB_WORKSPACE"])
         path = checkout_input(environ, "CACHEW_PATH")
         self.repository_path = os.path.abspath(os.path.join(self.workspace_path, path))
-        workspace = Path(environ["GITHUB_WORKSPACE"]).resolve()
-        target = workspace / path
-        # Resolve existing ancestors before creating anything, including symlinks.
-        self.target = target.resolve()
-        if not self.target.is_relative_to(workspace):
-            raise SecurityViolation("checkout path is outside the workspace")
+        # Resolves existing ancestors before creating anything, including symlinks.
+        self.target = tripwire(tripwires.inside, environ["GITHUB_WORKSPACE"], path, "checkout path", "the workspace")
         if self.target.is_dir() and not self.target.is_symlink():
             remove_stale_stages(self.target)
         if self.target.exists() and (not self.target.is_dir() or any(self.target.iterdir())):

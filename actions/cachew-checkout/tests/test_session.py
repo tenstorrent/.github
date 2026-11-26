@@ -1303,7 +1303,7 @@ class SessionTests(unittest.TestCase):
                 outputs = fixtures.runner_file(self.fixture.root / "output")
                 self.assertEqual(outputs["ready"], "false")
                 self.assertEqual(outputs.get("security-violation"), "true")
-                self.assertIn("::error title=cachew-checkout: possible security", result.stdout)
+                self.assertIn("::error title=cachew-checkout: input not supported::", result.stdout)
 
     def test_an_untrusted_https_cache_origin_is_reported_as_a_security_violation(self):
         for url, violation in (("https://evil.example", "true"), ("http://10.43.0.100:8080", None)):
@@ -1313,7 +1313,7 @@ class SessionTests(unittest.TestCase):
                 outputs = fixtures.runner_file(self.fixture.root / "output")
                 self.assertEqual(outputs["ready"], "false")
                 self.assertEqual(outputs.get("security-violation"), violation)
-                self.assertEqual("::error title=cachew-checkout: possible security" in result.stdout, bool(violation))
+                self.assertEqual("::error title=cachew-checkout: input not supported::" in result.stdout, bool(violation))
                 self.assertEqual(list(self.fixture.runtime.glob("cachew-*")), [])
 
     def test_a_redirected_session_directory_is_reported_as_a_security_violation(self):
@@ -1325,7 +1325,7 @@ class SessionTests(unittest.TestCase):
         outputs = fixtures.runner_file(self.fixture.root / "output")
         self.assertEqual(outputs["security-violation"], "true")
         self.assertEqual(outputs["ready"], "false")
-        self.assertIn("::error title=cachew-checkout: possible security", result.stdout)
+        self.assertIn("::error title=cachew-checkout: input not supported::", result.stdout)
         self.assertEqual(list(elsewhere.iterdir()), [])
         self.finish()
 
@@ -1448,7 +1448,9 @@ class SessionTests(unittest.TestCase):
         binaries.mkdir()
         (binaries / "python3").write_text("#!/bin/sh\nexit 127\n")
         (binaries / "python3").chmod(0o700)
-        result = self.run_prepare_expecting_fallback(dict(self.env, PATH=f"{binaries}{os.pathsep}{self.env['PATH']}"))
+        (binaries / "bash").symlink_to(shutil.which("bash"))
+        # The only python3 on PATH: the step takes the first one that works.
+        result = self.run_prepare_expecting_fallback(dict(self.env, PATH=str(binaries)))
         self.assertIn("Python 3.10+ unavailable", result.stdout)
         # action.yml skips the cachew and configure steps when the session is not ready.
         self.plain_checkout_without_cache(self.env, cachew=False)

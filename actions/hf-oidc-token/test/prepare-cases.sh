@@ -3,7 +3,9 @@
 # Test helper for .github/workflows/hf-oidc-token-test.yml. Not used by the action.
 # Runs prepare.sh directly, without the network. Checks:
 #   - each bad input fails with its own message, also with if-no-token warn;
-#   - pull_request_target and workflow_run always fail;
+#   - the tripwires (pull_request_target, workflow_run, a branch or resource
+#     that starts with '-' or holds a line break) always fail, with their own
+#     annotation, and never show the value;
 #   - other refusals (event, also push, branch, unprotected branch, no
 #     resource, no id-token) fail with
 #     if-no-token fail, and warn and succeed (go=false, stopped=prepare) with warn;
@@ -26,7 +28,7 @@ run() {
   : >"$work/out"
   rc=0
   env -i PATH="$PATH" \
-    ACTIONS_ID_TOKEN_REQUEST_URL=https://example.invalid/not-used \
+    ACTIONS_ID_TOKEN_REQUEST_URL=https://test.actions.githubusercontent.com/not-used \
     GITHUB_EVENT_NAME=workflow_dispatch \
     GITHUB_REF=refs/heads/main \
     GITHUB_REF_PROTECTED=true \
@@ -66,6 +68,22 @@ expect_fail() {
   done
 }
 
+# expect_trip <message start> <env...>: fails in both modes with exactly one
+# line, the tripwire annotation. A value with CANARY must not be in the log.
+expect_trip() {
+  local want="$1"; shift
+  for m in fail warn; do
+    run IN_IF_NO_TOKEN="$m" "$@"
+    if [ "$rc" -ne 1 ]; then bad "[$m] tripwire $want: expected exit 1, got $rc"; continue; fi
+    [ "$(wc -l <"$work/log" | tr -d ' ')" -eq 1 ] || { bad "[$m] tripwire $want: expected one line"; continue; }
+    grep -q -x -F -- "::error title=hf-oidc-token: input not supported::$want. No token was requested." "$work/log" \
+      || { bad "[$m] tripwire $want: annotation is not as expected"; continue; }
+    ! grep -q CANARY "$work/log" || { bad "[$m] tripwire $want: the annotation shows the value"; continue; }
+    [ ! -s "$work/out" ] || { bad "[$m] tripwire $want: outputs after a tripwire"; continue; }
+    ok
+  done
+}
+
 # expect_stop <message part> <env...>: fails in mode fail, warns in mode warn.
 expect_stop() {
   local want="$1"; shift
@@ -87,7 +105,6 @@ run IN_IF_NO_TOKEN=maybe
 { [ "$rc" -eq 1 ] && grep -qF 'if-no-token must be fail or warn' "$work/log"; } && ok || bad "if-no-token=maybe"
 expect_fail "has a '/'" IN_RESOURCE=acme/model
 expect_fail "not a valid Hugging Face user name" 'IN_RESOURCE=bad name'
-expect_fail "not a valid Hugging Face user name" 'IN_RESOURCE=-start'
 expect_fail "not a valid Hugging Face user name" 'IN_RESOURCE=x;y'
 expect_fail "not a Hugging Face repository name" IN_MODELS=no-slash
 expect_fail "not a Hugging Face repository name" 'IN_MODELS=a/b/c'
@@ -98,9 +115,78 @@ expect_fail "not a valid branch name" 'IN_BRANCH=refs/heads/../x'
 expect_fail "not a valid branch name" 'IN_BRANCH=a b'
 expect_fail "more than 50" "IN_MODELS=$(for i in $(seq 1 51); do printf 'o/m%s,' "$i"; done)"
 
-# ── Events that always fail ──────────────────────────────────────────────────
-expect_fail "refused on pull_request_target" GITHUB_EVENT_NAME=pull_request_target
-expect_fail "refused on workflow_run" GITHUB_EVENT_NAME=workflow_run
+# ── Tripwires: always fail ───────────────────────────────────────────────────
+outside="where code from outside the repository can reach the job's secrets"
+expect_trip "the workflow runs on pull_request_target, $outside" GITHUB_EVENT_NAME=pull_request_target
+expect_trip "the workflow runs on workflow_run, $outside" GITHUB_EVENT_NAME=workflow_run
+# Before every other check: no resource, wrong branch, no id-token.
+expect_trip "the workflow runs on pull_request_target, $outside" GITHUB_EVENT_NAME=pull_request_target \
+  IN_RESOURCE= GITHUB_REF=refs/heads/feature ACTIONS_ID_TOKEN_REQUEST_URL=
+option="starts with '-' and would be read as a command-line option"
+line="contains a line break or control character and could inject a line or a command"
+expect_trip "resource $option" IN_RESOURCE=-CANARY
+expect_trip "BASH_ENV is set, so every bash script of the job first runs the file it names" BASH_ENV=/nonexistent/CANARY
+expect_trip "an exported shell function can replace a command in every bash script of the job" 'BASH_FUNC_jq%%=() { echo CANARY; }'
+expect_trip "an exported shell function can replace a command in every bash script of the job" 'BASH_FUNC_module%%=() { echo CANARY; }'
+# Functions named like the commands that could start the check itself, or stop
+# the script after it: the check still runs, and the script still stops.
+expect_trip "an exported shell function can replace a command in every bash script of the job" \
+  'BASH_FUNC_env%%=() { return 0; }' 'BASH_FUNC_python3%%=() { return 0; }' 'BASH_FUNC_exec%%=() { return 0; }' \
+  'BASH_FUNC_unset%%=() { return 0; }' 'BASH_FUNC_export%%=() { return 0; }' 'BASH_FUNC_exit%%=() { return 0; }' \
+  'BASH_FUNC_dirname%%=() { return 0; }' 'BASH_FUNC_pwd%%=() { return 0; }' 'BASH_FUNC_cd%%=() { return 0; }'
+# PATH: an entry that means the current directory, and a curl that a pull
+# request could have placed. The same curl outside the workspace passes.
+expect_trip "PATH has an empty or relative entry, so commands are looked up in the current directory" "PATH=$PATH:"
+mkdir -p "$work/ws/bin"
+printf '#!/bin/sh\necho CANARY\n' >"$work/ws/bin/curl"
+chmod +x "$work/ws/bin/curl"
+expect_trip "the first curl on PATH is inside the workspace, where a pull request can place it" \
+  GITHUB_WORKSPACE="$work/ws" PATH="$work/ws/bin:$PATH"
+run GITHUB_WORKSPACE="$work/elsewhere" PATH="$work/ws/bin:$PATH"
+grep -q ': input not supported::' "$work/log" && bad "a curl outside the workspace must pass the tripwire" || ok
+# A python3 that a pull request placed in the workspace, first on PATH, must
+# not stand in for the checks: it never runs, and the real checks still fire.
+# The same for another spelling of the workspace (a link to it).
+mkdir -p "$work/pr/bin"
+printf '#!/bin/sh\necho ran >>"%s"\nexit 0\n' "$work/fake-python-ran" >"$work/pr/bin/python3"
+chmod +x "$work/pr/bin/python3"
+ln -s "$work/pr" "$work/pr-link"
+for spelled in "$work/pr/bin" "$work/pr-link/bin"; do
+  expect_trip "resource $option" IN_RESOURCE=-CANARY GITHUB_WORKSPACE="$work/pr" PATH="$spelled:$PATH"
+done
+[ ! -e "$work/fake-python-ran" ] && ok || bad "a python3 from the workspace ran in place of the checks"
+# Without Python the checks cannot run: the pinned title, in both modes.
+mkdir -p "$work/no-python-bin"
+ln -s "$(command -v bash)" "$work/no-python-bin/bash"
+for mode in fail warn; do
+  run IN_IF_NO_TOKEN="$mode" PATH="$work/no-python-bin"
+  if [ "$rc" -ne 1 ] || ! grep -q -x -F -- '::error title=hf-oidc-token: checks could not run::There is no Python on PATH. The checks need Python 3.9 or newer on PATH, outside the workspace.' "$work/log"; then
+    bad "[$mode] runner without python3: expected the annotation 'hf-oidc-token: checks could not run' (exit $rc)"
+  else ok; fi
+done
+expect_trip "GIT_TRACE_REDACT is off, so Git traces print credentials" GIT_TRACE_REDACT=false
+# A bash that a pull request placed in the workspace, first on PATH. This one
+# hands over to the real bash, so the check runs and reports it.
+mkdir -p "$work/shell/bin"
+printf '#!/bin/sh\nexec "%s" "$@"\n' "$(command -v bash)" >"$work/shell/bin/bash"
+chmod +x "$work/shell/bin/bash"
+expect_trip "the first bash on PATH is inside the workspace, where a pull request can place it" \
+  GITHUB_WORKSPACE="$work/shell" PATH="$work/shell/bin:$PATH"
+# Certificates that a pull request placed in the workspace: with a proxy
+# variable they would let another server read the requests of the action.
+# The runner's own certificates (here: outside the workspace) pass.
+for name in CURL_CA_BUNDLE SSL_CERT_FILE; do
+  expect_trip "$name names certificates inside the workspace, where a pull request can place them, so a request that carries a secret would trust any server" \
+    GITHUB_WORKSPACE="$work/pr" "$name=$work/pr/CANARY.pem" HTTPS_PROXY=http://CANARY.invalid:3128
+done
+run GITHUB_WORKSPACE="$work/pr" CURL_CA_BUNDLE="$work/runner-ca.pem" SSL_CERT_FILE=/etc/ssl/cert.pem HTTPS_PROXY=http://proxy.invalid:3128
+{ [ "$rc" -eq 0 ] && [ "$(output go)" = true ]; } && ok || bad "certificates outside the workspace must pass"
+expect_trip "ACTIONS_ID_TOKEN_REQUEST_URL is not a GitHub OIDC endpoint and would have received the OIDC request token" \
+  ACTIONS_ID_TOKEN_REQUEST_URL=https://CANARY.invalid/oidc
+expect_trip "resource $option" 'IN_RESOURCE=  --CANARY'
+expect_trip "resource $line" "IN_RESOURCE=x${nl}CANARY"
+expect_trip "branch $option" IN_BRANCH=--CANARY
+expect_trip "branch $line" "IN_BRANCH=main${nl}CANARY"
 
 # ── Refusals that depend on if-no-token ──────────────────────────────────────
 expect_stop "only for the events schedule and workflow_dispatch" GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/1/merge

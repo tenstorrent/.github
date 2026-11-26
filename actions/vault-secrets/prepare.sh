@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031
+# (The tripwires run in a subshell that exports defaults for the inputs; the
+# rest of the script reads the inputs themselves.)
 # Pre-checks for the vault-secrets action. Fails early with a plain message.
 # Every input arrives through env (never through ${{ }} in shell text).
 #
@@ -6,6 +9,8 @@
 #         IN_TS_CLIENT_ID IN_TS_AUDIENCE IN_TS_TAGS IN_VAULT_TIMEOUT EVENT_NAME
 #         REPOSITORY (github.repository) ACTIONS_ID_TOKEN_REQUEST_URL GITHUB_OUTPUT
 # Optional: IN_NETWORK_MODE IN_PROXY_PORT RUNNER_OS NODE_OPTIONS
+# Runs:   ../tripwires/tripwires.py (python3), from the same download of this
+#         repository as the action
 # Writes: outputs url, join, spec, vault-timeout, role, role-source, prefix,
 #         token-set, tailscaled-args, proxy-url, proxy-env
 set -euo pipefail
@@ -18,17 +23,91 @@ fail() {
   exit 1
 }
 
-if [ "${EVENT_NAME:-}" = pull_request_target ]; then
-  fail "refused on pull_request_target: that event runs with base-branch rights on untrusted pull request code. Use pull_request, push, workflow_dispatch or schedule."
+# No test for python3 here: the search below reports a missing interpreter.
+for tool in curl jq; do
+  command -v "$tool" >/dev/null 2>&1 || fail "this runner has no $tool; the action needs bash, curl, jq and python3."
+done
+
+# Tripwires (../tripwires/README.md): values that only make sense as an attack.
+# No fallback: the annotation is titled "vault-secrets: input not supported"
+# and never shows the value.
+# - pull_request_target runs with base-branch rights on untrusted pull request
+#   code. Use pull_request, push, workflow_dispatch or schedule.
+# - The action sends the OIDC token of the job to vault-url. Only OSPO Vault
+#   gets it.
+# - A name that starts with '-' or holds a line break is no role, token or
+#   Tailscale setting.
+# The checks below still give each unsupported value its own message.
+# - The environment must not be prepared to run code in the action's scripts
+#   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
+#   function, tracing, a PATH that finds curl, jq or bash in the workspace, a
+#   library of theirs or a certificate file in the workspace), and the OIDC
+#   request must go to GitHub.
+# Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
+# nor the OIDC request token.
+#
+# Test fixture only (test/proxy/fixture.py, which serves a local OIDC endpoint):
+# the OIDC URL check is skipped for the one URL in a file that the fixture
+# writes into this action's own directory. A value in GITHUB_ENV cannot write
+# that file, and whoever can write there can change this script as well.
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+# The interpreter of the checks, never one from the workspace (see the file).
+# shellcheck disable=SC2034
+trusted_python_names=python3
+# shellcheck source=/dev/null
+. "$tripwires_here/../tripwires/trusted-python.sh"
+[[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' vault-secrets "$trusted_python_problem"; exit 1; }
+[[ "$tripwires_here" == /* ]] || tripwires_here="$PWD/$tripwires_here"
+oidc_check='oidc-url       ACTIONS_ID_TOKEN_REQUEST_URL'
+fixture_url="$tripwires_here/test/proxy/oidc-request-url"
+if [[ -f "$fixture_url" && -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+  IFS= read -r fixture_url <"$fixture_url" || true
+  if [[ "$fixture_url" == "$ACTIONS_ID_TOKEN_REQUEST_URL" ]]; then
+    echo "Test fixture: the OIDC request goes to the local endpoint of test/proxy/fixture.py."
+    oidc_check='# oidc-url: local test fixture'
+  fi
+fi
+tripwire_fired=""
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export GITHUB_EVENT_NAME="${EVENT_NAME:-}"
+  export IN_VAULT_URL="${IN_VAULT_URL:-}" IN_ROLE="${IN_ROLE:-}" IN_GITHUB_TOKEN="${IN_GITHUB_TOKEN:-}"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+  export IN_TS_CLIENT_ID="${IN_TS_CLIENT_ID:-}" IN_TS_AUDIENCE="${IN_TS_AUDIENCE:-}" IN_TS_TAGS="${IN_TS_TAGS:-}"
+  exec "$trusted_python" -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title vault-secrets --consequence "No request was sent to Vault."
+) <<EOF || tripwire_fired=1
+# workflow_run is allowed on purpose (README, "Security notes")
+event          pull_request_target
+environment    curl jq tailscale bash
+$oidc_check
+trusted-origin IN_VAULT_URL=vault-url https://vault-ospo.eng-svc.aws.tenstorrent.com https://vault-ospo-staging.eng-svc.aws.tenstorrent.com
+no-option      IN_ROLE=role
+single-line    IN_ROLE=role
+no-option      IN_GITHUB_TOKEN=github-token
+single-line    IN_GITHUB_TOKEN=github-token
+no-option      IN_TS_CLIENT_ID=tailscale-client-id
+single-line    IN_TS_CLIENT_ID=tailscale-client-id
+no-option      IN_TS_AUDIENCE=tailscale-audience
+single-line    IN_TS_AUDIENCE=tailscale-audience
+no-option      IN_TS_TAGS=tailscale-tags
+single-line    IN_TS_TAGS=tailscale-tags
+EOF
+if [[ -n "$tripwire_fired" ]]; then
+  POSIXLY_CORRECT=1
+  exit 1
 fi
 
 if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
   fail "job needs permissions: id-token: write (not available on fork pull requests)"
 fi
-
-for tool in curl jq; do
-  command -v "$tool" >/dev/null 2>&1 || fail "this runner has no $tool; the action needs bash, curl and jq."
-done
 
 lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
@@ -161,7 +240,8 @@ fi
 
 url="${IN_VAULT_URL:-$DEFAULT_URL}"
 while [[ "$url" == */ ]]; do url="${url%/}"; done
-# The action sends the OIDC token of the job to this URL. Only OSPO Vault gets it.
+# The tripwire above already refused every other host. This keeps the one
+# spelling the later steps use (no port, no upper case).
 case "$url" in
   https://vault-ospo.eng-svc.aws.tenstorrent.com | https://vault-ospo-staging.eng-svc.aws.tenstorrent.com) ;;
   *) fail "input vault-url is not an OSPO Vault URL. Remove the input to use the default. Allowed: https://vault-ospo.eng-svc.aws.tenstorrent.com, https://vault-ospo-staging.eng-svc.aws.tenstorrent.com." ;;
@@ -220,7 +300,7 @@ case "$network_mode" in
     tailscaled_args="--tun=userspace-networking --outbound-http-proxy-listen=127.0.0.1:$proxy_port"
     # hashicorp/vault-action has no proxy input. A step-local Node preload
     # gives its HTTP client (got, Node global agents) the Tailscale proxy.
-    preload="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proxy-agent.cjs"
+    preload="$tripwires_here/proxy-agent.cjs"
     # NODE_OPTIONS accepts double-quoted paths; escape quotes and backslashes.
     preload="${preload//\\/\\\\}"
     preload="${preload//\"/\\\"}"
@@ -239,7 +319,7 @@ esac
 # other result means a listener. The wait step then checks the route to Vault.
 if [ "$network_mode" = userspace ] && [ "$join" = false ]; then
   probe_rc=0
-  curl -s --noproxy '*' --connect-timeout 2 --max-time 2 -o /dev/null "$proxy_url/" || probe_rc=$?
+  curl -q -s --noproxy '*' --connect-timeout 2 --max-time 2 -o /dev/null "$proxy_url/" || probe_rc=$?
   if [ "$probe_rc" -eq 7 ] || [ "$probe_rc" -eq 28 ]; then
     if [ "${IN_JOIN_TAILNET:-auto}" = auto ]; then
       fail "network-mode userspace: this runner is already on the tailnet, but no Tailscale HTTP proxy answers on 127.0.0.1:$proxy_port. The action does not start a second Tailscale. Use join-tailnet: true on a runner without Tailscale, or set proxy-port to the port of the running Tailscale HTTP proxy (with join-tailnet: false), or use network-mode: kernel for a runner with a route to Vault."

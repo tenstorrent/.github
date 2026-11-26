@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2030,SC2031
+# (The tripwires run in a subshell that exports defaults for the inputs; the
+# rest of the script reads the inputs themselves.)
 # Pre-checks for the hf-oidc-token action. No network call. Stops early with a
 # plain message.
 # Every input arrives through env (never through ${{ }} in shell text).
 #
 # Two kinds of stop:
-#   fail  An input has a bad value, or the run uses an event that must never
-#         get a token (pull_request_target, workflow_run). Always an error.
+#   fail  An input has a bad value. Always an error. So is a tripwire
+#         (../tripwires/README.md): an event that must never get a token
+#         (pull_request_target, workflow_run), or a branch or resource that
+#         starts with '-' or holds a line break.
 #   stop  This run cannot get a token (no resource, wrong branch, branch not
 #         protected, event not allowed, no id-token: write). Error when if-no-token is `fail`;
 #         warning and success when it is `warn` (output stopped=prepare).
@@ -60,6 +65,56 @@ trim() {
   printf '%s' "$s"
 }
 
+# ── Tripwires: values that only make sense as an attack ────────────────────
+# pull_request_target and workflow_run run on the default branch, with the
+# workflow file of the default branch, so they can match the CI/CD identity.
+# But code or data from outside (a pull request, another workflow run) controls
+# them. Never a token: use schedule or workflow_dispatch.
+# The annotation is titled "hf-oidc-token: input not supported" and never
+# shows the value. Also an error with if-no-token warn.
+# - The environment must not be prepared to run code in the action's scripts
+#   or to print their secrets (BASH_ENV, LD_PRELOAD, any exported shell
+#   function, tracing, a PATH that finds curl, jq or bash in the workspace, a
+#   library of theirs or a certificate file in the workspace), and the OIDC
+#   request must go to GitHub.
+# Python (-I: no PYTHON* variables, no user site) gets neither the step outputs
+# nor the OIDC request token.
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+# The interpreter of the checks, never one from the workspace (see the file).
+# shellcheck disable=SC2034
+trusted_python_names=python3
+# shellcheck source=/dev/null
+. "$tripwires_here/../tripwires/trusted-python.sh"
+# shellcheck disable=SC2154 # Set by the file above.
+[[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' hf-oidc-token "$trusted_python_problem"; exit 1; }
+tripwire_fired=""
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL:-}"
+  export GITHUB_EVENT_NAME="${GITHUB_EVENT_NAME:-}" IN_BRANCH="${IN_BRANCH:-}" IN_RESOURCE="${IN_RESOURCE:-}"
+  exec "$trusted_python" -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title "$TITLE" --consequence "No token was requested."
+) <<'EOF' || tripwire_fired=1
+event
+environment curl jq bash
+oidc-url    ACTIONS_ID_TOKEN_REQUEST_URL
+no-option   IN_BRANCH=branch
+single-line IN_BRANCH=branch
+no-option   IN_RESOURCE=resource
+single-line IN_RESOURCE=resource
+EOF
+if [[ -n "$tripwire_fired" ]]; then
+  POSIXLY_CORRECT=1
+  exit 1
+fi
+
 # ── Inputs: check every value before use ───────────────────────────────────
 branch="$(trim "${IN_BRANCH:-main}")"
 [ -n "$branch" ] || branch=main
@@ -101,7 +156,7 @@ done <<<"$raw"
 
 # ── Tools ──────────────────────────────────────────────────────────────────
 for tool in curl jq; do
-  command -v "$tool" >/dev/null 2>&1 || fail "this runner has no $tool; the action needs bash, curl and jq."
+  command -v "$tool" >/dev/null 2>&1 || fail "this runner has no $tool; the action needs bash, curl, jq and python3."
 done
 
 # ── The run ────────────────────────────────────────────────────────────────
@@ -110,15 +165,6 @@ ref="${GITHUB_REF:-}"
 workflow_ref="${GITHUB_WORKFLOW_REF:-}"
 workflow_file="${workflow_ref%@*}"
 workflow_file="${workflow_file##*/}"
-
-# These events run on the default branch, with the workflow file of the default
-# branch, so they can match the CI/CD identity. But code or data from outside
-# (a pull request, another workflow run) controls them. Never a token.
-case "$event" in
-  pull_request_target | workflow_run)
-    fail "refused on $event: this event runs on the default branch but can be started by code from outside, for example a pull request from a fork. Hugging Face cannot tell this run from a trusted run. Use schedule or workflow_dispatch."
-    ;;
-esac
 
 case "$event" in
   schedule | workflow_dispatch) ;;

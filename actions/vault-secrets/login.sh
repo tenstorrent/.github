@@ -30,6 +30,8 @@
 #         when the OIDC token cannot be decoded)
 # Writes: output vault-token
 set -euo pipefail
+# A caller can set SHELLOPTS=xtrace: no trace may print a secret.
+set +x
 
 # Seconds per HTTP request.
 REQUEST_TIMEOUT=15
@@ -73,6 +75,17 @@ fi
 [ -n "$role" ] || fail "no Vault role to log in with (output role of the prepare step is empty)."
 [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] && [ -n "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] \
   || fail "job needs permissions: id-token: write (not available on fork pull requests)"
+
+# Masks a value, one '::add-mask::' line per line of the value. The runner
+# ends a line at a carriage return too, and decodes '%' in command data: each
+# piece between line ends is masked, with '%' written as '%25'. A value cannot
+# then start a workflow command of its own.
+mask() {
+  local l
+  while IFS= read -r l || [ -n "$l" ]; do
+    [ -z "$l" ] || printf '::add-mask::%s\n' "${l//%/%25}"
+  done <<<"${1//$'\r'/$'\n'}"
+}
 
 # Splits "<body>\n<http code>" (curl -w '\n%{http_code}') into body and code.
 split_response() {
@@ -134,8 +147,9 @@ not_sent_cause() {
 # seconds in the worst case. The Vault login below is sent one time (see the
 # header for the tries when curl did not send it).
 audience="$(printf '%s' "$url" | jq -sRr @uri)"
+# -q (first argument): curl reads no .curlrc, which could trace headers or change the target.
 rc=0
-response="$(curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+response="$(curl -q -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
   --retry 2 --retry-delay 2 --retry-max-time 50 \
   -w '\n%{http_code}' \
   -H @<(printf 'Authorization: bearer %s\n' "$ACTIONS_ID_TOKEN_REQUEST_TOKEN") \
@@ -147,9 +161,7 @@ if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
   jwt="$(printf '%s' "$body" | jq -r '.value // empty' 2>/dev/null || true)"
 fi
 response="" body=""
-if [ -n "$jwt" ]; then
-  printf '::add-mask::%s\n' "$jwt"
-fi
+[ -z "$jwt" ] || mask "$jwt"
 if [ "$rc" -eq 28 ]; then
   fail "GitHub did not give the OIDC token in 3 tries of $REQUEST_TIMEOUT seconds each. Run the job again."
 elif [ "$rc" -ne 0 ]; then
@@ -157,6 +169,37 @@ elif [ "$rc" -ne 0 ]; then
 elif [ -z "$jwt" ]; then
   fail "GitHub did not give an OIDC token (HTTP $code). Check that the job has permissions: id-token: write."
 fi
+# A JWT is three base64url words. Anything else is not from GitHub.
+[[ "$jwt" =~ ^[A-Za-z0-9._-]+$ ]] \
+  || fail "GitHub gave an OIDC token in a form that the action does not expect. The action does not send it to Vault."
+
+# Tripwire (../tripwires/README.md): the token must be the one this job asked
+# for: GitHub's issuer, the Vault URL as audience, this repository. Another
+# token was swapped in on the way and does not go to Vault. Python (-I) gets
+# neither the step outputs nor the OIDC request token.
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+# The interpreter of the checks, never one from the workspace (see the file).
+# shellcheck disable=SC2034
+trusted_python_names=python3
+# shellcheck source=/dev/null
+. "$tripwires_here/../tripwires/trusted-python.sh"
+[[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' vault-secrets "$trusted_python_problem"; exit 1; }
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export TRIPWIRE_JWT="$jwt" TRIPWIRE_REPOSITORY="$repository"
+  exec "$trusted_python" -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title vault-secrets --consequence "The OIDC token was not sent to Vault."
+) <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $url TRIPWIRE_REPOSITORY" || {
+  POSIXLY_CORRECT=1
+  exit 1
+}
 
 # ── Facts of this run, for messages only ────────────────────────────────────
 # From the OIDC token payload (claims are not secret), else from the runner env.
@@ -185,7 +228,7 @@ while :; do
   rc=0
   response="$(printf '%s' "$jwt" \
     | jq -Rc --arg role "$role" '{role: $role, jwt: .}' \
-    | curl -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
+    | curl -q -sS --connect-timeout 5 --max-time "$REQUEST_TIMEOUT" \
       "${vault_proxy[@]+"${vault_proxy[@]}"}" \
       -w "$WRITE_OUT" \
       -H 'Content-Type: application/json' \
@@ -204,9 +247,7 @@ jwt=""
 vault_token=""
 if [ "$rc" -eq 0 ] && [ "$code" = 200 ]; then
   vault_token="$(printf '%s' "$body" | jq -r '.auth.client_token // empty' 2>/dev/null || true)"
-  if [ -n "$vault_token" ]; then
-    printf '::add-mask::%s\n' "$vault_token"
-  fi
+  [ -z "$vault_token" ] || mask "$vault_token"
   body=""
 fi
 
@@ -260,6 +301,11 @@ if [ -z "$vault_token" ]; then
   else
     fail "Vault refused the login with role $role (HTTP ${code:-?}). $said $run_facts"
   fi
+fi
+
+# A token is one word of printable characters.
+if ! [[ "$vault_token" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || [ "${#vault_token}" -gt 8192 ]; then
+  fail "Vault gave a token in a form that the action does not expect. Report this to OSPO."
 fi
 
 # ── Pass the Vault token to the read step ───────────────────────────────────

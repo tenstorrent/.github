@@ -80,14 +80,15 @@ split_response() {
   [ "$body" != "$1" ] || body=""
 }
 
-# Masks a value, one '::add-mask::' line per line of the value. A value with a
-# newline cannot then start a workflow command of its own.
+# Masks a value, one '::add-mask::' line per line of the value. The runner
+# ends a line at a carriage return too, and decodes '%' in command data: each
+# piece between line ends is masked, with '%' written as '%25'. A value cannot
+# then start a workflow command of its own.
 mask() {
   local l
   while IFS= read -r l || [ -n "$l" ]; do
-    l="${l%$'\r'}"
-    [ -z "$l" ] || printf '::add-mask::%s\n' "$l"
-  done <<<"$1"
+    [ -z "$l" ] || printf '::add-mask::%s\n' "${l//%/%25}"
+  done <<<"${1//$'\r'/$'\n'}"
 }
 
 # Removes control characters and workflow command markers from server text.
@@ -123,6 +124,36 @@ elif [ "$rc" -ne 0 ]; then
 elif [ -z "$jwt" ]; then
   stop "GitHub did not give an OIDC token (HTTP $code). Check that the job has permissions: id-token: write."
 fi
+
+# Tripwire (../tripwires/README.md): the token must be the one this job asked
+# for: GitHub's issuer, the Hugging Face audience, this repository. Another
+# token was swapped in on the way and does not go to Hugging Face. Python
+# (-I, standard library only) gets neither the step outputs nor the OIDC
+# request token.
+# The launch itself must not depend on a command that an exported shell
+# function can replace (env, python3, dirname): in POSIX mode bash finds unset,
+# export, exec and exit before any function, and exec runs a file from PATH.
+# POSIXLY_CORRECT=1 is on a line of its own on purpose: bash reads the rest of
+# that line before the mode changes.
+tripwires_here="${BASH_SOURCE[0]%/*}"
+[[ "$tripwires_here" != "${BASH_SOURCE[0]}" ]] || tripwires_here=.
+# The interpreter of the checks, never one from the workspace (see the file).
+# shellcheck disable=SC2034
+trusted_python_names=python3
+# shellcheck source=/dev/null
+. "$tripwires_here/../tripwires/trusted-python.sh"
+# shellcheck disable=SC2154 # Set by the file above.
+[[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' hf-oidc-token "$trusted_python_problem"; exit 1; }
+(
+  POSIXLY_CORRECT=1
+  unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN
+  export TRIPWIRE_JWT="$jwt"
+  exec "$trusted_python" -I "$tripwires_here/../tripwires/tripwires.py" \
+    --title "$TITLE" --consequence "The OIDC token was not sent to Hugging Face."
+) <<<"oidc-claims TRIPWIRE_JWT=OIDC-token $AUDIENCE" || {
+  POSIXLY_CORRECT=1
+  exit 1
+}
 
 # ── 2. The identity values of this run ─────────────────────────────────────
 # From the OIDC token payload (claims are not secret), else from the runner

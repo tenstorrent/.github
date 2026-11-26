@@ -87,12 +87,14 @@ do_start() {
   rm -f "$pid_file" "$marker" "$attached"
 
   # Detach: no stdio, own session if setsid exists, so the step does not wait.
+  # "$BASH" -p: the shell that runs this script, not a bash looked up on PATH,
+  # and with no BASH_ENV file and no function from the environment.
   local -a detach=(nohup)
   if command -v setsid >/dev/null 2>&1; then detach=(nohup setsid); fi
   WATCHDOG_LIMIT="$limit" WATCHDOG_PATTERN="$pattern" \
     WATCHDOG_PID_FILE="$pid_file" WATCHDOG_MARKER="$marker" \
     WATCHDOG_ATTACHED="$attached" \
-    "${detach[@]}" bash "${BASH_SOURCE[0]}" loop </dev/null >/dev/null 2>&1 &
+    "${detach[@]}" "$BASH" -p "${BASH_SOURCE[0]}" loop </dev/null >/dev/null 2>&1 &
 
   # The watchdog writes its own PID. Wait for it, at most 5 seconds.
   for _ in 1 2 3 4 5 6 7 8 9 10; do

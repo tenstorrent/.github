@@ -8,6 +8,8 @@
 # Writes: output secrets. Prints names only. Values stay in env and stdin,
 # never in argv.
 set -euo pipefail
+# A caller can set SHELLOPTS=xtrace: no trace may print a secret.
+set +x
 
 TOKEN_OUTPUT='VAULT_SECRETS_GITHUB_TOKEN'
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local HTTPS Vault, OIDC, and CONNECT-proxy fixtures; fake credentials only."""
 
+import base64
 import http.server
 import json
 import os
@@ -16,12 +17,36 @@ import time
 HOST = "vault-ospo-staging.eng-svc.aws.tenstorrent.com"
 OIDC_HOST = "oidc.fixture.invalid"
 ROOT = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "vault-secrets-proxy-fixture"
+# prepare.sh skips its OIDC URL tripwire for the one URL in this file, which is
+# in the action's own directory (see prepare.sh). Never committed.
+OIDC_URL_FILE = Path(__file__).resolve().parent / "oidc-request-url"
 # prepare.sh turns the short name `proxy-test` into <org>--<repo>--proxy-test.
 PREFIX = os.environ.get("GITHUB_REPOSITORY", "").lower().replace("/", "--")
 ROLE = PREFIX + "--proxy-test"
 # prepare.sh turns the key `proxy-test` into the token set <org>--<repo>--proxy-test;
 # read-token.sh reads it with curl from the first engine (github).
 TOKEN_PATH = "/v1/github/token/" + PREFIX + "--proxy-test"
+
+
+def segment(value):
+    return base64.urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+
+# An unsigned token with the claims login.sh checks before it sends the token on:
+# GitHub's issuer, the Vault URL as audience, this repository.
+OIDC_JWT = ".".join(
+    (
+        segment({"alg": "none", "typ": "JWT"}),
+        segment(
+            {
+                "iss": "https://token.actions.githubusercontent.com",
+                "aud": "https://" + HOST,
+                "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+            }
+        ),
+        "fake-signature",
+    )
+)
 
 
 def record(kind, value):
@@ -44,7 +69,7 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
         assert self.path == "/v1/auth/jwt-github/login"
-        assert body == {"role": ROLE, "jwt": "fake-oidc-jwt"}
+        assert body == {"role": ROLE, "jwt": OIDC_JWT}
         record("login", self.path)
         if (ROOT / "deny-login").exists():
             self.respond({"errors": ["fixture: permission denied"]}, 403)
@@ -56,7 +81,7 @@ class Endpoint(http.server.BaseHTTPRequestHandler):
             # login.sh sends "bearer"; the scheme is not case-sensitive.
             assert self.headers["Authorization"].lower() == "bearer fake-request-token"
             record("oidc", self.path)
-            self.respond({"value": "fake-oidc-jwt"})
+            self.respond({"value": OIDC_JWT})
         elif self.path.startswith("/v1/sys/health?"):
             record("health", self.path)
             self.respond({"initialized": True, "sealed": False})
@@ -194,16 +219,16 @@ def start():
         if os.environ.get("OIDC_ROUTE") == "corporate-proxy":
             # An unresolvable OIDC hostname forces use of the inherited egress
             # proxy, which refuses Vault. The Vault proxy refuses OIDC.
-            out.write("ACTIONS_ID_TOKEN_REQUEST_URL=https://" + OIDC_HOST + "/oidc?test=1\n")
+            oidc_url = "https://" + OIDC_HOST + "/oidc?test=1"
             for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 out.write(name + "=http://127.0.0.1:" + str(ports["egress"]) + "\n")
             out.write("NO_PROXY=" + HOST + "\nno_proxy=" + HOST + "\n")
         else:
-            out.write(
-                "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:" + str(ports["oidc"]) + "/oidc?test=1\n"
-            )
+            oidc_url = "http://127.0.0.1:" + str(ports["oidc"]) + "/oidc?test=1"
             # Vault must still use Tailscale even with an inherited wildcard.
             out.write("NO_PROXY=*\nno_proxy=*\n")
+        out.write("ACTIONS_ID_TOKEN_REQUEST_URL=" + oidc_url + "\n")
+    OIDC_URL_FILE.write_text(oidc_url + "\n")
 
 
 def verify():
@@ -241,6 +266,7 @@ if __name__ == "__main__":
     elif command == "verify":
         verify()
     elif command == "stop":
+        OIDC_URL_FILE.unlink(missing_ok=True)
         pid_file = ROOT / "pid"
         if pid_file.exists():
             pid = int(pid_file.read_text())

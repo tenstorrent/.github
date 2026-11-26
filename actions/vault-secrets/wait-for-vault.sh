@@ -3,7 +3,8 @@
 # VAULT_PROXY (the Tailscale loopback proxy, network-mode userspace only).
 set -euo pipefail
 
-curl_args=(-fsS --max-time 5 -o /dev/null)
+# -q first: curl reads no .curlrc, which could change the target.
+curl_args=(-q -fsS --max-time 5 -o /dev/null)
 if [ -n "${VAULT_PROXY:-}" ]; then
   # Explicitly defeat inherited NO_PROXY rules for the private Vault endpoint.
   curl_args+=(--proxy "$VAULT_PROXY" --noproxy '')
