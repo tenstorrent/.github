@@ -131,13 +131,29 @@ runs:
         if [[ "$CACHEW_JOB_TOKEN" == true && -n "$IN_GITHUB_SERVER_URL" ]]; then
           origin_check="trusted-origin IN_GITHUB_SERVER_URL=github-server-url $GITHUB_SERVER_URL"
         fi
+        # The interpreter of the check is itself found on PATH, before anything
+        # is checked. It is never taken from the workspace, where a pull request
+        # can put a file named python3, nor from a relative entry or one that is
+        # spelled with '..'. Only parameter expansion and special builtins: no
+        # command that a function can replace.
         python=""
-        for candidate in python3 python; do
-          # -I: PYTHONPATH and the user site cannot replace the modules of the check.
-          if (exec "$candidate" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))') 2>/dev/null; then
-            python="$candidate"
-            break
-          fi
+        rest="$PATH:"
+        while [[ -n "$rest" ]]; do
+          directory="${rest%%:*}"
+          rest="${rest#*:}"
+          case "$directory/" in
+            "$GITHUB_WORKSPACE"/* | */../* | */./*) continue ;;
+            /*) ;;
+            *) continue ;;
+          esac
+          for name in python3 python; do
+            # -I: PYTHONPATH and the user site cannot replace the modules of the check.
+            if [[ -f "$directory/$name" && -x "$directory/$name" ]] &&
+              (exec "$directory/$name" -I -c 'import sys; sys.exit(sys.version_info < (3, 9))') 2>/dev/null; then
+              python="$directory/$name"
+              break 2
+            fi
+          done
         done
         if [[ -z "$python" ]]; then
           if [[ -n "$origin_check" ]]; then
