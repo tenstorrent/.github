@@ -92,7 +92,7 @@ tripwires_here="${BASH_SOURCE[0]%/*}"
 tripwires_python_names=python3
 # shellcheck source=/dev/null
 . "$tripwires_here/../tripwires/trusted-python.sh"
-[[ -n "$tripwires_python" ]] || fail "this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks."
+[[ -n "$tripwires_python" ]] || { printf '::error title=%s: tripwires could not run::%s\n' hf-oidc-token 'this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks.'; exit 1; }
 tripwire_fired=""
 (
   POSIXLY_CORRECT=1

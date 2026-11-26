@@ -322,6 +322,11 @@ Options:
 
 ## Limits
 
+- The action protects its own requests. It cannot protect a job that also runs
+  untrusted code: every step of a job with `id-token: write` can ask for the
+  OIDC token and exchange it itself. Use the action in a job that runs no code
+  from a pull request. See
+  [Keep untrusted code and secrets in different jobs](../tripwires/README.md#keep-untrusted-code-and-secrets-in-different-jobs).
 - Token life: 60 minutes from the exchange. No refresh.
 - Read-only. Gated public repositories only. No private repositories. No
   uploads. No Inference Providers calls.

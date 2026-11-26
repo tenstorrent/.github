@@ -39,8 +39,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import struct
-import subprocess
 import sys
 import urllib.parse
 import uuid
@@ -78,6 +76,10 @@ def mask(value):
 # outside the job (README.md, "Alerting") finds a tripped tripwire by it, so it
 # never changes and nothing else uses it.
 ANNOTATION_SUFFIX = ": possible security compromise attempt"
+# The title suffix when the checks could not run at all (no interpreter, a
+# check line that is wrong, an error in this file). Also a contract: the shell
+# fallbacks of the actions print it as text, since they have no Python.
+CANNOT_RUN_SUFFIX = ": tripwires could not run"
 
 
 def report(title, error, consequence="The step was stopped."):
@@ -281,26 +283,51 @@ def oidc_request_url(value, what="ACTIONS_ID_TOKEN_REQUEST_URL", hosts=OIDC_REQU
     return value
 
 
+JWT_FORM = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+
+def _unique_members(pairs):
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        # Two members with one name: one parser reads the first, another the last.
+        raise ValueError("duplicate member")
+    return members
+
+
+def _jwt_object(segment):
+    # validate=True: a character outside the alphabet is an error, not skipped.
+    data = base64.b64decode(segment + "=" * (-len(segment) % 4), altchars=b"-_", validate=True)
+    value = json.loads(data, object_pairs_hook=_unique_members)
+    if not isinstance(value, dict):
+        raise ValueError("not an object")
+    return value
+
+
 def oidc_claims(token, audience, repository, what="OIDC token", issuer=OIDC_ISSUER):
     """The claims of a job's OIDC token, when they are the ones this job asked
-    for: GitHub's issuer, the requested audience and this repository. Any other
-    token was swapped in on the way, and must not be sent on.
+    for: GitHub's issuer, the requested audience and no other, this repository.
+    Any other token was swapped in on the way, and must not be sent on.
 
-    Nothing is verified cryptographically: the receiver does that. A token that
-    cannot be decoded returns None, since it names no one and no receiver takes it."""
-    try:
-        payload = token.split(".")[1]
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    except (IndexError, ValueError):
+    Nothing is verified cryptographically: the receiver does that. The form is
+    strict, so that this parser and the receiver's cannot read two different
+    tokens: exactly three base64url parts, a header and a payload that are JSON
+    objects, no member named twice. A token in any other form returns None,
+    since it names no one and no receiver takes it."""
+    if not isinstance(token, str) or not JWT_FORM.fullmatch(token):
         return None
-    if not isinstance(claims, dict):
+    header, payload, _ = token.split(".")
+    try:
+        _jwt_object(header)
+        claims = _jwt_object(payload)
+    except (ValueError, RecursionError):
         return None
     audiences = claims.get("aud")
     audiences = audiences if isinstance(audiences, list) else [audiences]
     claimed = claims.get("repository")
     if (
         claims.get("iss") != issuer
-        or audience not in audiences
+        or not audiences
+        or any(not isinstance(name, str) or name != audience for name in audiences)
         or not isinstance(claimed, str)
         or claimed.lower() != repository.lower()
     ):
@@ -339,75 +366,6 @@ def below(root, place):
     )
 
 
-def elf_interpreter(program):
-    """The dynamic loader an ELF program names (PT_INTERP), or None for a
-    script, a static program or a file that cannot be read."""
-    try:
-        with open(program, "rb") as stream:
-            head = stream.read(64)
-            if len(head) < 52 or head[:4] != b"\x7fELF" or head[4] not in (1, 2) or head[5] not in (1, 2):
-                return None
-            wide, order = head[4] == 2, "<" if head[5] == 1 else ">"
-            (offset,) = struct.unpack_from(order + ("Q" if wide else "I"), head, 32 if wide else 28)
-            size, count = struct.unpack_from(order + "HH", head, 54 if wide else 42)
-            for index in range(min(count, 128)):
-                stream.seek(offset + index * size)
-                entry = stream.read(size)
-                if len(entry) < (56 if wide else 32) or struct.unpack_from(order + "I", entry)[0] != 3:
-                    continue
-                if wide:
-                    at, length = struct.unpack_from(order + "Q", entry, 8)[0], struct.unpack_from(order + "Q", entry, 32)[0]
-                else:
-                    at, length = struct.unpack_from(order + "I", entry, 4)[0], struct.unpack_from(order + "I", entry, 16)[0]
-                stream.seek(at)
-                return stream.read(min(length, 4096)).split(b"\0", 1)[0].decode("utf-8", "replace") or None
-    except (OSError, struct.error):
-        pass
-    return None
-
-
-def loaded_libraries(program, library_path, directory):
-    """The files the dynamic loader would load for program with library_path
-    as LD_LIBRARY_PATH and directory as the current directory. Linux only;
-    elsewhere, and for a script or a static program, none.
-
-    The program's own loader lists them (`ld.so --list`, as ldd does) in an
-    environment that holds nothing but the variable: it finds each library and
-    stops, so no code of the program or of a library runs. A loader that is
-    itself below directory is not run, and is the one entry of the result."""
-    if not sys.platform.startswith("linux"):
-        return []
-    loader = elf_interpreter(program)
-    if not loader or not os.path.isabs(loader) or not os.path.isfile(loader):
-        return []
-    if below(directory, loader):
-        return [loader]
-    try:
-        listed = subprocess.run(
-            [loader, "--list", program],
-            env={"LD_LIBRARY_PATH": library_path},
-            cwd=directory,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=20,
-        ).stdout.decode("utf-8", "replace")
-    except (OSError, subprocess.SubprocessError):
-        return []
-    libraries = []
-    for line in listed.splitlines():
-        # "libcurl.so.4 => /usr/lib/libcurl.so.4 (0x...)", "/lib/ld.so (0x...)",
-        # "libx.so => not found". With no arrow and no directory the name is
-        # the kernel's own object ("linux-vdso.so.1 (0x...)") or a file that an
-        # empty entry found in the current directory ("libz.so.1 (0x...)").
-        name, arrow, place = line.strip().partition(" => ")
-        place = (place if arrow else name).rsplit(" (", 1)[0]
-        if not place or (arrow and place == "not found"):
-            continue
-        if arrow or place.startswith("/") or os.path.exists(os.path.join(directory, place)):
-            libraries.append(os.path.join(directory, place))
-    return libraries
-
-
 def environment_violations(environ, commands=(), posix=None):
     """Every Violation in an environment that an earlier, less trusted step of
     the job can have prepared (GITHUB_ENV, GITHUB_PATH) to run code in a later
@@ -416,8 +374,7 @@ def environment_violations(environ, commands=(), posix=None):
 
     commands names the programs that carry the caller's secrets (curl, jq): the
     first of each on PATH must not be inside GITHUB_WORKSPACE, where a pull
-    request places files, and must not load a library from there through
-    LD_LIBRARY_PATH. posix (default: this system) says whether an empty or
+    request places files. posix (default: this system) says whether an empty or
     relative PATH entry means the current directory, as it does to a POSIX
     shell."""
     found = []
@@ -459,25 +416,10 @@ def environment_violations(environ, commands=(), posix=None):
                 f"{name} names certificates inside the workspace, where a pull request can place them, "
                 "so a request that carries a secret would trust any server"
             )
-    programs = {}
     for command in commands if path else ():
-        programs[command] = shutil.which(command, path=path)
-        if programs[command] and below(root, programs[command]):
-            programs[command] = None
+        program = shutil.which(command, path=path)
+        if program and below(root, program):
             fire(f"the first {command} on PATH is inside the workspace, where a pull request can place it")
-    # A build directory of the workspace on LD_LIBRARY_PATH is a supported
-    # configuration, so the variable alone does not fire. What fires is a named
-    # command that would take one of its libraries from there. The loader is
-    # asked only when an entry can lead into the workspace: an empty or
-    # relative one (the current directory) or one inside it.
-    library_path = environ.get("LD_LIBRARY_PATH", "")
-    if library_path and any(not os.path.isabs(entry) or below(root, entry) for entry in re.split("[:;]", library_path)):
-        for command, program in programs.items():
-            if program and any(below(root, library) for library in loaded_libraries(program, library_path, root)):
-                fire(
-                    f"{command} would load a library from inside the workspace through LD_LIBRARY_PATH, "
-                    "where a pull request can place it"
-                )
     return found
 
 
@@ -640,7 +582,16 @@ def main(argv=None, environ=None):
         violations = run_checks(spec, values, environ)
     except SpecError as error:
         # Fail closed: a check that cannot run protects nothing.
-        print(f"::error title={escape_property(title)}: tripwires could not run::" + escape_data(str(error)), flush=True)
+        print(f"::error title={escape_property(title)}{CANNOT_RUN_SUFFIX}::" + escape_data(str(error)), flush=True)
+        return 2
+    except Exception as error:  # noqa: BLE001
+        # An error in the checks themselves also fails closed, with the same
+        # title. Only the type is printed: a message could hold a value.
+        print(
+            f"::error title={escape_property(title)}{CANNOT_RUN_SUFFIX}::"
+            + escape_data(f"internal error in the checks ({type(error).__name__}). {options.consequence}"),
+            flush=True,
+        )
         return 2
     for violation in violations:
         report(title, violation, options.consequence)

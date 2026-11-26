@@ -50,9 +50,11 @@ gh_token='ghs_dummyGitHubToken0123456789abcdef'
 b64url() {
   printf '%s' "$1" | base64 | tr -d '\n=' | tr '+/' '-_'
 }
-claims='{"repository":"tenstorrent/.github","ref":"refs/pull/7/merge","environment":"vault-action-test","event_name":"pull_request","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/pull/7/merge","iss":"https://token.actions.githubusercontent.com","aud":["https://vault-ospo.eng-svc.aws.tenstorrent.com","https://vault-ospo-staging.eng-svc.aws.tenstorrent.com"]}'
+claims='{"repository":"tenstorrent/.github","ref":"refs/pull/7/merge","environment":"vault-action-test","event_name":"pull_request","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/pull/7/merge","iss":"https://token.actions.githubusercontent.com","aud":"https://vault-ospo.eng-svc.aws.tenstorrent.com"}'
 jwt="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims").dummysignature0123456789"
-claims_noenv='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"push","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/heads/main","iss":"https://token.actions.githubusercontent.com","aud":["https://vault-ospo.eng-svc.aws.tenstorrent.com","https://vault-ospo-staging.eng-svc.aws.tenstorrent.com"]}'
+claims_noenv='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"push","job_workflow_ref":"tenstorrent/.github/.github/workflows/test.yml@refs/heads/main","iss":"https://token.actions.githubusercontent.com","aud":"https://vault-ospo.eng-svc.aws.tenstorrent.com"}'
+# The audience is the Vault URL of the login, and no other.
+jwt_staging="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "${claims/vault-ospo.eng-svc/vault-ospo-staging.eng-svc}").dummysignature0123456789"
 jwt_noenv="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims_noenv").dummysignature9876543210"
 
 # ── Fake curl ───────────────────────────────────────────────────────────────
@@ -367,7 +369,7 @@ for other in https://vault-ospo.invalid http://vault-ospo.eng-svc.aws.tenstorren
     bad "vault URL '$other': login.sh sent a request"
   fi
 done
-run_login VAULT_URL=https://vault-ospo-staging.eng-svc.aws.tenstorrent.com
+run_login VAULT_URL=https://vault-ospo-staging.eng-svc.aws.tenstorrent.com FAKE_JWT="$jwt_staging"
 if [ "$rc" -ne 0 ] || ! grep -q -F -- 'https://vault-ospo-staging.eng-svc.aws.tenstorrent.com/v1/auth/jwt-github/login' "$work/argv"; then
   bad "staging URL: login.sh did not log in to the staging URL"
 else

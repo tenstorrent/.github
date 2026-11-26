@@ -17,6 +17,107 @@ supported configuration produces. When one fires:
   itself carry workflow commands;
 - the output `security-violation` is `true`.
 
+## Scope: what these checks can do, and what protects the secrets
+
+GitHub Actions has no boundary between the steps of one job. The steps share
+the files of the runner, the variables written to `GITHUB_ENV`, the
+directories written to `GITHUB_PATH`, and every process that an earlier step
+left running. On a job with `id-token: write`, the runner gives every step the
+request token for the job's OIDC token. A step that runs untrusted code can
+therefore ask for the OIDC token itself and log in wherever the job can. No
+check in a later step prevents that. The boundary that GitHub provides is the
+job.
+
+The tripwires cover a narrower case: untrusted data reached the job, and
+untrusted code has not run yet. Two examples: an action input that a branch
+name or a pull request title fills, and a workflow that copies lines of an
+artifact into `GITHUB_ENV`. For that case the checks look at the few settings
+that turn data into code or send a secret somewhere else: the inputs of the
+action, where its token goes, the event, and a short list of environment
+variables (`BASH_ENV`, `LD_PRELOAD`, exported shell functions, `PATH`, shell
+tracing, certificates). A tripwire is a detection signal. `LD_PRELOAD`, for
+one, has loaded its library into the step's shell before the check runs: the
+check reports that the job is compromised and cannot undo it.
+
+The list of environment variables is short on purpose. Many more variables
+change what a program loads or runs (`LD_LIBRARY_PATH`, `GIT_CONFIG_COUNT`,
+`GIT_SSH_COMMAND`, `OPENSSL_CONF`, `NODE_OPTIONS`, `HOME` and others), and jobs
+set most of them for ordinary reasons. The list does not grow to follow them:
+a job where an attacker sets such a variable is a job that mixes untrusted
+input with secrets, and the fix for that is below. Of these, the runner
+refuses only `NODE_OPTIONS` from `GITHUB_ENV`.
+
+### Keep untrusted code and secrets in different jobs
+
+These rules protect the secrets. The tripwires only report when a job has
+broken one of them.
+
+1. A job that runs code from a pull request gets no secret and no
+   `id-token: write`. Code means everything the pull request can change:
+   build scripts, Makefiles, package install hooks, tests, and files that a
+   tool reads as configuration.
+2. A job that reads secrets runs no code from a pull request, in any step,
+   before or after the secret is read.
+3. Set `permissions` for each job, not for the workflow, and give each job
+   the least it needs. `id-token: write` belongs only on the job that logs in.
+4. Each job on a GitHub-hosted runner starts on a new machine. On a
+   self-hosted runner this holds only when the runner is ephemeral (one job,
+   then discarded). On a runner that keeps its files, a job without secrets
+   can prepare the machine for the next job.
+5. Pass only data between jobs: outputs and artifacts. The job that receives
+   them treats them as untrusted. It does not run them, does not write them
+   to `GITHUB_ENV`, `GITHUB_PATH` or `GITHUB_OUTPUT` without checking their
+   form, and does not extract an artifact over the workspace.
+6. For pull requests from forks, use `pull_request`, which has no secrets. Do
+   privileged work in a second workflow on `workflow_run` that does not check
+   out the head of the first run and does not run its artifacts. Do not use
+   `pull_request_target` together with a checkout of the pull request.
+7. Pass untrusted values to a script through `env:`. An expression such as
+   `${{ github.head_ref }}` written into a `run:` script becomes shell text.
+8. Pin third-party actions to a commit SHA, and container images to a digest.
+
+```yaml
+jobs:
+  build: # runs the pull request's code: no secrets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@<full-commit-sha>
+      - run: make test
+      - uses: actions/upload-artifact@<full-commit-sha>
+        with:
+          name: report
+          path: report.json
+
+  publish: # reads secrets: runs no code from the pull request
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@<full-commit-sha>
+        with:
+          name: report
+          path: ${{ runner.temp }}/report
+      - id: vault
+        uses: tenstorrent/.github/actions/vault-secrets@<full-commit-sha>
+        with:
+          secrets: |
+            kv/data/tenstorrent/example-app/upload api_key | UPLOAD_API_KEY
+      # The report is data: it is read, never run.
+      - run: curl --fail --data-binary "@$RUNNER_TEMP/report/report.json" -H "Authorization: Bearer $UPLOAD_API_KEY" https://example.com/reports
+        env:
+          UPLOAD_API_KEY: ${{ fromJSON(steps.vault.outputs.secrets).UPLOAD_API_KEY }}
+```
+
+GitHub's guidance says the same: [Secure use reference](https://docs.github.com/en/actions/reference/security/secure-use)
+and the CodeQL query [environment variable built from user-controlled sources](https://codeql.github.com/codeql-query-help/actions/actions-envvar-injection-critical/).
+[GHSL-2024-255](https://securitylab.github.com/advisories/GHSL-2024-255_docker-mailserver)
+is a real case: a `workflow_run` workflow appended a file of an artifact to
+`GITHUB_ENV`, and the file set `LD_PRELOAD`.
+
 ## The checks
 
 | Check | Function | Fires when the value |
@@ -30,8 +131,8 @@ supported configuration produces. When one fires:
 | `url-host <name>` | `origin` | is a URL whose host, as written or as parsed, has characters no DNS name or IP literal has |
 | `trusted-origin <name> <origin> ...` | `trusted_origin` | is not one of the listed HTTPS origins: another host, plain HTTP, or a spelling with userinfo or a path |
 | `oidc-url <name> [host ...]` | `oidc_request_url` | (normally `ACTIONS_ID_TOKEN_REQUEST_URL`) is not HTTPS on a GitHub Actions host, so another server would receive the OIDC request token. For GitHub Enterprise Server, list its host |
-| `oidc-claims <name> <audience> [VARIABLE]` | `oidc_claims` | is an OIDC token whose issuer, audience or repository (from `VARIABLE`, default `GITHUB_REPOSITORY`) is not what this job asked for, or that cannot be decoded: a token swapped in on the way |
-| `environment [command ...]` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, any exported shell function, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`, a `PATH` entry that is empty or relative (the current directory), a named command that `PATH` finds first inside `GITHUB_WORKSPACE` or that would load a library from there through `LD_LIBRARY_PATH`, or a certificate variable (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`) that names a place inside `GITHUB_WORKSPACE` |
+| `oidc-claims <name> <audience> [VARIABLE]` | `oidc_claims` | is an OIDC token whose issuer, audience or repository (from `VARIABLE`, default `GITHUB_REPOSITORY`) is not what this job asked for, that names another audience too, or that is not in the strict form of a JWT (three base64url parts, JSON objects, no member named twice): a token swapped in on the way |
+| `environment [command ...]` | `hostile_environment` | (no value) the environment is prepared to run code in the job's scripts or print their secrets: `BASH_ENV`, `LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`, any exported shell function, `SHELLOPTS` with `xtrace` or `verbose`, a `PS4` that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`, a `PATH` entry that is empty or relative (the current directory), a named command that `PATH` finds first inside `GITHUB_WORKSPACE`, or a certificate variable (`CURL_CA_BUNDLE`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`) that names a place inside `GITHUB_WORKSPACE` |
 | `event [event ...]` | `untrusted_event` | (no value) the run's event is `pull_request_target` or `workflow_run`. With events listed, the run's event is one of those, and the two defaults apply only when listed too |
 
 The first seven guard against code injection; `trusted-origin`, the two OIDC
@@ -80,7 +181,7 @@ would need a second.
   run: |
     tripwires_python_names=python3
     . "$GITHUB_ACTION_PATH/../tripwires/trusted-python.sh"
-    [[ -n "$tripwires_python" ]] || { echo "::error::no Python 3.9+ outside the workspace"; exit 1; }
+    [[ -n "$tripwires_python" ]] || { echo "::error title=my-action: tripwires could not run::no Python 3.9+ outside the workspace"; exit 1; }
     "$tripwires_python" -I "$GITHUB_ACTION_PATH/../tripwires/tripwires.py" --title my-action <<'EOF'
     environment
     no-option IN_REF=ref
@@ -163,6 +264,22 @@ can switch off:
    ends with the text above. The start of the title names the action; the
    message names the check and the input, never the value.
 
+A second title suffix is fixed in the same way (`CANNOT_RUN_SUFFIX`):
+
+```text
+: tripwires could not run
+```
+
+It marks a step that failed because the checks did not run at all: no Python
+outside the workspace, a check line that is wrong, or an error in the checks
+themselves. Nothing was checked, so the step stops, but this is not proof of an
+attack: a runner image without Python gives it too. Alert on it as well where
+every runner is known to have Python, because a `PATH` written to `GITHUB_ENV`
+can hide the interpreter on purpose. `cachew-checkout` is the one exception:
+without Python it does not check the environment and goes on to the standard
+checkout with no annotation, unless `github-server-url` is set with the job's
+own token.
+
 The receiver needs read access to checks, and nothing else. A step name
 is not a usable signal: the `workflow_job` payload lists the job's own steps, so
 the steps inside a composite action appear only as the one step that called it.
@@ -222,25 +339,9 @@ gives a false alert, not a missed one.
   not detected.
 - `environment` fires on `LD_PRELOAD` whatever it loads. A runner that preloads
   a library on purpose (an allocator, say) cannot use this check.
-- `LD_LIBRARY_PATH` alone does not fire. `actions/setup-python` sets it to a
-  tool cache directory, and jobs set it to a build directory of the workspace.
-  For each command named after `environment`, the check asks the dynamic
-  loader which libraries the command would load (`ld.so --list`, as `ldd`
-  does, with no other variable set; no code of the command or of a library
-  runs). It fires when one of them is inside `GITHUB_WORKSPACE`. It asks only
-  when an entry of the variable is empty, relative or inside the workspace.
-  Limits of this rule:
-  - Linux only. On macOS, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH` and
-    `DYLD_FALLBACK_LIBRARY_PATH` are not checked. macOS removes them for the
-    system's own programs (`/bin/bash`, `/usr/bin/curl`); a program from
-    Homebrew or a tool cache still reads them.
-  - A command that is not named is not checked. A static program or a script
-    has no loader to ask.
-  - The loader has already used the variable for the step's own shell and for
-    the interpreter of the checks. A planted library that those load ran
-    before the check. Name `bash` so that the check reports it; it cannot undo
-    it.
-  - A library that a program loads later by name (`dlopen`) is not listed.
+- `LD_LIBRARY_PATH` and the macOS `DYLD_*_PATH` variables are not checked.
+  `actions/setup-python` sets the first to a tool cache directory, and jobs
+  set it to a build directory of the workspace.
 - A certificate variable fires only when it names a file or directory inside
   `GITHUB_WORKSPACE` (a relative value counts as inside). Certificates
   anywhere else pass: a self-hosted runner behind a proxy that inspects TLS
@@ -265,7 +366,10 @@ gives a false alert, not a missed one.
   caller lists the host; a listed suffix such as `.example.com` trusts every
   host below it, so list the one name.
 - `oidc-claims` compares claims; it verifies no signature. The receiver does.
-  The command refuses a token that it cannot decode; the function `oidc_claims`
+  The form is strict, so that this parser and the receiver's cannot read two
+  different tokens: exactly three base64url parts, a header and a payload that
+  are JSON objects, no member named twice, and the requested audience alone.
+  The command refuses a token in any other form; the function `oidc_claims`
   returns `None` for one, and the caller decides.
 - `event` reads `GITHUB_EVENT_NAME`, which the runner sets for every step and
   `GITHUB_ENV` cannot change. In a reusable workflow it is the event of the

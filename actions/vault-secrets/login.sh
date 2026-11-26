@@ -189,7 +189,7 @@ tripwires_here="${BASH_SOURCE[0]%/*}"
 tripwires_python_names=python3
 # shellcheck source=/dev/null
 . "$tripwires_here/../tripwires/trusted-python.sh"
-[[ -n "$tripwires_python" ]] || fail "this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks."
+[[ -n "$tripwires_python" ]] || { printf '::error title=%s: tripwires could not run::%s\n' vault-secrets 'this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks.'; exit 1; }
 (
   POSIXLY_CORRECT=1
   unset GITHUB_OUTPUT ACTIONS_ID_TOKEN_REQUEST_TOKEN

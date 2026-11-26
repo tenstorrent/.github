@@ -137,7 +137,7 @@ runs:
         python="$tripwires_python"
         if [[ -z "$python" ]]; then
           if [[ -n "$origin_check" ]]; then
-            echo "::error title=cachew-checkout::github-server-url is set and the token is the job's own, but there is no Python 3.9+ to check where the token would go. The checkout was stopped."
+            echo "::error title=cachew-checkout: tripwires could not run::github-server-url is set and the token is the job's own, but there is no Python 3.9+ to check where the token would go. The checkout was stopped."
             exit 1
           fi
           exit 0

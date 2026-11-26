@@ -42,7 +42,7 @@ hf_token='hf_oauth_dummyHuggingFaceToken0123456789'
 b64url() {
   printf '%s' "$1" | base64 | tr -d '\n=' | tr '+/' '-_'
 }
-claims='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"workflow_dispatch","workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","aud":"https://huggingface.co","iss":"https://token.actions.githubusercontent.com","aud":"https://huggingface.co"}'
+claims='{"repository":"tenstorrent/.github","ref":"refs/heads/main","event_name":"workflow_dispatch","workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/nightly.yml@refs/heads/main","iss":"https://token.actions.githubusercontent.com","aud":"https://huggingface.co"}'
 jwt="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims").dummysignature0123456789"
 claims_called='{"repository":"tenstorrent/tt-metal","ref":"refs/heads/main","event_name":"schedule","workflow_ref":"tenstorrent/tt-metal/.github/workflows/caller.yml@refs/heads/main","job_workflow_ref":"tenstorrent/.github/.github/workflows/hf.yml@refs/heads/main","iss":"https://token.actions.githubusercontent.com","aud":"https://huggingface.co"}'
 jwt_called="$(b64url '{"alg":"RS256","typ":"JWT"}').$(b64url "$claims_called").dummysignature9876543210"

@@ -326,9 +326,7 @@ any checkout runs. They are:
   that holds a command, `GIT_TRACE_REDACT` off, `NODE_TLS_REJECT_UNAUTHORIZED=0`,
   a `PATH` entry that is empty or relative, a `git` or `bash` that `PATH` finds
   first inside the workspace (the first step checks these; the cachew session's
-  own Git wrapper is in `RUNNER_TEMP` and passes), a library that `git` or
-  `bash` would load from the workspace through `LD_LIBRARY_PATH` (a build
-  directory there that holds none of their libraries passes), or a certificate
+  own Git wrapper is in `RUNNER_TEMP` and passes), or a certificate
   variable (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`, `CURL_CA_BUNDLE` and their kin)
   that names a file inside the workspace. Certificates anywhere else are the
   job's own and stay in effect. This check is the first step of the

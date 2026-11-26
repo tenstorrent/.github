@@ -61,7 +61,7 @@ tripwires_here="${BASH_SOURCE[0]%/*}"
 tripwires_python_names=python3
 # shellcheck source=/dev/null
 . "$tripwires_here/../tripwires/trusted-python.sh"
-[[ -n "$tripwires_python" ]] || fail "this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks."
+[[ -n "$tripwires_python" ]] || { printf '::error title=%s: tripwires could not run::%s\n' vault-secrets 'this runner has python3 only inside the workspace; the action needs Python 3.9+ on PATH outside it to run its checks.'; exit 1; }
 [[ "$tripwires_here" == /* ]] || tripwires_here="$PWD/$tripwires_here"
 oidc_check='oidc-url       ACTIONS_ID_TOKEN_REQUEST_URL'
 fixture_url="$tripwires_here/test/proxy/oidc-request-url"

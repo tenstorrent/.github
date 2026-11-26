@@ -223,14 +223,18 @@ class OidcChecks(unittest.TestCase):
     def test_claims_this_job_asked_for_pass(self):
         claims = tripwires.oidc_claims(token(self.CLAIMS), "https://vault.example.com", "owner/name")
         self.assertEqual(claims["repository"], "Owner/Name")
-        several = dict(self.CLAIMS, aud=["https://other.example.com", "https://vault.example.com"])
-        self.assertIsNotNone(tripwires.oidc_claims(token(several), "https://vault.example.com", "owner/name"))
+        listed = dict(self.CLAIMS, aud=["https://vault.example.com"])
+        self.assertIsNotNone(tripwires.oidc_claims(token(listed), "https://vault.example.com", "owner/name"))
 
     def test_a_swapped_token_fires(self):
         for change in (
             {"iss": "https://token.evil.test"},
             {"aud": "https://other.example.com"},
             {"aud": ["https://other.example.com"]},
+            # Also good for another receiver: not what this job asked for.
+            {"aud": ["https://other.example.com", "https://vault.example.com"]},
+            {"aud": []},
+            {"aud": [["https://vault.example.com"]]},
             {"repository": "owner/other"},
             {"repository": None},
             {"iss": None},
@@ -241,6 +245,29 @@ class OidcChecks(unittest.TestCase):
     def test_a_token_that_cannot_be_decoded_names_no_one(self):
         for value in ("opaque", "a.b.c", "a.!!.c", token([1]), ""):
             with self.subTest(value=value):
+                self.assertIsNone(tripwires.oidc_claims(value, "https://vault.example.com", "owner/name"))
+
+    def test_a_token_in_a_loose_form_names_no_one(self):
+        def part(text):
+            return base64.urlsafe_b64encode(text.encode()).decode().rstrip("=")
+
+        good = token(self.CLAIMS)
+        header, payload, signature = good.split(".")
+        twice = json.dumps(dict(self.CLAIMS, repository="evil/other"))[:-1] + ', "repository": "Owner/Name"}'
+        cases = {
+            "two parts": f"{header}.{payload}",
+            "four parts": f"{good}.more",
+            "an empty signature": f"{header}.{payload}.",
+            "characters that a loose decoder skips": f"{header}.!!{payload}.{signature}",
+            "padding": f"{header}.{payload}==.{signature}",
+            "a header that is not JSON": f"{part('nope')}.{payload}.{signature}",
+            "a header that is not an object": f"{part('[]')}.{payload}.{signature}",
+            "a member named twice": f"{header}.{part(twice)}.{signature}",
+            "nesting past the recursion limit": f"{header}.{part('[' * 200000)}.{signature}",
+            "a line break at the end": good + "\n",
+        }
+        for name, value in cases.items():
+            with self.subTest(name):
                 self.assertIsNone(tripwires.oidc_claims(value, "https://vault.example.com", "owner/name"))
 
 
@@ -402,119 +429,6 @@ class TrustStoreTests(unittest.TestCase):
         self.assertEqual(tripwires.environment_violations(environ, ("curl",)), [])
 
 
-class LibraryPathTests(unittest.TestCase):
-    """LD_LIBRARY_PATH: the decision, with the dynamic loader's answer given."""
-
-    MESSAGE = "curl would load a library from inside the workspace through LD_LIBRARY_PATH, where a pull request can place it"
-
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
-        self.workspace = self.root / "work"
-        for directory in ("work/build/lib", "tools", "toolcache/lib"):
-            (self.root / directory).mkdir(parents=True)
-        for name in ("curl", "jq"):
-            (self.root / "tools" / name).write_text("#!/bin/sh\n")
-            (self.root / "tools" / name).chmod(0o755)
-        self.asked = []
-
-    def found(self, library_path, *commands, loads=()):
-        def loaded(program, path, directory):
-            self.asked.append((Path(program).name, path, directory))
-            return ["/usr/lib/libc.so.6", *loads]
-
-        environ = {"PATH": str(self.root / "tools"), "GITHUB_WORKSPACE": str(self.workspace), "LD_LIBRARY_PATH": library_path}
-        with mock.patch.object(tripwires, "loaded_libraries", loaded):
-            return [str(v) for v in tripwires.environment_violations(environ, commands)]
-
-    def test_a_named_command_must_not_load_a_library_from_the_workspace(self):
-        inside = str(self.workspace / "build" / "lib")
-        planted = str(self.workspace / "build" / "lib" / "libcurl.so.4")
-        self.assertEqual(self.found(inside, "curl", loads=[planted]), [self.MESSAGE])
-        self.assertEqual(self.asked, [("curl", inside, str(self.workspace))])
-        # Each named command is asked about; one that PATH does not find is not.
-        self.assertEqual(len(self.found(inside, "curl", "jq", "tailscale", loads=[planted])), 2)
-        # An entry that means the current directory, and another spelling of
-        # the workspace.
-        (self.root / "alias").symlink_to(self.workspace)
-        for library_path in (f"/usr/lib:{inside}", "/usr/lib:", "build/lib", f"{self.root / 'alias'}/build/lib", f"/usr/lib;{inside}"):
-            with self.subTest(library_path=library_path):
-                self.assertEqual(self.found(library_path, "curl", loads=["build/lib/libcurl.so.4"]), [self.MESSAGE])
-                self.assertEqual(self.found(library_path, "curl", loads=[f"{self.root / 'alias'}/build/lib/libz.so.1"]), [self.MESSAGE])
-
-    def test_a_build_directory_of_the_workspace_is_supported(self):
-        # The job's own libraries are on the path, and curl loads none of them.
-        inside = str(self.workspace / "build" / "lib")
-        self.assertEqual(self.found(inside, "curl", "jq"), [])
-        self.assertEqual(len(self.asked), 2)
-
-    def test_the_loader_is_not_asked_without_a_reason(self):
-        # actions/setup-python: a tool cache directory. No named command. No
-        # variable.
-        planted = [str(self.workspace / "build" / "lib" / "libcurl.so.4")]
-        self.assertEqual(self.found(str(self.root / "toolcache" / "lib"), "curl", loads=planted), [])
-        self.assertEqual(self.found(str(self.workspace / "build" / "lib"), loads=planted), [])
-        self.assertEqual(self.found("", "curl", loads=planted), [])
-        self.assertEqual(self.asked, [])
-
-    def test_a_file_that_is_no_dynamic_program_has_no_loader(self):
-        script = self.root / "tools" / "curl"
-        self.assertIsNone(tripwires.elf_interpreter(script))
-        self.assertIsNone(tripwires.elf_interpreter(self.root / "absent"))
-        (self.root / "tools" / "short").write_bytes(b"\x7fELF\x02\x01")
-        self.assertIsNone(tripwires.elf_interpreter(self.root / "tools" / "short"))
-        self.assertEqual(tripwires.loaded_libraries(str(script), "/usr/lib", str(self.workspace)), [])
-
-
-@unittest.skipUnless(sys.platform.startswith("linux"), "the dynamic loader is asked on Linux only")
-class DynamicLoaderTests(unittest.TestCase):
-    """LD_LIBRARY_PATH, with the real loader and a real library: a copy of one
-    that the program loads, placed in the workspace as a pull request would."""
-
-    def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name).resolve()
-        self.workspace = self.root / "work"
-        (self.workspace / "build" / "lib").mkdir(parents=True)
-        self.name = next((name for name in ("curl", "git", "bash", "sh") if self.libraries(name)), None)
-        if self.name is None:
-            self.skipTest("no dynamically linked program to test with")
-
-    def libraries(self, name):
-        program = shutil.which(name)
-        if not program:
-            return []
-        loader = tripwires.elf_interpreter(program)
-        found = tripwires.loaded_libraries(program, "", str(self.workspace))
-        return [place for place in found if loader and os.path.realpath(place) != os.path.realpath(loader)]
-
-    def found(self, library_path):
-        environ = {"PATH": os.environ["PATH"], "GITHUB_WORKSPACE": str(self.workspace), "LD_LIBRARY_PATH": library_path}
-        return [str(v) for v in tripwires.environment_violations(environ, (self.name,))]
-
-    def test_a_planted_library_fires_and_the_jobs_own_libraries_pass(self):
-        inside = self.workspace / "build" / "lib"
-        message = f"{self.name} would load a library from inside the workspace through LD_LIBRARY_PATH, where a pull request can place it"
-        self.assertTrue(os.path.isabs(tripwires.elf_interpreter(shutil.which(self.name))))
-        # The job's own library, which the program does not load.
-        (inside / "libtt_CANARY.so").write_bytes(b"")
-        self.assertEqual(self.found(str(inside)), [])
-        original = self.libraries(self.name)[0]
-        shutil.copy(original, inside / Path(original).name)
-        for library_path in (str(inside), f"/nonexistent:{inside}", "build/lib", "build/lib:"):
-            with self.subTest(library_path=library_path):
-                self.assertEqual(self.found(library_path), [message])
-        # In the workspace itself, for an entry that means the current directory.
-        shutil.copy(original, self.workspace / Path(original).name)
-        self.assertEqual(self.found("/nonexistent:"), [message])
-        # The same directory when it is not the workspace.
-        environ = {"PATH": os.environ["PATH"], "GITHUB_WORKSPACE": str(self.root / "elsewhere"), "LD_LIBRARY_PATH": str(inside)}
-        self.assertEqual(tripwires.environment_violations(environ, (self.name,)), [])
-
-
-@unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "needs bash")
 class ScriptLaunchTests(unittest.TestCase):
     """Every step that starts a script of its action, started as the runner
     starts it, on a PATH whose first bash is one a pull request placed. The
@@ -624,7 +538,7 @@ class CompositeStepTests(unittest.TestCase):
         title = "x::forged\n::add-mask::swallowed\n::error title=y"
         code, text = self.run_step("no-option HOSTILE", PATH="ROOT/work/bin", TRIPWIRES_TITLE=title)
         self.assertEqual(code, 1)
-        self.assertIn("::error title=tripwires::this runner has no Python 3.9+", text)
+        self.assertIn("::error title=tripwires: tripwires could not run::this runner has no Python 3.9+", text)
         self.assertNotIn("forged", text)
         self.assertNotIn("add-mask", text)
 
@@ -806,6 +720,18 @@ class CommandLine(unittest.TestCase):
                 self.assertEqual(code, 2)
                 self.assertTrue(text.startswith("::error title=unit: tripwires could not run::"), text)
                 self.assertEqual(output, "")
+
+    def test_an_error_in_a_check_fails_closed_without_its_message(self):
+        def broken(value, label, arguments, environ):
+            raise RuntimeError("secret-value")
+
+        with mock.patch.dict(tripwires.CHECKS, {"no-option": (broken, False)}):
+            code, text, output = self.run_main("no-option ref", {"ref": "main"})
+        self.assertEqual(code, 2)
+        self.assertTrue(text.startswith("::error title=unit: tripwires could not run::internal error"), text)
+        self.assertIn("RuntimeError", text)
+        self.assertNotIn("secret-value", text)
+        self.assertEqual(output, "")
 
     def test_a_spec_error_names_its_line(self):
         _, text, _ = self.run_main("no-option ref\n\nbogus ref", {"ref": "main"})

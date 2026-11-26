@@ -354,6 +354,11 @@ one job.
 
 ## Security notes
 
+- The action protects its own requests. It cannot protect a job that also runs
+  untrusted code: every step of a job with `id-token: write` can ask for the
+  OIDC token and log in to Vault itself. Read secrets in a job that runs no
+  code from a pull request. See
+  [Keep untrusted code and secrets in different jobs](../tripwires/README.md#keep-untrusted-code-and-secrets-in-different-jobs).
 - Inputs reach the shell only through `env:`.
 - The action does not export values to the job environment (`exportEnv: false`).
 - Third-party actions are pinned by commit SHA.
