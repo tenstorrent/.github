@@ -5,7 +5,8 @@
 # output name rule: prepare.sh accepts a `secrets` value that only contains the
 # reserved name, and refuses a value that uses it as an output name. Checks
 # the role resolution (default, short and full names) and its refusals, and
-# the github-token resolution (key, full name, full path) and its refusals.
+# the github-token resolution (key, full name, full path) and its refusals,
+# and the github-token list (release 1.2) and its refusals.
 # Uses no token and no secret.
 set -euo pipefail
 
@@ -136,8 +137,8 @@ refuses_with 'token name with ;' 'input github-token is not a valid token name o
   'IN_GITHUB_TOKEN=bad;name'
 refuses_with 'token path with //' 'input github-token is not a valid token name or path' \
   IN_GITHUB_TOKEN=github//token
-refuses_with 'token key with a space' 'input github-token is not a valid token name or path' \
-  'IN_GITHUB_TOKEN=contents read'
+# Release 1.2: a blank separates two entries, so 'contents read' is a list of
+# two keys (see the list cases below). A tab in a key is the same.
 refuses_with 'token key that starts with -' 'input github-token is not a valid token name or path' \
   IN_GITHUB_TOKEN=-x
 refuses_with 'token key that starts with .' 'input github-token is not a valid token name or path' \
@@ -270,6 +271,89 @@ token_is 'short key and secrets' tenstorrent/.github contents-read "$kv ;" \
 token_is 'full path and secrets' tenstorrent/.github "$path_token" "$kv" \
   '' "$kv ;${nl}${token_line}"
 token_is 'secrets only' tenstorrent/.github '' "$kv" '' "$kv"
+
+# ── github-token list (release 1.2) ─────────────────────────────────────────
+# Fails unless prepare.sh, with IN_GITHUB_TOKEN=$2 and IN_SECRETS=$3, writes
+# token-set=$4 (the first entry), the token-list $5 (JSON) and the spec $6.
+list_is() {
+  local title="$1" in="$2" secrets="$3" want_set="$4" want_list="$5" want_spec="$6" got_list
+  run_env IN_GITHUB_TOKEN="$in" IN_SECRETS="$secrets"
+  got_list="$(sed -n 's/^token-list=//p' "$work/out")"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error::github-token list $title: prepare.sh failed (exit $rc), expected exit 0"
+    cat "$work/log"
+    status=1
+  elif ! grep -q -x -F -- "token-set=$want_set" "$work/out"; then
+    echo "::error::github-token list $title: expected token-set=$want_set"
+    grep -E '^token-set=' "$work/out" || true
+    status=1
+  elif ! jq -e --argjson want "$want_list" '. == $want' <<<"${got_list:-null}" >/dev/null 2>&1; then
+    echo "::error::github-token list $title: token-list is '$got_list', expected '$want_list'"
+    status=1
+  elif [ "$spec" != "$want_spec" ]; then
+    echo "::error::github-token list $title: spec output is not as expected"
+    printf 'got:\n%s\nwant:\n%s\n' "$spec" "$want_spec"
+    status=1
+  elif [ -s "$work/log" ]; then
+    echo "::error::github-token list $title: prepare.sh printed a message"
+    cat "$work/log"
+    status=1
+  else
+    echo "OK: github-token list $title gives $(jq -r '[.[].key] | join(" ")' <<<"$got_list")"
+  fi
+}
+p='tenstorrent--.github--'
+two="[{\"set\":\"${p}contents-read\",\"key\":\"contents-read\",\"input\":\"contents-read\"},{\"set\":\"${p}metadata-read\",\"key\":\"metadata-read\",\"input\":\"metadata-read\"}]"
+list_is 'new lines' "contents-read${nl}metadata-read" '' "${p}contents-read" "$two" ''
+list_is 'commas' 'contents-read,metadata-read' '' "${p}contents-read" "$two" ''
+list_is 'commas and blanks' ' contents-read , metadata-read ' '' "${p}contents-read" "$two" ''
+list_is 'blanks only' 'contents-read metadata-read' '' "${p}contents-read" "$two" ''
+list_is 'tab' $'contents-read\tmetadata-read' '' "${p}contents-read" "$two" ''
+list_is 'empty lines and a trailing comma' "${nl}contents-read,${nl}${nl}  metadata-read,${nl}" '' \
+  "${p}contents-read" "$two" ''
+list_is 'YAML block with indent' "  contents-read${nl}  metadata-read${nl}" "$kv" "${p}contents-read" "$two" "$kv"
+list_is 'order is kept' "metadata-read${nl}contents-read" '' "${p}metadata-read" \
+  "$(jq -c 'reverse' <<<"$two")" ''
+list_is 'full name and upper case' "${p}contents-read${nl}Metadata-Read" '' "${p}contents-read" \
+  "[{\"set\":\"${p}contents-read\",\"key\":\"contents-read\",\"input\":\"${p}contents-read\"},{\"set\":\"${p}metadata-read\",\"key\":\"metadata-read\",\"input\":\"Metadata-Read\"}]" ''
+list_is 'former space case: two keys' 'contents read' '' "${p}contents" \
+  "[{\"set\":\"${p}contents\",\"key\":\"contents\",\"input\":\"contents\"},{\"set\":\"${p}read\",\"key\":\"read\",\"input\":\"read\"}]" ''
+ten="$(printf 'k%s\n' 1 2 3 4 5 6 7 8 9 10)"
+list_is 'ten keys (the maximum)' "$ten" '' "${p}k1" \
+  "$(printf '%s\n' "$ten" | jq -R -s -c --arg p "$p" '[split("\n")[] | select(. != "") | {set: ($p + .), key: ., input: .}]')" ''
+# One entry, also with separators around it, is the value of release 1.1.
+list_is 'one entry with a trailing comma' 'contents-read,' '' "${p}contents-read" \
+  "[{\"set\":\"${p}contents-read\",\"key\":\"contents-read\",\"input\":\"contents-read\"}]" ''
+list_is 'one entry on its own line' "${nl}contents-read${nl}" '' "${p}contents-read" \
+  "[{\"set\":\"${p}contents-read\",\"key\":\"contents-read\",\"input\":\"contents-read\"}]" ''
+token_is 'one path with a trailing new line' tenstorrent/.github "${path_token}${nl}" '' '' "$token_line"
+refuses_with 'nothing to get, github-token only commas' 'nothing to get' \
+  'IN_GITHUB_TOKEN= , ,' IN_SECRETS=
+
+refuses_with 'list with a path' \
+  'entry 2 of input github-token is a Vault path. A list in github-token takes token keys only, for example contents-read. Put a Vault path in secrets.' \
+  "IN_GITHUB_TOKEN=contents-read${nl}${path_token}"
+refuses_with 'list with a path first' 'entry 1 of input github-token is a Vault path.' \
+  "IN_GITHUB_TOKEN=${path_token},contents-read"
+refuses_with 'list with a duplicate key' \
+  'input github-token has the token contents-read more than one time. Give each token key one time.' \
+  "IN_GITHUB_TOKEN=contents-read${nl}metadata-read${nl}contents-read"
+refuses_with 'list with a key and its full name' 'has the token contents-read more than one time' \
+  "IN_GITHUB_TOKEN=Contents-Read,${p}contents-read"
+refuses_with 'list with a token of another repository' \
+  "entry 'tenstorrent--other--contents-read' of input github-token is not a token of tenstorrent/.github. Its token names start with tenstorrent--.github--." \
+  "IN_GITHUB_TOKEN=contents-read${nl}tenstorrent--other--contents-read"
+refuses_with 'list with a token of another org' \
+  "entry 'other--.github--x' of input github-token is not a token of tenstorrent/.github" \
+  'IN_GITHUB_TOKEN=other--.github--x,contents-read'
+refuses_with 'list with a bad key' \
+  "entry 2 of input github-token is not a valid token name. Allowed: letters, digits, '.', '_', '-'." \
+  "IN_GITHUB_TOKEN=contents-read${nl}bad;name"
+refuses_with 'list with a key that ends with -' \
+  "entry 'x-' of input github-token does not give a valid token name (tenstorrent--.github--x-)." \
+  'IN_GITHUB_TOKEN=contents-read,x-'
+refuses_with 'list with eleven keys' 'input github-token has 11 entries. The maximum is 10.' \
+  "IN_GITHUB_TOKEN=${ten}${nl}k11"
 
 # Fails unless prepare.sh refuses to run without $1 on PATH. The PATH holds
 # links to the other tools that prepare.sh and this test need.

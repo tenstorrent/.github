@@ -20,6 +20,10 @@ inputs:
       also works. A name of another repository is refused. Still accepted (1.0
       form): a value with `/` is a full Vault path and is read as is.
       The token goes to output `token`.
+      Since release 1.2: more than one key (at most 10), separated by new lines,
+      commas or blanks. Then each entry must be a key or a full name of this
+      repository (no `/`), each key one time. Output `token` gets the token of
+      the first entry, output `tokens` gets all of them.
     required: false
     default: ""
   secrets:
@@ -78,14 +82,23 @@ inputs:
       of the Vault login has its own limit of 15 seconds; the OIDC token request
       is tried up to 3 times.
       The read of a github-token without `/` is not under this limit: it sends
-      at most 3 requests of 15 seconds each.
+      at most 3 requests of 15 seconds each for each token key.
     required: false
     default: "120"
 
 outputs:
   token:
-    description: The GitHub token from `github-token`. Empty when `github-token` is not set or the action failed. Masked in logs.
+    description: >-
+      The GitHub token from `github-token` (with a list: of the first entry).
+      Empty when `github-token` is not set or the action failed. Masked in logs.
     value: ${{ steps.check.outcome == 'success' && (steps.token.outputs.token || steps.vault.outputs.VAULT_SECRETS_GITHUB_TOKEN) || '' }}
+  tokens:
+    description: >-
+      Since release 1.2. JSON object with one key per token key in `github-token`
+      (the short key, also for a full name). Read a token with
+      `fromJSON(steps.<id>.outputs.tokens)['<key>']`. `{}` when `github-token`
+      is not set or is a Vault path, or when the action failed. Values are masked in logs.
+    value: ${{ steps.check.outcome == 'success' && steps.check.outputs.tokens || '{}' }}
   secrets:
     description: >-
       JSON object with one key per name in `secrets`. When `github-token` is set,
@@ -169,7 +182,8 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/login.sh"
 
     # Only for github-token without '/': finds the engine of the token set and
-    # reads the token, 15 seconds for each request. A request that curl sent is
+    # reads the token, 15 seconds for each request. With a list (release 1.2):
+    # each token set in turn, all or nothing. A request that curl sent is
     # not sent again. A request that curl did not send gets a new try, up to
     # 3 tries for each engine. The
     # first success is the token: vault-action does not read it again. Masks the
@@ -183,6 +197,7 @@ runs:
         VAULT_TOKEN: ${{ steps.login.outputs.vault-token }}
         TOKEN_SET: ${{ steps.prepare.outputs.token-set }}
         TOKEN_INPUT: ${{ inputs.github-token }}
+        TOKEN_LIST: ${{ steps.prepare.outputs.token-list }}
         ROLE: ${{ steps.prepare.outputs.role }}
         REPOSITORY: ${{ github.repository }}
         VAULT_PROXY: ${{ steps.prepare.outputs.proxy-url }}
@@ -238,11 +253,14 @@ runs:
     # Vault can hold an empty string, and vault-action passes it on without an
     # error. An empty value is always an error here. Names only in the log.
     # Writes output secrets: the vault-action outputs plus the token of the
-    # token step under VAULT_SECRETS_GITHUB_TOKEN.
+    # token step under VAULT_SECRETS_GITHUB_TOKEN. Writes output tokens, and
+    # checks that every token of a github-token list is there and not empty.
     - name: Check that no value is empty
       id: check
       shell: bash
       env:
         VAULT_OUTPUTS: ${{ toJSON(steps.vault.outputs) }}
         TOKEN_VALUE: ${{ steps.token.outputs.token }}
+        TOKEN_LIST: ${{ steps.prepare.outputs.token-list }}
+        TOKENS_VALUE: ${{ steps.token.outputs.tokens }}
       run: bash "$GITHUB_ACTION_PATH/check-values.sh"
