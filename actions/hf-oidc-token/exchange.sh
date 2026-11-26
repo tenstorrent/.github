@@ -142,6 +142,7 @@ tripwires_here="${BASH_SOURCE[0]%/*}"
 trusted_python_names=python3
 # shellcheck source=/dev/null
 . "$tripwires_here/../tripwires/trusted-python.sh"
+# shellcheck disable=SC2154 # Set by the file above.
 [[ -n "$trusted_python" ]] || { printf '::error title=%s: checks could not run::%s\n' hf-oidc-token "$trusted_python_problem"; exit 1; }
 (
   POSIXLY_CORRECT=1
